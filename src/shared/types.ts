@@ -9,6 +9,18 @@ export interface AgentSettings {
   theme: "light" | "dark";
 }
 
+export interface AiConfigurationProfile {
+  id: string;
+  name: string;
+  provider: Provider;
+  apiBaseUrl: string;
+  apiKey: string;
+  model: string;
+  maxSteps: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export type RiskLevel = "low" | "medium" | "high";
 
 export type AgentActionType =
@@ -88,12 +100,12 @@ export interface SafetyDecision {
   reason: string;
 }
 
-export type PopupToBackgroundMessage =
-  | { type: "POPUP_RUN_TASK"; task: string }
-  | { type: "POPUP_STOP_TASK" }
-  | { type: "POPUP_GET_STATE" };
+export type SidePanelToBackgroundMessage =
+  | { type: "SIDEPANEL_RUN_TASK"; task: string }
+  | { type: "SIDEPANEL_STOP_TASK" }
+  | { type: "SIDEPANEL_GET_STATE" };
 
-export type BackgroundToPopupMessage =
+export type BackgroundToSidePanelMessage =
   | { type: "AGENT_LOG"; entry: AgentLogEntry }
   | { type: "AGENT_STATUS"; running: boolean; taskId?: string };
 

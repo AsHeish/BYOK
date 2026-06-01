@@ -4,8 +4,8 @@ import { loadSettings, saveSettings } from "../shared/storage";
 import type {
   AgentLogEntry,
   AgentSettings,
-  BackgroundToPopupMessage,
-  PopupToBackgroundMessage
+  BackgroundToSidePanelMessage,
+  SidePanelToBackgroundMessage
 } from "../shared/types";
 import { ActionLog } from "./components/ActionLog";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -22,14 +22,14 @@ export function App() {
 
   useEffect(() => {
     void loadSettings().then(setSettings);
-    void sendBackgroundMessage({ type: "POPUP_GET_STATE" }).then((state) => {
+    void sendBackgroundMessage({ type: "SIDEPANEL_GET_STATE" }).then((state) => {
       if (isAgentState(state)) {
         setRunning(state.running);
         setLogs(filterLegacyApprovalLogs(state.logs));
       }
     });
 
-    const listener = (message: BackgroundToPopupMessage) => {
+    const listener = (message: BackgroundToSidePanelMessage) => {
       if (message.type === "AGENT_LOG") {
         if (!isLegacyApprovalLog(message.entry.message)) {
           setLogs((current) => [...current, message.entry].slice(-80));
@@ -68,11 +68,11 @@ export function App() {
 
   async function handleRun(task: string) {
     setNotice(undefined);
-    await sendBackgroundMessage({ type: "POPUP_RUN_TASK", task });
+    await sendBackgroundMessage({ type: "SIDEPANEL_RUN_TASK", task });
   }
 
   async function handleStop() {
-    await sendBackgroundMessage({ type: "POPUP_STOP_TASK" });
+    await sendBackgroundMessage({ type: "SIDEPANEL_STOP_TASK" });
   }
 
   return (
@@ -97,7 +97,7 @@ export function App() {
             </span>
             <span>{theme === "dark" ? "Dark" : "Light"}</span>
           </button>
-          <nav className="tabs" aria-label="Popup views">
+          <nav className="tabs" aria-label="Side panel views">
             <button className={view === "run" ? "active" : ""} onClick={() => setView("run")}>
               Run
             </button>
@@ -122,7 +122,7 @@ export function App() {
   );
 }
 
-function sendBackgroundMessage(message: PopupToBackgroundMessage): Promise<unknown> {
+function sendBackgroundMessage(message: SidePanelToBackgroundMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(message, (response) => {
       const error = chrome.runtime.lastError;

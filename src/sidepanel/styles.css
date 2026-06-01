@@ -61,18 +61,26 @@
 }
 
 html {
+  width: 100%;
+  height: 100%;
+  min-width: 360px;
   background: var(--bg);
 }
 
 body {
-  width: 430px;
-  min-width: 430px;
-  max-width: 430px;
-  height: 640px;
-  min-height: 640px;
+  width: 100%;
+  height: 100%;
+  min-width: 360px;
+  min-height: 0;
   margin: 0;
   overflow: hidden;
   background: var(--bg);
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+  min-width: 360px;
 }
 
 button,
@@ -97,9 +105,11 @@ button:disabled {
   flex-direction: column;
   gap: 12px;
   width: 100%;
-  height: 640px;
-  min-height: 640px;
+  height: 100%;
+  min-width: 360px;
+  min-height: 0;
   padding: 16px;
+  overflow: hidden;
   background: var(--bg);
 }
 
@@ -108,6 +118,7 @@ button:disabled {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
   padding: 2px 0 4px;
 }
 
@@ -154,6 +165,7 @@ button:disabled {
 .top-actions {
   display: flex;
   align-items: flex-end;
+  flex: 1 1 180px;
   flex-direction: column;
   gap: 8px;
 }
@@ -202,6 +214,7 @@ button:disabled {
 .tabs {
   display: inline-grid;
   grid-template-columns: 1fr 1fr;
+  width: 100%;
   min-width: 172px;
   padding: 4px;
   border: 1px solid var(--border);
@@ -263,6 +276,16 @@ button:disabled {
   gap: 11px;
 }
 
+.profile-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
 label {
   display: flex;
   flex-direction: column;
@@ -316,6 +339,13 @@ select:focus {
   align-items: center;
 }
 
+.inline-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
 .primary-button,
 .danger-button,
 .secondary-button {
@@ -351,6 +381,17 @@ select:focus {
   transform: translateY(-1px);
 }
 
+.subtle-danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+  box-shadow: none;
+}
+
+.subtle-danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: #ffffff;
+}
+
 .secondary-button {
   background: var(--surface-strong);
   color: var(--text);
@@ -368,12 +409,24 @@ select:focus {
   line-height: 1.45;
 }
 
+.profile-notice {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
 .section-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 10px;
+}
+
+.compact-heading {
+  margin-bottom: 0;
 }
 
 .section-heading h2 {

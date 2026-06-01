@@ -1,42 +1,42 @@
 # BYOK AI Browser Agent
 
-A minimal Manifest V3 Chrome/Edge extension that runs a bring-your-own-key AI browser agent. The user configures an OpenAI-compatible or Gemini-compatible API endpoint, enters a task, and the extension observes the current page, asks the model for one JSON action, validates it, executes it, and repeats until done or stopped.
+A minimal Manifest V3 Chrome/Edge side-panel extension that runs a bring-your-own-key AI browser agent. The user configures an OpenAI-compatible, Gemini-compatible, Groq, or custom API endpoint, enters a task, and the extension observes the current page, asks the model for one JSON action, validates it, executes it, and repeats until done or stopped.
 
 ## File Tree
 
 ```text
 .
-├── index.html
-├── package.json
-├── public
-│   └── manifest.json
-├── src
-│   ├── background
-│   │   ├── chromeAsync.ts
-│   │   ├── index.ts
-│   │   ├── modelClient.ts
-│   │   ├── prompts.ts
-│   │   └── safety.ts
-│   ├── content
-│   │   ├── actions.ts
-│   │   ├── domMap.ts
-│   │   └── index.ts
-│   ├── popup
-│   │   ├── App.tsx
-│   │   ├── components
-│   │   │   ├── ActionLog.tsx
-│   │   │   ├── ConfirmationCard.tsx
-│   │   │   ├── SettingsPanel.tsx
-│   │   │   └── TaskRunner.tsx
-│   │   ├── main.tsx
-│   │   └── styles.css
-│   └── shared
-│       ├── defaults.ts
-│       ├── ids.ts
-│       ├── storage.ts
-│       └── types.ts
-├── tsconfig.json
-└── vite.config.ts
+|-- index.html
+|-- sidepanel.html
+|-- package.json
+|-- public
+|   `-- manifest.json
+|-- src
+|   |-- background
+|   |   |-- chromeAsync.ts
+|   |   |-- index.ts
+|   |   |-- modelClient.ts
+|   |   |-- prompts.ts
+|   |   `-- safety.ts
+|   |-- content
+|   |   |-- actions.ts
+|   |   |-- domMap.ts
+|   |   `-- index.ts
+|   |-- sidepanel
+|   |   |-- App.tsx
+|   |   |-- components
+|   |   |   |-- ActionLog.tsx
+|   |   |   |-- SettingsPanel.tsx
+|   |   |   `-- TaskRunner.tsx
+|   |   |-- main.tsx
+|   |   `-- styles.css
+|   `-- shared
+|       |-- defaults.ts
+|       |-- ids.ts
+|       |-- storage.ts
+|       `-- types.ts
+|-- tsconfig.json
+`-- vite.config.ts
 ```
 
 ## Setup
@@ -53,18 +53,20 @@ Then load the extension:
 3. Enable Developer mode.
 4. Choose **Load unpacked**.
 5. Select the generated `dist` folder.
+6. Click the extension icon to open the browser's right-side side panel.
 
 For local iteration, run `npm run build` after changes and reload the unpacked extension.
 
 ## Provider Settings
 
-The popup settings support:
+The side-panel settings support:
 
 - `provider`: OpenAI-compatible, Gemini-compatible, Groq, or custom.
 - `apiBaseUrl`: defaults to `https://api.openai.com/v1`, `https://generativelanguage.googleapis.com/v1beta/openai`, or `https://api.groq.com/openai/v1`.
 - `apiKey`: stored with `chrome.storage.local`.
 - `model`: any model name accepted by the configured compatible endpoint.
 - `maxSteps`: maximum observe/act loop iterations.
+- Named AI profiles: save the current provider/base URL/API key/model/max steps under a name, then apply or delete profiles from Settings.
 
 The extension uses `fetch` against `POST {apiBaseUrl}/chat/completions` with OpenAI-compatible chat-completions JSON. No paid SDK is used.
 
@@ -107,5 +109,4 @@ Supported action types are `click`, `type`, `select`, `scroll`, `navigate`, `ext
 - Only `http` and `https` pages are supported.
 - Browser internal pages, extension store pages, some PDFs, and restricted pages cannot be controlled.
 - The DOM mapper is intentionally small and visible-element focused.
-- Confirmation state is kept in the service worker while it is active.
 - Strong API-key encryption is not implemented because no user-held secret is collected.

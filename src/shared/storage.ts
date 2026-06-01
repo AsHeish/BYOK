@@ -1,8 +1,9 @@
 import { DEFAULT_SETTINGS } from "./defaults";
-import type { AgentSettings, Provider } from "./types";
+import type { AgentSettings, AiConfigurationProfile, Provider } from "./types";
 
 const SETTINGS_KEY = "byokAgentSettings";
 const TASK_DRAFT_KEY = "byokAgentTaskDraft";
+const CONFIG_PROFILES_KEY = "byokAgentConfigProfiles";
 
 function normalizeProvider(value: unknown): Provider {
   if (value === "openai" || value === "gemini" || value === "groq" || value === "custom") {
@@ -48,4 +49,103 @@ export async function saveTaskDraft(task: string): Promise<void> {
   await chrome.storage.local.set({
     [TASK_DRAFT_KEY]: task
   });
+}
+
+export async function loadConfigurationProfiles(): Promise<AiConfigurationProfile[]> {
+  const stored = await chrome.storage.local.get(CONFIG_PROFILES_KEY);
+  return normalizeProfiles(stored[CONFIG_PROFILES_KEY]);
+}
+
+export async function saveConfigurationProfile(
+  name: string,
+  settings: AgentSettings
+): Promise<AiConfigurationProfile[]> {
+  const trimmedName = name.trim();
+  if (!trimmedName) {
+    throw new Error("Profile name is required.");
+  }
+
+  const profiles = await loadConfigurationProfiles();
+  const now = Date.now();
+  const existing = profiles.find((profile) => profile.name.toLowerCase() === trimmedName.toLowerCase());
+  const savedProfile: AiConfigurationProfile = {
+    id: existing?.id || createProfileId(),
+    name: trimmedName,
+    provider: settings.provider,
+    apiBaseUrl: settings.apiBaseUrl.replace(/\/+$/, ""),
+    apiKey: settings.apiKey,
+    model: settings.model,
+    maxSteps: Math.min(Math.max(settings.maxSteps, 1), 30),
+    createdAt: existing?.createdAt || now,
+    updatedAt: now
+  };
+
+  const nextProfiles = existing
+    ? profiles.map((profile) => (profile.id === existing.id ? savedProfile : profile))
+    : [...profiles, savedProfile];
+
+  await chrome.storage.local.set({
+    [CONFIG_PROFILES_KEY]: nextProfiles
+  });
+  return nextProfiles;
+}
+
+export async function deleteConfigurationProfile(profileId: string): Promise<AiConfigurationProfile[]> {
+  const profiles = await loadConfigurationProfiles();
+  const nextProfiles = profiles.filter((profile) => profile.id !== profileId);
+  await chrome.storage.local.set({
+    [CONFIG_PROFILES_KEY]: nextProfiles
+  });
+  return nextProfiles;
+}
+
+export function applyConfigurationProfile(
+  settings: AgentSettings,
+  profile: AiConfigurationProfile
+): AgentSettings {
+  return {
+    ...settings,
+    provider: profile.provider,
+    apiBaseUrl: profile.apiBaseUrl,
+    apiKey: profile.apiKey,
+    model: profile.model,
+    maxSteps: profile.maxSteps
+  };
+}
+
+function normalizeProfiles(value: unknown): AiConfigurationProfile[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((profile): AiConfigurationProfile | undefined => {
+      if (!profile || typeof profile !== "object") {
+        return undefined;
+      }
+
+      const raw = profile as Partial<AiConfigurationProfile>;
+      const name = String(raw.name || "").trim();
+      if (!name) {
+        return undefined;
+      }
+
+      return {
+        id: String(raw.id || createProfileId()),
+        name,
+        provider: normalizeProvider(raw.provider),
+        apiBaseUrl: String(raw.apiBaseUrl || DEFAULT_SETTINGS.apiBaseUrl).replace(/\/+$/, ""),
+        apiKey: String(raw.apiKey || ""),
+        model: String(raw.model || DEFAULT_SETTINGS.model),
+        maxSteps: Math.min(Math.max(Number(raw.maxSteps || DEFAULT_SETTINGS.maxSteps), 1), 30),
+        createdAt: Number(raw.createdAt || Date.now()),
+        updatedAt: Number(raw.updatedAt || Date.now())
+      };
+    })
+    .filter((profile): profile is AiConfigurationProfile => Boolean(profile))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function createProfileId(): string {
+  return `profile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }

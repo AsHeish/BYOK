@@ -1,5 +1,5 @@
 import { buildAgentMessages } from "./prompts";
-import { getActiveTab, notifyPopup, sendTabMessage, sleep, tryInjectContentScript } from "./chromeAsync";
+import { getActiveTab, notifySidePanel, sendTabMessage, sleep, tryInjectContentScript } from "./chromeAsync";
 import { ModelClientError, requestAgentStep } from "./modelClient";
 import { validateAgentAction } from "./safety";
 import { MAX_LOG_ENTRIES } from "../shared/defaults";
@@ -9,10 +9,10 @@ import type {
   AgentAction,
   AgentLogEntry,
   AgentModelResponse,
-  BackgroundToPopupMessage,
+  BackgroundToSidePanelMessage,
   ContentActionResult,
   PageObservation,
-  PopupToBackgroundMessage
+  SidePanelToBackgroundMessage
 } from "../shared/types";
 
 interface RunningSession {
@@ -24,7 +24,23 @@ interface RunningSession {
 let runningSession: RunningSession | undefined;
 let logs: AgentLogEntry[] = [];
 
-chrome.runtime.onMessage.addListener((message: PopupToBackgroundMessage, _sender, sendResponse) => {
+const SIDE_PANEL_PATH = "sidepanel.html";
+
+configureSidePanelSafely();
+
+chrome.runtime.onInstalled.addListener(() => {
+  configureSidePanelSafely();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  configureSidePanelSafely();
+});
+
+chrome.action.onClicked.addListener((tab) => {
+  void openSidePanel(tab);
+});
+
+chrome.runtime.onMessage.addListener((message: SidePanelToBackgroundMessage, _sender, sendResponse) => {
   void handleRuntimeMessage(message)
     .then(sendResponse)
     .catch((error: unknown) => {
@@ -39,17 +55,49 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
-async function handleRuntimeMessage(message: PopupToBackgroundMessage): Promise<unknown> {
+function configureSidePanelSafely(): void {
+  void configureSidePanel().catch((error: unknown) => {
+    console.warn("Could not configure side panel.", error);
+  });
+}
+
+async function configureSidePanel(): Promise<void> {
+  if (!chrome.sidePanel) {
+    return;
+  }
+
+  // MV3 side panels are browser-owned UI. We only register the extension page and
+  // toolbar behavior; Chrome/Edge owns the panel host, position, and width.
+  if (chrome.sidePanel.setOptions) {
+    await chrome.sidePanel.setOptions({ path: SIDE_PANEL_PATH, enabled: true });
+  }
+
+  if (chrome.sidePanel.setPanelBehavior) {
+    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  }
+}
+
+async function openSidePanel(tab: chrome.tabs.Tab): Promise<void> {
+  if (!chrome.sidePanel?.open) {
+    return;
+  }
+
+  if (typeof tab.windowId === "number") {
+    await chrome.sidePanel.open({ windowId: tab.windowId });
+  }
+}
+
+async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Promise<unknown> {
   switch (message.type) {
-    case "POPUP_RUN_TASK":
+    case "SIDEPANEL_RUN_TASK":
       void startTask(message.task);
       return { ok: true };
 
-    case "POPUP_STOP_TASK":
+    case "SIDEPANEL_STOP_TASK":
       stopCurrentTask("Stopped by user.");
       return { ok: true };
 
-    case "POPUP_GET_STATE":
+    case "SIDEPANEL_GET_STATE":
       return {
         running: Boolean(runningSession && !runningSession.stopped),
         logs: logs.filter((entry) => !isLegacyApprovalLog(entry.message))
@@ -216,7 +264,7 @@ function appendLog(level: AgentLogEntry["level"], message: string): void {
   };
 
   logs = [...logs, entry].slice(-MAX_LOG_ENTRIES);
-  notifyPopup({ type: "AGENT_LOG", entry } satisfies BackgroundToPopupMessage);
+  notifySidePanel({ type: "AGENT_LOG", entry } satisfies BackgroundToSidePanelMessage);
 }
 
 function isLegacyApprovalLog(message: string): boolean {
@@ -226,11 +274,11 @@ function isLegacyApprovalLog(message: string): boolean {
 }
 
 function emitStatus(): void {
-  notifyPopup({
+  notifySidePanel({
     type: "AGENT_STATUS",
     running: Boolean(runningSession && !runningSession.stopped),
     taskId: runningSession?.taskId
-  } satisfies BackgroundToPopupMessage);
+  } satisfies BackgroundToSidePanelMessage);
 }
 
 function isStopped(taskId: string): boolean {

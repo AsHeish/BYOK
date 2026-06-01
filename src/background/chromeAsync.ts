@@ -44,9 +44,9 @@ export async function tryInjectContentScript(tabId: number): Promise<void> {
   });
 }
 
-export function notifyPopup(message: unknown): void {
+export function notifySidePanel(message: unknown): void {
   chrome.runtime.sendMessage(message, () => {
-    // It is normal for this to fail when the popup is closed.
+    // It is normal for this to fail when the side panel is closed.
     void chrome.runtime.lastError;
   });
 }
