@@ -2,17 +2,48 @@ import { extractPageData, getMappedElement, isSensitiveElement, observePage } fr
 import type { AgentAction, ContentActionResult } from "../shared/types";
 
 type ElementLookup = { ok: true; value: HTMLElement } | { ok: false; message: string };
+type TextEditableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
+
+const textEditableSelector = [
+  "input:not([type='hidden']):not([type='button']):not([type='submit']):not([type='reset']):not([type='checkbox']):not([type='radio']):not([type='file'])",
+  "textarea",
+  "[contenteditable='true']"
+].join(",");
+
+const keyboardFocusableSelector = [
+  textEditableSelector,
+  "select:not([disabled])",
+  "button:not([disabled])",
+  "a[href]",
+  "[role='button']",
+  "[role='checkbox']",
+  "[role='radio']",
+  "[role='switch']",
+  "[role='combobox']",
+  "[role='textbox']",
+  "[tabindex]:not([tabindex='-1'])",
+  ".MuiInputBase-root",
+  ".MuiOutlinedInput-root",
+  ".MuiFilledInput-root",
+  ".MuiFormControl-root",
+  ".MuiAutocomplete-root",
+  ".MuiSelect-root"
+].join(",");
 
 export async function executeAction(action: AgentAction): Promise<ContentActionResult> {
   switch (action.type) {
     case "click":
       return withFreshObservation(clickElement(action.elementId));
 
+    case "fill":
     case "type":
       return withFreshObservation(typeIntoElement(action.elementId, action.text || ""));
 
     case "select":
       return withFreshObservation(selectOption(action.elementId, action.text || ""));
+
+    case "press_key":
+      return withFreshObservation(pressKey(action.key || action.text || "Tab", action.elementId));
 
     case "scroll":
       return withFreshObservation(scrollPage(action.direction || "down"));
@@ -44,7 +75,10 @@ export async function executeAction(action: AgentAction): Promise<ContentActionR
   }
 }
 
-async function withFreshObservation(result: ContentActionResult): Promise<ContentActionResult> {
+async function withFreshObservation(
+  resultOrPromise: ContentActionResult | Promise<ContentActionResult>
+): Promise<ContentActionResult> {
+  const result = await resultOrPromise;
   if (!result.ok) {
     return result;
   }
@@ -71,15 +105,23 @@ function clickElement(elementId?: string): ContentActionResult {
   };
 }
 
-function typeIntoElement(elementId: string | undefined, text: string): ContentActionResult {
+async function typeIntoElement(elementId: string | undefined, text: string): Promise<ContentActionResult> {
   const lookup = requireElement(elementId);
   if (!lookup.ok) {
     return lookup;
   }
 
   const element = lookup.value;
+  const editable = await resolveTextEditableTarget(element);
 
-  if (isSensitiveElement(element)) {
+  if (!editable) {
+    return {
+      ok: false,
+      message: "The target element is not editable and no nested editable field became active."
+    };
+  }
+
+  if (isSensitiveElement(element) || isSensitiveElement(editable)) {
     // The background also validates this, but content scripts enforce it at the final trust boundary.
     return {
       ok: false,
@@ -87,38 +129,41 @@ function typeIntoElement(elementId: string | undefined, text: string): ContentAc
     };
   }
 
-  prepareElement(element);
+  prepareElement(editable);
 
-  if (element instanceof HTMLInputElement) {
-    if (element.type === "file") {
-      return {
-        ok: false,
-        message: "File inputs are not supported."
-      };
+  if (editable instanceof HTMLInputElement) {
+    if (hasExistingEditableValue(editable)) {
+      return skipAlreadyFilledField(editable);
     }
-    setNativeValue(element, text);
-    dispatchFormEvents(element);
+    setNativeValue(editable, text);
+    dispatchFormEvents(editable);
     return {
       ok: true,
-      message: `Typed into ${describeElement(element)}.`
+      message: `Typed into ${describeElement(editable)}.`
     };
   }
 
-  if (element instanceof HTMLTextAreaElement) {
-    setNativeValue(element, text);
-    dispatchFormEvents(element);
+  if (editable instanceof HTMLTextAreaElement) {
+    if (hasExistingEditableValue(editable)) {
+      return skipAlreadyFilledField(editable);
+    }
+    setNativeValue(editable, text);
+    dispatchFormEvents(editable);
     return {
       ok: true,
-      message: `Typed into ${describeElement(element)}.`
+      message: `Typed into ${describeElement(editable)}.`
     };
   }
 
-  if (element.isContentEditable) {
-    element.textContent = text;
-    dispatchInputEvent(element);
+  if (editable.isContentEditable) {
+    if (hasExistingEditableValue(editable)) {
+      return skipAlreadyFilledField(editable);
+    }
+    editable.textContent = text;
+    dispatchInputEvent(editable);
     return {
       ok: true,
-      message: `Typed into ${describeElement(element)}.`
+      message: `Typed into ${describeElement(editable)}.`
     };
   }
 
@@ -126,6 +171,269 @@ function typeIntoElement(elementId: string | undefined, text: string): ContentAc
     ok: false,
     message: "The target element is not editable."
   };
+}
+
+async function resolveTextEditableTarget(element: HTMLElement): Promise<TextEditableElement | undefined> {
+  const initialTarget = getTextEditableElement(element) || findNestedTextEditable(element);
+  const activationTarget = getEditableActivationTarget(element, initialTarget);
+
+  if (activationTarget) {
+    activateForTyping(activationTarget);
+    await sleep(90);
+  }
+
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  if (activeElement) {
+    const activeEditable = getTextEditableElement(activeElement) || findNestedTextEditable(activeElement);
+    if (activeEditable && (element.contains(activeEditable) || activeEditable === initialTarget)) {
+      return activeEditable;
+    }
+  }
+
+  return initialTarget || findNestedTextEditable(element);
+}
+
+function getTextEditableElement(element: HTMLElement): TextEditableElement | undefined {
+  if (element instanceof HTMLInputElement && isTextEntryInput(element)) {
+    return element;
+  }
+
+  if (element instanceof HTMLTextAreaElement) {
+    return element;
+  }
+
+  if (element.isContentEditable) {
+    return element;
+  }
+
+  return undefined;
+}
+
+function hasExistingEditableValue(element: TextEditableElement): boolean {
+  const currentValue = getEditableValue(element);
+  return normalizeTypedValue(currentValue).length > 0;
+}
+
+function getEditableValue(element: TextEditableElement): string {
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    return element.value;
+  }
+
+  return element.textContent || "";
+}
+
+function normalizeTypedValue(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function skipAlreadyFilledField(editable: TextEditableElement): ContentActionResult {
+  const nextElement = focusAdjacentElement(false);
+  const advanceMessage = nextElement ? ` Focused next field ${describeElement(nextElement)}.` : "";
+
+  return {
+    ok: true,
+    message: `Skipped typing because ${describeElement(editable)} already has a value.${advanceMessage}`
+  };
+}
+
+function findNestedTextEditable(element: HTMLElement): TextEditableElement | undefined {
+  const nested = element.querySelector<HTMLElement>(textEditableSelector);
+  return nested ? getTextEditableElement(nested) : undefined;
+}
+
+function getEditableActivationTarget(
+  originalElement: HTMLElement,
+  editable?: TextEditableElement
+): HTMLElement | undefined {
+  const labelControl = originalElement instanceof HTMLLabelElement ? originalElement.control : undefined;
+  if (labelControl instanceof HTMLElement) {
+    return originalElement;
+  }
+
+  const wrapper = editable ? findLikelyEditableWrapper(editable, originalElement) : undefined;
+  if (wrapper) {
+    return wrapper;
+  }
+
+  return originalElement;
+}
+
+function findLikelyEditableWrapper(editable: HTMLElement, boundary: HTMLElement): HTMLElement | undefined {
+  let current = editable.parentElement;
+  let depth = 0;
+
+  while (current && current !== document.body && depth < 5) {
+    if (current === boundary || current.contains(boundary) || boundary.contains(current)) {
+      if (isLikelyEditableWrapper(current)) {
+        return current;
+      }
+    }
+    current = current.parentElement;
+    depth += 1;
+  }
+
+  return boundary === editable ? undefined : boundary;
+}
+
+function isLikelyEditableWrapper(element: HTMLElement): boolean {
+  const className = String(element.getAttribute("class") || "");
+  const role = element.getAttribute("role") || "";
+  return (
+    element instanceof HTMLLabelElement ||
+    role === "textbox" ||
+    role === "combobox" ||
+    element.tabIndex >= 0 ||
+    element.hasAttribute("onclick") ||
+    /InputBase|OutlinedInput|FilledInput|FormControl|Autocomplete|Select|TextField|field|input|control/i.test(className)
+  );
+}
+
+function activateForTyping(element: HTMLElement): void {
+  prepareElement(element);
+  dispatchPointerSequence(element);
+  element.click();
+}
+
+function isTextEntryInput(element: HTMLInputElement): boolean {
+  return !["button", "submit", "reset", "checkbox", "radio", "file", "hidden"].includes(element.type);
+}
+
+async function pressKey(key: string, startingElementId?: string): Promise<ContentActionResult> {
+  const normalizedKey = normalizeSupportedKey(key);
+  if (!normalizedKey) {
+    return {
+      ok: false,
+      message: "Only Tab and Shift+Tab key actions are supported."
+    };
+  }
+
+  const startingElementResult = focusStartingElement(startingElementId);
+  if (!startingElementResult.ok) {
+    return startingElementResult;
+  }
+
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : document.body;
+  dispatchKeyboardEvent(activeElement, "keydown", normalizedKey);
+
+  const target = focusAdjacentElement(normalizedKey === "Shift+Tab");
+  if (!target) {
+    dispatchKeyboardEvent(activeElement, "keyup", normalizedKey);
+    return {
+      ok: false,
+      message: "No next focusable element was found."
+    };
+  }
+
+  dispatchKeyboardEvent(target, "keyup", normalizedKey);
+  return {
+    ok: true,
+    message: normalizedKey === "Shift+Tab" ? `Focused previous field ${describeElement(target)}.` : `Focused next field ${describeElement(target)}.`
+  };
+}
+
+function focusStartingElement(elementId?: string): ContentActionResult {
+  if (!elementId) {
+    return {
+      ok: true,
+      message: "Using current focused element."
+    };
+  }
+
+  const lookup = requireElement(elementId);
+  if (!lookup.ok) {
+    return lookup;
+  }
+
+  const focusTarget = getKeyboardFocusTarget(lookup.value) || lookup.value;
+  prepareElement(focusTarget);
+  return {
+    ok: true,
+    message: `Focused ${describeElement(focusTarget)} before key press.`
+  };
+}
+
+function normalizeSupportedKey(key: string): "Tab" | "Shift+Tab" | undefined {
+  const normalized = key.trim().toLowerCase().replace(/\s+/g, "");
+  if (normalized === "tab") {
+    return "Tab";
+  }
+  if (normalized === "shift+tab" || normalized === "shifttab") {
+    return "Shift+Tab";
+  }
+  return undefined;
+}
+
+function focusAdjacentElement(reverse: boolean): HTMLElement | undefined {
+  const focusableElements = getKeyboardFocusableElements();
+  if (focusableElements.length === 0) {
+    return undefined;
+  }
+
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  const currentIndex = activeElement
+    ? focusableElements.findIndex(
+        (element) => element === activeElement || element.contains(activeElement) || activeElement.contains(element)
+      )
+    : -1;
+
+  const fallbackIndex = reverse ? focusableElements.length : -1;
+  const fromIndex = currentIndex >= 0 ? currentIndex : fallbackIndex;
+  const nextIndex = reverse
+    ? (fromIndex - 1 + focusableElements.length) % focusableElements.length
+    : (fromIndex + 1) % focusableElements.length;
+  const nextElement = focusableElements[nextIndex];
+
+  prepareElement(nextElement);
+  return nextElement;
+}
+
+function getKeyboardFocusableElements(): HTMLElement[] {
+  const seen = new Set<HTMLElement>();
+  const focusableElements: HTMLElement[] = [];
+
+  for (const element of Array.from(document.querySelectorAll<HTMLElement>(keyboardFocusableSelector))) {
+    const focusTarget = getKeyboardFocusTarget(element);
+    if (!focusTarget || seen.has(focusTarget) || isDisabled(focusTarget) || !isVisibleElement(focusTarget)) {
+      continue;
+    }
+    seen.add(focusTarget);
+    focusableElements.push(focusTarget);
+  }
+
+  return focusableElements;
+}
+
+function getKeyboardFocusTarget(element: HTMLElement): HTMLElement | undefined {
+  const textEditable = getTextEditableElement(element) || findNestedTextEditable(element);
+  if (textEditable) {
+    return textEditable;
+  }
+
+  if (element instanceof HTMLSelectElement || element instanceof HTMLButtonElement || element instanceof HTMLAnchorElement) {
+    return element;
+  }
+
+  if (element.tabIndex >= 0 || element.hasAttribute("role")) {
+    return element;
+  }
+
+  return undefined;
+}
+
+function dispatchKeyboardEvent(element: HTMLElement, type: "keydown" | "keyup", key: "Tab" | "Shift+Tab"): void {
+  const isShiftTab = key === "Shift+Tab";
+  element.dispatchEvent(
+    new KeyboardEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      key: "Tab",
+      code: "Tab",
+      keyCode: 9,
+      which: 9,
+      shiftKey: isShiftTab
+    })
+  );
 }
 
 function selectOption(elementId: string | undefined, text: string): ContentActionResult {
@@ -253,6 +561,16 @@ function isDisabled(element: HTMLElement): boolean {
   return element.getAttribute("aria-disabled") === "true";
 }
 
+function isVisibleElement(element: HTMLElement): boolean {
+  const style = getComputedStyle(element);
+  if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
+    return false;
+  }
+
+  const rect = element.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+
 function describeElement(element: HTMLElement): string {
   const label =
     element.getAttribute("aria-label") ||
@@ -281,6 +599,10 @@ function activateElement(element: HTMLElement): void {
 function getBestActivationTarget(element: HTMLElement): HTMLElement {
   if (element instanceof HTMLLabelElement && element.control instanceof HTMLElement) {
     return element.control;
+  }
+
+  if (findNestedTextEditable(element) && isLikelyEditableWrapper(element)) {
+    return element;
   }
 
   const labelledControl = element.querySelector<HTMLElement>("input,button,select,textarea,[role='radio'],[role='checkbox']");

@@ -141,6 +141,7 @@ async function startTask(task: string): Promise<void> {
     appendLog("info", `Task started on ${new URL(tab.url).hostname}.`);
 
     let previousResult: string | undefined;
+    const completedInputActions = new Set<string>();
     for (let step = 1; step <= settings.maxSteps; step += 1) {
       if (isStopped(taskId)) {
         break;
@@ -149,10 +150,10 @@ async function startTask(task: string): Promise<void> {
       const observation = await observePage(tab.id);
       appendLog("info", `Observed page: ${observation.title || observation.url}`);
 
-      const modelResponse = await requestAgentStep(
-        settings,
-        buildAgentMessages({ task, observation, step, maxSteps: settings.maxSteps, previousResult })
-      );
+      const messages = buildAgentMessages({ task, observation, step, maxSteps: settings.maxSteps, previousResult });
+      logPromptBeforeModelCall(step, messages);
+
+      const modelResponse = await requestAgentStep(settings, messages);
 
       appendLog("info", `${modelResponse.thought_summary} Next: ${formatAction(modelResponse.action)}.`);
 
@@ -162,7 +163,22 @@ async function startTask(task: string): Promise<void> {
         break;
       }
 
+      const duplicateInputAction = getDuplicateInputAction(modelResponse.action, completedInputActions);
+      if (duplicateInputAction) {
+        const duplicateResult = await handleDuplicateInputAction(tab.id, modelResponse.action, duplicateInputAction);
+        previousResult = duplicateResult.message;
+        appendLog(duplicateResult.ok ? "warning" : "error", duplicateResult.message);
+        if (!duplicateResult.ok || isStopped(taskId)) {
+          break;
+        }
+        await sleep(300);
+        continue;
+      }
+
       const loopResult = await handleValidatedAction(tab.id, modelResponse);
+      if (loopResult.ok) {
+        rememberCompletedInputAction(modelResponse.action, completedInputActions);
+      }
       previousResult = loopResult.message;
       appendLog(loopResult.ok ? "success" : "error", loopResult.message);
 
@@ -267,6 +283,19 @@ function appendLog(level: AgentLogEntry["level"], message: string): void {
   notifySidePanel({ type: "AGENT_LOG", entry } satisfies BackgroundToSidePanelMessage);
 }
 
+function logPromptBeforeModelCall(step: number, messages: ReturnType<typeof buildAgentMessages>): void {
+  const formattedPrompt = formatMessagesForLog(messages);
+  console.groupCollapsed(`[BYOK Agent] Prompt messages for step ${step}`);
+  console.info({ messages });
+  console.info("Messages JSON:", JSON.stringify(messages, null, 2));
+  console.groupEnd();
+  appendLog("info", `Prompt sent to AI (step ${step}):\n\n${formattedPrompt}`);
+}
+
+function formatMessagesForLog(messages: ReturnType<typeof buildAgentMessages>): string {
+  return messages.map((message) => `[${message.role.toUpperCase()}]\n${message.content}`).join("\n\n");
+}
+
 function isLegacyApprovalLog(message: string): boolean {
   return /This page appears to be an assessment|Waiting for|model marked this action as high risk|This looks like a quiz|This looks like a payment/i.test(
     message
@@ -299,11 +328,17 @@ function isSupportedTabUrl(url?: string): url is string {
 }
 
 function formatAction(action: AgentAction): string {
+  if (action.type === "fill") {
+    return `fill ${action.elementId || "element"}`;
+  }
   if (action.type === "type") {
     return `type into ${action.elementId || "element"}`;
   }
   if (action.type === "select") {
     return `select on ${action.elementId || "element"}`;
+  }
+  if (action.type === "press_key") {
+    return `press ${action.key || action.text || "key"}`;
   }
   if (action.type === "click") {
     return `click ${action.elementId || "element"}`;
@@ -315,6 +350,81 @@ function formatAction(action: AgentAction): string {
     return `scroll ${action.direction || "down"}`;
   }
   return action.type;
+}
+
+interface DuplicateInputAction {
+  message: string;
+  shouldAdvanceFocus: boolean;
+}
+
+async function handleDuplicateInputAction(
+  tabId: number,
+  action: AgentAction,
+  duplicate: DuplicateInputAction
+): Promise<{ ok: boolean; message: string }> {
+  if (!duplicate.shouldAdvanceFocus) {
+    return {
+      ok: true,
+      message: duplicate.message
+    };
+  }
+
+  const advanceResult = await executeAction(tabId, {
+    type: "press_key",
+    key: "Tab",
+    elementId: action.elementId
+  });
+
+  if (!advanceResult.ok) {
+    return {
+      ok: false,
+      message: `${duplicate.message} Could not advance automatically: ${advanceResult.message}`
+    };
+  }
+
+  return {
+    ok: true,
+    message: `${duplicate.message} Advanced to the next focusable field. ${advanceResult.message}`
+  };
+}
+
+function getDuplicateInputAction(action: AgentAction, completedInputActions: Set<string>): DuplicateInputAction | undefined {
+  const key = getInputActionKey(action);
+  if (!key || !completedInputActions.has(key)) {
+    return undefined;
+  }
+
+  return {
+    message: `Skipped repeated ${action.type} on ${action.elementId}; that field was already handled.`,
+    shouldAdvanceFocus: action.type === "fill" || action.type === "type"
+  };
+}
+
+function rememberCompletedInputAction(action: AgentAction, completedInputActions: Set<string>): void {
+  const key = getInputActionKey(action);
+  if (key) {
+    completedInputActions.add(key);
+  }
+}
+
+function getInputActionKey(action: AgentAction): string | undefined {
+  if ((action.type !== "fill" && action.type !== "type" && action.type !== "select") || !action.elementId) {
+    return undefined;
+  }
+
+  if (action.type === "fill" || action.type === "type") {
+    return `fill:${action.elementId}`;
+  }
+
+  if (typeof action.text !== "string") {
+    return undefined;
+  }
+
+  return `select:${action.elementId}:${normalizeActionText(action.text)}`;
+}
+
+function normalizeActionText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function getErrorMessage(error: unknown): string {

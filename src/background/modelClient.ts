@@ -92,6 +92,13 @@ async function postChatCompletion(args: {
     body.response_format = { type: "json_object" };
   }
 
+  logAiRequestPayload({
+    endpoint: args.endpoint,
+    provider: args.settings.provider,
+    body,
+    includeResponseFormat: args.includeResponseFormat
+  });
+
   const response = await fetch(args.endpoint, {
     method: "POST",
     signal: args.signal,
@@ -106,6 +113,33 @@ async function postChatCompletion(args: {
     response,
     responseText: await response.text()
   };
+}
+
+function logAiRequestPayload(args: {
+  endpoint: string;
+  provider: AgentSettings["provider"];
+  body: Record<string, unknown>;
+  includeResponseFormat: boolean;
+}): void {
+  const payload = {
+    endpoint: args.endpoint,
+    method: "POST",
+    provider: args.provider,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer [redacted]"
+    },
+    body: args.body
+  };
+
+  console.groupCollapsed(
+    `[BYOK Agent] Full AI request payload (${args.provider}, response_format=${
+      args.includeResponseFormat ? "on" : "off"
+    })`
+  );
+  console.info(payload);
+  console.info("Request body JSON:", JSON.stringify(args.body, null, 2));
+  console.groupEnd();
 }
 
 function shouldRetryWithoutResponseFormat(status: number, body: string): boolean {
@@ -205,7 +239,7 @@ function isAgentModelResponse(value: unknown): value is AgentModelResponse {
     return false;
   }
 
-  const actionTypes = ["click", "type", "select", "scroll", "navigate", "extract", "ask_user", "done"];
+  const actionTypes = ["click", "fill", "type", "select", "press_key", "scroll", "navigate", "extract", "ask_user", "done"];
   return actionTypes.includes(value.action.type);
 }
 

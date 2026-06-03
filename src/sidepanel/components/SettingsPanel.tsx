@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { PROVIDER_DEFAULT_BASE_URLS, PROVIDER_DEFAULT_MODELS } from "../../shared/defaults";
+import {
+  PROVIDER_DEFAULT_BASE_URLS,
+  PROVIDER_DEFAULT_MODELS,
+} from "../../shared/defaults";
 import {
   applyConfigurationProfile,
   deleteConfigurationProfile,
   loadConfigurationProfiles,
   saveConfigurationProfile,
-  saveSettings
+  saveSettings,
 } from "../../shared/storage";
-import type { AgentSettings, AiConfigurationProfile, Provider } from "../../shared/types";
+import type {
+  AgentSettings,
+  AiConfigurationProfile,
+  Provider,
+} from "../../shared/types";
 
 interface SettingsPanelProps {
   settings: AgentSettings;
@@ -15,7 +22,11 @@ interface SettingsPanelProps {
   onSave: () => Promise<void>;
 }
 
-export function SettingsPanel({ settings, onChange, onSave }: SettingsPanelProps) {
+export function SettingsPanel({
+  settings,
+  onChange,
+  onSave,
+}: SettingsPanelProps) {
   const [profileName, setProfileName] = useState("");
   const [profiles, setProfiles] = useState<AiConfigurationProfile[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState("");
@@ -27,18 +38,25 @@ export function SettingsPanel({ settings, onChange, onSave }: SettingsPanelProps
 
   const selectedProfile = useMemo(
     () => profiles.find((profile) => profile.id === selectedProfileId),
-    [profiles, selectedProfileId]
+    [profiles, selectedProfileId],
   );
 
   function updateProvider(provider: Provider) {
     const currentDefaultModel = PROVIDER_DEFAULT_MODELS[settings.provider];
-    const shouldReplaceModel = !settings.model.trim() || settings.model === currentDefaultModel;
+    const shouldReplaceModel =
+      !settings.model.trim() || settings.model === currentDefaultModel;
 
     onChange({
       ...settings,
       provider,
-      apiBaseUrl: provider === "custom" ? settings.apiBaseUrl : PROVIDER_DEFAULT_BASE_URLS[provider],
-      model: shouldReplaceModel && provider !== "custom" ? PROVIDER_DEFAULT_MODELS[provider] : settings.model
+      apiBaseUrl:
+        provider === "custom"
+          ? settings.apiBaseUrl
+          : PROVIDER_DEFAULT_BASE_URLS[provider],
+      model:
+        shouldReplaceModel && provider !== "custom"
+          ? PROVIDER_DEFAULT_MODELS[provider]
+          : settings.model,
     });
   }
 
@@ -46,14 +64,22 @@ export function SettingsPanel({ settings, onChange, onSave }: SettingsPanelProps
     const nextProfiles = await loadConfigurationProfiles();
     setProfiles(nextProfiles);
     setSelectedProfileId((current) =>
-      current && nextProfiles.some((profile) => profile.id === current) ? current : nextProfiles[0]?.id || ""
+      current && nextProfiles.some((profile) => profile.id === current)
+        ? current
+        : nextProfiles[0]?.id || "",
     );
   }
 
   async function handleSaveProfile() {
     try {
-      const nextProfiles = await saveConfigurationProfile(profileName, settings);
-      const saved = nextProfiles.find((profile) => profile.name.toLowerCase() === profileName.trim().toLowerCase());
+      const nextProfiles = await saveConfigurationProfile(
+        profileName,
+        settings,
+      );
+      const saved = nextProfiles.find(
+        (profile) =>
+          profile.name.toLowerCase() === profileName.trim().toLowerCase(),
+      );
       setProfiles(nextProfiles);
       setSelectedProfileId(saved?.id || nextProfiles[0]?.id || "");
       setProfileNotice(`Saved "${profileName.trim()}".`);
@@ -103,7 +129,11 @@ export function SettingsPanel({ settings, onChange, onSave }: SettingsPanelProps
               placeholder="Work Groq, Personal OpenAI..."
               spellCheck={false}
             />
-            <button className="secondary-button" disabled={!profileName.trim()} onClick={() => void handleSaveProfile()}>
+            <button
+              className="secondary-button"
+              disabled={!profileName.trim()}
+              onClick={() => void handleSaveProfile()}
+            >
               Save
             </button>
           </div>
@@ -116,7 +146,9 @@ export function SettingsPanel({ settings, onChange, onSave }: SettingsPanelProps
             onChange={(event) => setSelectedProfileId(event.target.value)}
             disabled={profiles.length === 0}
           >
-            {profiles.length === 0 ? <option value="">No saved profiles</option> : null}
+            {profiles.length === 0 ? (
+              <option value="">No saved profiles</option>
+            ) : null}
             {profiles.map((profile) => (
               <option key={profile.id} value={profile.id}>
                 {profile.name} - {profile.provider} / {profile.model}
@@ -126,21 +158,34 @@ export function SettingsPanel({ settings, onChange, onSave }: SettingsPanelProps
         </label>
 
         <div className="button-row">
-          <button className="primary-button" disabled={!selectedProfile} onClick={() => void handleApplyProfile()}>
+          <button
+            className="primary-button"
+            disabled={!selectedProfile}
+            onClick={() => void handleApplyProfile()}
+          >
             Apply
           </button>
-          <button className="danger-button subtle-danger" disabled={!selectedProfile} onClick={() => void handleDeleteProfile()}>
+          <button
+            className="danger-button subtle-danger"
+            disabled={!selectedProfile}
+            onClick={() => void handleDeleteProfile()}
+          >
             Delete
           </button>
         </div>
 
-        {profileNotice ? <p className="profile-notice">{profileNotice}</p> : null}
+        {profileNotice ? (
+          <p className="profile-notice">{profileNotice}</p>
+        ) : null}
       </div>
 
       <div className="field-grid">
         <label>
           Provider
-          <select value={settings.provider} onChange={(event) => updateProvider(event.target.value as Provider)}>
+          <select
+            value={settings.provider}
+            onChange={(event) => updateProvider(event.target.value as Provider)}
+          >
             <option value="openai">OpenAI-compatible</option>
             <option value="gemini">Gemini-compatible</option>
             <option value="groq">Groq</option>
@@ -152,7 +197,9 @@ export function SettingsPanel({ settings, onChange, onSave }: SettingsPanelProps
           API base URL
           <input
             value={settings.apiBaseUrl}
-            onChange={(event) => onChange({ ...settings, apiBaseUrl: event.target.value })}
+            onChange={(event) =>
+              onChange({ ...settings, apiBaseUrl: event.target.value })
+            }
             placeholder="https://api.openai.com/v1"
             spellCheck={false}
           />
@@ -162,7 +209,9 @@ export function SettingsPanel({ settings, onChange, onSave }: SettingsPanelProps
           API key
           <input
             value={settings.apiKey}
-            onChange={(event) => onChange({ ...settings, apiKey: event.target.value })}
+            onChange={(event) =>
+              onChange({ ...settings, apiKey: event.target.value })
+            }
             placeholder={settings.provider === "groq" ? "gsk_..." : "sk-..."}
             type="password"
             spellCheck={false}
@@ -173,8 +222,14 @@ export function SettingsPanel({ settings, onChange, onSave }: SettingsPanelProps
           Model
           <input
             value={settings.model}
-            onChange={(event) => onChange({ ...settings, model: event.target.value })}
-            placeholder={settings.provider === "groq" ? "llama-3.3-70b-versatile" : "gpt-4o-mini"}
+            onChange={(event) =>
+              onChange({ ...settings, model: event.target.value })
+            }
+            placeholder={
+              settings.provider === "groq"
+                ? "llama-3.3-70b-versatile"
+                : "gpt-4o-mini"
+            }
             spellCheck={false}
           />
         </label>
@@ -184,19 +239,21 @@ export function SettingsPanel({ settings, onChange, onSave }: SettingsPanelProps
           <input
             value={settings.maxSteps}
             min={1}
-            max={30}
+            max={60}
             type="number"
             onChange={(event) =>
               onChange({
                 ...settings,
-                maxSteps: Number(event.target.value)
+                maxSteps: Number(event.target.value),
               })
             }
           />
         </label>
       </div>
 
-      <p className="storage-note">Stored locally in this browser profile. Use scoped, revocable keys.</p>
+      <p className="storage-note">
+        Stored locally in this browser profile. Use scoped, revocable keys.
+      </p>
 
       <button className="primary-button full-width" onClick={onSave}>
         Save Settings

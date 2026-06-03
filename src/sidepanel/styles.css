@@ -257,6 +257,36 @@ button:disabled {
   padding: 9px 10px;
 }
 
+.view-scroll {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding-right: 3px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.view-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.view-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.view-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+
+.settings-view {
+  padding-bottom: 2px;
+}
+
 .panel {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -538,7 +568,35 @@ select:focus {
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
-  white-space: normal;
+  white-space: pre-wrap;
+}
+
+.prompt-log {
+  max-height: 280px;
+  padding: 9px;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--field) 82%, #000000 18%);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.prompt-log::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.prompt-log::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.prompt-log::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--border-strong);
 }
 
 .log-entry.info {

@@ -2,6 +2,13 @@ import type { DomElementInfo, ExtractedPageData, PageObservation } from "../shar
 
 const MAX_DOM_ELEMENTS = 80;
 const MAX_PAGE_TEXT_CHARS = 12000;
+const MAX_ELEMENT_CONTEXT_CHARS = 900;
+
+const textEditableSelector = [
+  "input:not([type='hidden']):not([type='button']):not([type='submit']):not([type='reset']):not([type='checkbox']):not([type='radio']):not([type='file'])",
+  "textarea",
+  "[contenteditable='true']"
+].join(",");
 
 const interactiveSelector = [
   "a[href]",
@@ -21,7 +28,13 @@ const interactiveSelector = [
   "[aria-checked]",
   "[contenteditable='true']",
   "[onclick]",
-  "[tabindex]:not([tabindex='-1'])"
+  "[tabindex]:not([tabindex='-1'])",
+  ".MuiInputBase-root",
+  ".MuiOutlinedInput-root",
+  ".MuiFilledInput-root",
+  ".MuiFormControl-root",
+  ".MuiAutocomplete-root",
+  ".MuiSelect-root"
 ].join(",");
 
 const weakIds = new WeakMap<Element, string>();
@@ -31,7 +44,7 @@ let nextElementId = 1;
 export function observePage(): PageObservation {
   currentElements.clear();
 
-  const elements = Array.from(document.querySelectorAll<HTMLElement>(interactiveSelector))
+  const elements = getCandidateInteractiveElements()
     .filter(isVisibleElement)
     .slice(0, MAX_DOM_ELEMENTS)
     .map(toElementInfo);
@@ -42,6 +55,29 @@ export function observePage(): PageObservation {
     text: getReadableText(),
     elements
   };
+}
+
+function getCandidateInteractiveElements(): HTMLElement[] {
+  const candidates = new Set<HTMLElement>();
+
+  for (const element of Array.from(document.querySelectorAll<HTMLElement>(interactiveSelector))) {
+    candidates.add(element);
+  }
+
+  for (const editable of Array.from(document.querySelectorAll<HTMLElement>(textEditableSelector))) {
+    if (!isVisibleElement(editable)) {
+      continue;
+    }
+
+    candidates.add(editable);
+
+    const wrapper = findLikelyEditableWrapper(editable);
+    if (wrapper) {
+      candidates.add(wrapper);
+    }
+  }
+
+  return Array.from(candidates);
 }
 
 export function getMappedElement(elementId: string): HTMLElement | undefined {
@@ -77,6 +113,9 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
   const tag = element.tagName.toLowerCase();
   const input = element instanceof HTMLInputElement ? element : undefined;
   const select = element instanceof HTMLSelectElement ? element : undefined;
+  const nestedInput = input || getPrimaryTextEditableDescendant(element);
+  const nestedSelect = select || getPrimarySelectDescendant(element);
+  const questionContext = getElementQuestionContext(element);
 
   return {
     id,
@@ -87,11 +126,14 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
     label: getElementLabel(element),
     name: getFormName(element),
     placeholder: getPlaceholder(element),
+    context: questionContext?.text,
+    questionNumber: questionContext?.questionNumber,
     value: getSafeValue(element),
     href: element instanceof HTMLAnchorElement ? element.href : undefined,
-    options: select ? Array.from(select.options).map((option) => option.text || option.value).slice(0, 30) : undefined,
+    options: nestedSelect ? Array.from(nestedSelect.options).map((option) => option.text || option.value).slice(0, 30) : undefined,
+    isFocused: isElementFocused(element),
     isDisabled: isDisabled(element),
-    isSensitive: isSensitiveElement(element)
+    isSensitive: isSensitiveElement(element) || Boolean(nestedInput && isSensitiveElement(nestedInput))
   };
 }
 
@@ -169,6 +211,11 @@ function getControlLabels(element: HTMLElement): string | undefined {
     return labels.join(" ");
   }
 
+  const nestedEditable = getPrimaryTextEditableDescendant(element);
+  if (nestedEditable) {
+    return getControlLabels(nestedEditable);
+  }
+
   return undefined;
 }
 
@@ -182,12 +229,26 @@ function getFormName(element: HTMLElement): string | undefined {
     return element.name || undefined;
   }
 
+  const nestedEditable = getPrimaryTextEditableDescendant(element);
+  if (
+    nestedEditable instanceof HTMLInputElement ||
+    nestedEditable instanceof HTMLTextAreaElement ||
+    nestedEditable instanceof HTMLSelectElement
+  ) {
+    return nestedEditable.name || undefined;
+  }
+
   return undefined;
 }
 
 function getPlaceholder(element: HTMLElement): string | undefined {
   if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
     return element.placeholder || undefined;
+  }
+
+  const nestedEditable = getPrimaryTextEditableDescendant(element);
+  if (nestedEditable instanceof HTMLInputElement || nestedEditable instanceof HTMLTextAreaElement) {
+    return nestedEditable.placeholder || undefined;
   }
 
   return undefined;
@@ -211,7 +272,90 @@ function getSafeValue(element: HTMLElement): string | undefined {
     return element.value.slice(0, 160);
   }
 
+  const nestedEditable = getPrimaryTextEditableDescendant(element);
+  if (nestedEditable && nestedEditable !== element) {
+    return getSafeValue(nestedEditable);
+  }
+
   return undefined;
+}
+
+function getElementQuestionContext(element: HTMLElement): { text: string; questionNumber?: string } | undefined {
+  if (!shouldIncludeElementContext(element)) {
+    return undefined;
+  }
+
+  const boundary = findQuestionContextBoundary(element) || document.body;
+  const beforeText = getTextBeforeElement(boundary, element);
+  const questionText = extractNearestQuestionText(beforeText);
+
+  if (!questionText) {
+    return undefined;
+  }
+
+  const fieldLabel = getElementLabel(element) || getPlaceholder(element) || getFormName(element) || "field";
+  const text = normalizeText(`${questionText} Field: ${fieldLabel}`).slice(0, MAX_ELEMENT_CONTEXT_CHARS);
+  const questionNumber = questionText.match(/Problem Statement\s+(\d+)/i)?.[1];
+
+  return {
+    text,
+    questionNumber
+  };
+}
+
+function shouldIncludeElementContext(element: HTMLElement): boolean {
+  const role = element.getAttribute("role") || implicitRole(element) || "";
+
+  return (
+    element instanceof HTMLInputElement ||
+    element instanceof HTMLTextAreaElement ||
+    element instanceof HTMLSelectElement ||
+    element instanceof HTMLLabelElement ||
+    role === "textbox" ||
+    role === "combobox" ||
+    Boolean(getPrimaryTextEditableDescendant(element)) ||
+    Boolean(getPrimarySelectDescendant(element))
+  );
+}
+
+function findQuestionContextBoundary(element: HTMLElement): HTMLElement | undefined {
+  let current = element.parentElement;
+  let depth = 0;
+
+  while (current && current !== document.body && depth < 10) {
+    const text = normalizeText(current.innerText || current.textContent || "");
+    if (/Problem Statement\s+\d+/i.test(text)) {
+      return current;
+    }
+
+    current = current.parentElement;
+    depth += 1;
+  }
+
+  return undefined;
+}
+
+function getTextBeforeElement(boundary: HTMLElement, element: HTMLElement): string {
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(boundary);
+    range.setEndBefore(element);
+    const text = normalizeText(range.toString());
+    range.detach();
+    return text;
+  } catch {
+    return normalizeText(boundary.innerText || boundary.textContent || "");
+  }
+}
+
+function extractNearestQuestionText(beforeText: string): string | undefined {
+  const matches = Array.from(beforeText.matchAll(/Problem Statement\s+\d+/gi));
+  const lastMatch = matches.at(-1);
+  if (!lastMatch || typeof lastMatch.index !== "number") {
+    return undefined;
+  }
+
+  return beforeText.slice(lastMatch.index).trim();
 }
 
 function implicitRole(element: HTMLElement): string | undefined {
@@ -239,6 +383,12 @@ function implicitRole(element: HTMLElement): string | undefined {
     }
     return "textbox";
   }
+  if (getPrimaryTextEditableDescendant(element)) {
+    return "textbox";
+  }
+  if (getPrimarySelectDescendant(element)) {
+    return "combobox";
+  }
   return undefined;
 }
 
@@ -250,6 +400,15 @@ function isDisabled(element: HTMLElement): boolean {
     element instanceof HTMLSelectElement
   ) {
     return element.disabled;
+  }
+
+  const nestedEditable = getPrimaryTextEditableDescendant(element);
+  if (
+    nestedEditable instanceof HTMLInputElement ||
+    nestedEditable instanceof HTMLTextAreaElement ||
+    nestedEditable instanceof HTMLSelectElement
+  ) {
+    return nestedEditable.disabled;
   }
 
   return element.getAttribute("aria-disabled") === "true";
@@ -276,6 +435,49 @@ export function isSensitiveElement(element: HTMLElement): boolean {
     .join(" ");
 
   return sensitiveFieldPattern.test(joined);
+}
+
+function getPrimaryTextEditableDescendant(element: HTMLElement): HTMLElement | undefined {
+  const editable = element.querySelector<HTMLElement>(textEditableSelector);
+  return editable && isVisibleElement(editable) ? editable : undefined;
+}
+
+function getPrimarySelectDescendant(element: HTMLElement): HTMLSelectElement | undefined {
+  const select = element.querySelector<HTMLSelectElement>("select");
+  return select && isVisibleElement(select) ? select : undefined;
+}
+
+function findLikelyEditableWrapper(editable: HTMLElement): HTMLElement | undefined {
+  let current = editable.parentElement;
+  let depth = 0;
+
+  while (current && current !== document.body && depth < 5) {
+    if (isVisibleElement(current) && isLikelyEditableWrapper(current)) {
+      return current;
+    }
+    current = current.parentElement;
+    depth += 1;
+  }
+
+  return undefined;
+}
+
+function isLikelyEditableWrapper(element: HTMLElement): boolean {
+  const className = String(element.getAttribute("class") || "");
+  const role = element.getAttribute("role") || "";
+  return (
+    element instanceof HTMLLabelElement ||
+    role === "textbox" ||
+    role === "combobox" ||
+    element.tabIndex >= 0 ||
+    element.hasAttribute("onclick") ||
+    /InputBase|OutlinedInput|FilledInput|FormControl|Autocomplete|Select|TextField|field|input|control/i.test(className)
+  );
+}
+
+function isElementFocused(element: HTMLElement): boolean {
+  const activeElement = document.activeElement;
+  return activeElement === element || Boolean(activeElement && element.contains(activeElement));
 }
 
 function isVisibleElement(element: Element): element is HTMLElement {

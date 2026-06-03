@@ -25,8 +25,10 @@ export type RiskLevel = "low" | "medium" | "high";
 
 export type AgentActionType =
   | "click"
+  | "fill"
   | "type"
   | "select"
+  | "press_key"
   | "scroll"
   | "navigate"
   | "extract"
@@ -37,6 +39,7 @@ export interface AgentAction {
   type: AgentActionType;
   elementId?: string;
   text?: string;
+  key?: "Tab" | "Shift+Tab";
   url?: string;
   direction?: "up" | "down" | "left" | "right";
 }
@@ -56,9 +59,12 @@ export interface DomElementInfo {
   label?: string;
   name?: string;
   placeholder?: string;
+  context?: string;
+  questionNumber?: string;
   value?: string;
   href?: string;
   options?: string[];
+  isFocused?: boolean;
   isDisabled: boolean;
   isSensitive: boolean;
 }

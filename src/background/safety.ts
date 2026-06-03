@@ -57,7 +57,7 @@ export function validateAgentAction(args: {
     };
   }
 
-  if (target?.isSensitive && (action.type === "type" || action.type === "select")) {
+  if (target?.isSensitive && (action.type === "fill" || action.type === "type" || action.type === "select")) {
     return {
       allowed: false,
       riskLevel: "high",
@@ -77,11 +77,11 @@ function validateActionShape(action: AgentAction, target?: DomElementInfo): Safe
     return allowLow();
   }
 
-  if ((action.type === "click" || action.type === "type" || action.type === "select") && !action.elementId) {
+  if ((action.type === "click" || action.type === "fill" || action.type === "type" || action.type === "select") && !action.elementId) {
     return block("The action requires an elementId.");
   }
 
-  if ((action.type === "click" || action.type === "type" || action.type === "select") && !target) {
+  if ((action.type === "click" || action.type === "fill" || action.type === "type" || action.type === "select") && !target) {
     return block("The target element is not available on the current page.");
   }
 
@@ -89,12 +89,16 @@ function validateActionShape(action: AgentAction, target?: DomElementInfo): Safe
     return block("The target element is disabled.");
   }
 
-  if (action.type === "type" && typeof action.text !== "string") {
-    return block("The type action requires text.");
+  if ((action.type === "fill" || action.type === "type") && typeof action.text !== "string") {
+    return block("The fill/type action requires text.");
   }
 
   if (action.type === "select" && typeof action.text !== "string") {
     return block("The select action requires text with the option value or label.");
+  }
+
+  if (action.type === "press_key" && !isSupportedKeyPress(action.key || action.text)) {
+    return block("The press_key action supports only Tab and Shift+Tab.");
   }
 
   if (action.type === "scroll" && !["up", "down", "left", "right"].includes(String(action.direction))) {
@@ -124,6 +128,10 @@ function matchesAny(text: string, patterns: RegExp[]): boolean {
 
 function findElement(observation: PageObservation, elementId: string): DomElementInfo | undefined {
   return observation.elements.find((element) => element.id === elementId);
+}
+
+function isSupportedKeyPress(key?: string): boolean {
+  return key === "Tab" || key === "Shift+Tab";
 }
 
 function allowLow(): SafetyDecision {

@@ -110,14 +110,16 @@ export function App() {
 
       {notice ? <div className="notice">{notice}</div> : null}
 
-      {view === "run" ? (
-        <>
-          <TaskRunner running={running} disabled={!hasApiKey} onRun={handleRun} onStop={handleStop} />
-          <ActionLog logs={logs} />
-        </>
-      ) : (
-        <SettingsPanel settings={settings} onChange={setSettings} onSave={handleSaveSettings} />
-      )}
+      <div className={`view-scroll ${view === "run" ? "run-view" : "settings-view"}`}>
+        {view === "run" ? (
+          <>
+            <TaskRunner running={running} disabled={!hasApiKey} onRun={handleRun} onStop={handleStop} />
+            <ActionLog logs={logs} />
+          </>
+        ) : (
+          <SettingsPanel settings={settings} onChange={setSettings} onSave={handleSaveSettings} />
+        )}
+      </div>
     </main>
   );
 }
