@@ -328,6 +328,9 @@ function isSupportedTabUrl(url?: string): url is string {
 }
 
 function formatAction(action: AgentAction): string {
+  if (action.type === "drag") {
+    return `drag ${action.elementId || "source"} to ${action.targetElementId || "target"}`;
+  }
   if (action.type === "fill") {
     return `fill ${action.elementId || "element"}`;
   }

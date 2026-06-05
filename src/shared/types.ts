@@ -25,6 +25,7 @@ export type RiskLevel = "low" | "medium" | "high";
 
 export type AgentActionType =
   | "click"
+  | "drag"
   | "fill"
   | "type"
   | "select"
@@ -38,6 +39,7 @@ export type AgentActionType =
 export interface AgentAction {
   type: AgentActionType;
   elementId?: string;
+  targetElementId?: string;
   text?: string;
   key?: "Tab" | "Shift+Tab";
   url?: string;
@@ -64,6 +66,8 @@ export interface DomElementInfo {
   value?: string;
   href?: string;
   options?: string[];
+  isDraggable?: boolean;
+  isDropTarget?: boolean;
   isFocused?: boolean;
   isDisabled: boolean;
   isSensitive: boolean;

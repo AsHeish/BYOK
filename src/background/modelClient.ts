@@ -239,7 +239,7 @@ function isAgentModelResponse(value: unknown): value is AgentModelResponse {
     return false;
   }
 
-  const actionTypes = ["click", "fill", "type", "select", "press_key", "scroll", "navigate", "extract", "ask_user", "done"];
+  const actionTypes = ["click", "drag", "fill", "type", "select", "press_key", "scroll", "navigate", "extract", "ask_user", "done"];
   return actionTypes.includes(value.action.type);
 }
 

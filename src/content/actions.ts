@@ -35,6 +35,9 @@ export async function executeAction(action: AgentAction): Promise<ContentActionR
     case "click":
       return withFreshObservation(clickElement(action.elementId));
 
+    case "drag":
+      return withFreshObservation(dragElementToTarget(action.elementId, action.targetElementId));
+
     case "fill":
     case "type":
       return withFreshObservation(typeIntoElement(action.elementId, action.text || ""));
@@ -102,6 +105,64 @@ function clickElement(elementId?: string): ContentActionResult {
   return {
     ok: true,
     message: `Clicked ${describeElement(element)}.`
+  };
+}
+
+async function dragElementToTarget(
+  sourceElementId: string | undefined,
+  targetElementId: string | undefined
+): Promise<ContentActionResult> {
+  const sourceLookup = requireElement(sourceElementId);
+  if (!sourceLookup.ok) {
+    return sourceLookup;
+  }
+
+  const targetLookup = requireElement(targetElementId);
+  if (!targetLookup.ok) {
+    return targetLookup;
+  }
+
+  const source = sourceLookup.value;
+  const target = targetLookup.value;
+
+  if (isSensitiveElement(source) || isSensitiveElement(target)) {
+    return {
+      ok: false,
+      message: "Refusing to drag from or into a sensitive element."
+    };
+  }
+
+  prepareElement(source);
+  await sleep(80);
+  const startPoint = getElementCenter(source);
+  const dataTransfer = createDragDataTransfer(source);
+
+  dispatchPointerDragEvent(source, "pointerdown", startPoint, true);
+  dispatchMouseDragEvent(source, "mousedown", startPoint, true);
+  dispatchDragEvent(source, "dragstart", dataTransfer, startPoint);
+
+  prepareElement(target);
+  await sleep(80);
+  const endPoint = getElementCenter(target);
+
+  for (const point of interpolatePoints(startPoint, endPoint, 8)) {
+    const hoverTarget = getElementAtPoint(point) || target;
+    dispatchPointerDragEvent(hoverTarget, "pointermove", point, true);
+    dispatchMouseDragEvent(hoverTarget, "mousemove", point, true);
+    dispatchDragEvent(hoverTarget, "dragover", dataTransfer, point);
+    await sleep(18);
+  }
+
+  dispatchDragEvent(target, "dragenter", dataTransfer, endPoint);
+  dispatchDragEvent(target, "dragover", dataTransfer, endPoint);
+  dispatchDragEvent(target, "drop", dataTransfer, endPoint);
+  dispatchMouseDragEvent(target, "mouseup", endPoint, false);
+  dispatchPointerDragEvent(target, "pointerup", endPoint, false);
+  dispatchDragEvent(source, "dragend", dataTransfer, endPoint);
+
+  return {
+    ok: true,
+    message: `Dragged ${describeElement(source)} to ${describeElement(target)}.`
   };
 }
 
@@ -472,6 +533,104 @@ function selectOption(elementId: string | undefined, text: string): ContentActio
     ok: true,
     message: `Selected ${option.text || option.value}.`
   };
+}
+
+function createDragDataTransfer(source: HTMLElement): DataTransfer {
+  const dataTransfer = new DataTransfer();
+  const text = source.innerText?.trim() || source.textContent?.trim() || source.getAttribute("aria-label") || source.id || "dragged item";
+  dataTransfer.effectAllowed = "move";
+  dataTransfer.dropEffect = "move";
+  dataTransfer.setData("text/plain", text);
+  dataTransfer.setData("text", text);
+  return dataTransfer;
+}
+
+function getElementCenter(element: HTMLElement): { clientX: number; clientY: number } {
+  const rect = element.getBoundingClientRect();
+  return {
+    clientX: rect.left + Math.max(1, rect.width / 2),
+    clientY: rect.top + Math.max(1, rect.height / 2)
+  };
+}
+
+function interpolatePoints(
+  start: { clientX: number; clientY: number },
+  end: { clientX: number; clientY: number },
+  steps: number
+): Array<{ clientX: number; clientY: number }> {
+  return Array.from({ length: steps }, (_, index) => {
+    const ratio = (index + 1) / steps;
+    return {
+      clientX: start.clientX + (end.clientX - start.clientX) * ratio,
+      clientY: start.clientY + (end.clientY - start.clientY) * ratio
+    };
+  });
+}
+
+function getElementAtPoint(point: { clientX: number; clientY: number }): HTMLElement | undefined {
+  const element = document.elementFromPoint(point.clientX, point.clientY);
+  return element instanceof HTMLElement ? element : undefined;
+}
+
+function dispatchDragEvent(
+  element: HTMLElement,
+  type: "dragstart" | "dragenter" | "dragover" | "drop" | "dragend",
+  dataTransfer: DataTransfer,
+  point: { clientX: number; clientY: number }
+): void {
+  element.dispatchEvent(
+    new DragEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX: point.clientX,
+      clientY: point.clientY,
+      dataTransfer
+    })
+  );
+}
+
+function dispatchPointerDragEvent(
+  element: HTMLElement,
+  type: "pointerdown" | "pointermove" | "pointerup",
+  point: { clientX: number; clientY: number },
+  isDragging: boolean
+): void {
+  element.dispatchEvent(
+    new PointerEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+      clientX: point.clientX,
+      clientY: point.clientY,
+      button: 0,
+      buttons: isDragging ? 1 : 0,
+      view: window
+    })
+  );
+}
+
+function dispatchMouseDragEvent(
+  element: HTMLElement,
+  type: "mousedown" | "mousemove" | "mouseup",
+  point: { clientX: number; clientY: number },
+  isDragging: boolean
+): void {
+  element.dispatchEvent(
+    new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX: point.clientX,
+      clientY: point.clientY,
+      button: 0,
+      buttons: isDragging ? 1 : 0,
+      view: window
+    })
+  );
 }
 
 function scrollPage(direction: NonNullable<AgentAction["direction"]>): ContentActionResult {

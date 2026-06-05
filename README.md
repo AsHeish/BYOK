@@ -80,7 +80,7 @@ The agent loop executes one action at a time:
 4. Hard safety blocks stop unsupported or sensitive actions.
 5. Content script executes the validated action and observes again.
 
-The extension refuses CAPTCHA/security bypass, paywall bypass, secret extraction, and sensitive-field typing. For quizzes and tests, it can explain, suggest, fill, or select answers at the user's request.
+The extension refuses CAPTCHA/security bypass, paywall bypass, secret extraction, and sensitive-field typing. For quizzes and tests, it can explain, suggest, fill, select, or drag answers at the user's request.
 
 API keys are profile-local extension data, not a secure vault. Use scoped, revocable keys.
 
@@ -95,18 +95,21 @@ The model must return strict JSON only:
   "action": {
     "type": "click",
     "elementId": "optional",
+    "targetElementId": "optional",
     "text": "optional",
+    "key": "Tab",
     "url": "optional",
     "direction": "down"
   }
 }
 ```
 
-Supported action types are `click`, `type`, `select`, `scroll`, `navigate`, `extract`, `ask_user`, and `done`.
+Supported action types are `click`, `drag`, `fill`, `type`, `select`, `press_key`, `scroll`, `navigate`, `extract`, `ask_user`, and `done`. For drag-and-drop widgets, the model uses `elementId` as the draggable item and `targetElementId` as the destination.
 
 ## Known First-Version Limits
 
 - Only `http` and `https` pages are supported.
 - Browser internal pages, extension store pages, some PDFs, and restricted pages cannot be controlled.
 - The DOM mapper is intentionally small and visible-element focused.
+- Drag-and-drop support uses synthetic pointer, mouse, and HTML5 drag events. Some sites only accept browser-trusted physical drag gestures, so specific quiz widgets may need targeted handling.
 - Strong API-key encryption is not implemented because no user-held secret is collected.

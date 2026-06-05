@@ -29,6 +29,7 @@ export function validateAgentAction(args: {
 }): SafetyDecision {
   const action = args.modelResponse.action;
   const target = action.elementId ? findElement(args.observation, action.elementId) : undefined;
+  const dropTarget = action.targetElementId ? findElement(args.observation, action.targetElementId) : undefined;
   const combinedText = [
     args.task,
     args.observation.title,
@@ -37,13 +38,18 @@ export function validateAgentAction(args: {
     action.url,
     target?.text,
     target?.label,
+    target?.context,
     target?.placeholder,
-    target?.href
+    target?.href,
+    dropTarget?.text,
+    dropTarget?.label,
+    dropTarget?.context,
+    dropTarget?.placeholder
   ]
     .filter(Boolean)
     .join(" ");
 
-  const structuralDecision = validateActionShape(action, target);
+  const structuralDecision = validateActionShape(action, target, dropTarget);
   if (!structuralDecision.allowed) {
     return structuralDecision;
   }
@@ -57,11 +63,14 @@ export function validateAgentAction(args: {
     };
   }
 
-  if (target?.isSensitive && (action.type === "fill" || action.type === "type" || action.type === "select")) {
+  if (
+    (target?.isSensitive || dropTarget?.isSensitive) &&
+    (action.type === "fill" || action.type === "type" || action.type === "select" || action.type === "drag")
+  ) {
     return {
       allowed: false,
       riskLevel: "high",
-      reason: "The target field appears sensitive, so the agent will not type into it."
+      reason: "The target field appears sensitive, so the agent will not interact with it."
     };
   }
 
@@ -72,21 +81,39 @@ export function validateAgentAction(args: {
   };
 }
 
-function validateActionShape(action: AgentAction, target?: DomElementInfo): SafetyDecision {
+function validateActionShape(action: AgentAction, target?: DomElementInfo, dropTarget?: DomElementInfo): SafetyDecision {
   if (action.type === "done" || action.type === "ask_user" || action.type === "extract") {
     return allowLow();
   }
 
-  if ((action.type === "click" || action.type === "fill" || action.type === "type" || action.type === "select") && !action.elementId) {
+  if (
+    (action.type === "click" || action.type === "drag" || action.type === "fill" || action.type === "type" || action.type === "select") &&
+    !action.elementId
+  ) {
     return block("The action requires an elementId.");
   }
 
-  if ((action.type === "click" || action.type === "fill" || action.type === "type" || action.type === "select") && !target) {
+  if (
+    (action.type === "click" || action.type === "drag" || action.type === "fill" || action.type === "type" || action.type === "select") &&
+    !target
+  ) {
     return block("The target element is not available on the current page.");
   }
 
   if (target?.isDisabled) {
     return block("The target element is disabled.");
+  }
+
+  if (action.type === "drag") {
+    if (!action.targetElementId) {
+      return block("The drag action requires targetElementId.");
+    }
+    if (!dropTarget) {
+      return block("The drag drop target is not available on the current page.");
+    }
+    if (dropTarget.isDisabled) {
+      return block("The drag drop target is disabled.");
+    }
   }
 
   if ((action.type === "fill" || action.type === "type") && typeof action.text !== "string") {

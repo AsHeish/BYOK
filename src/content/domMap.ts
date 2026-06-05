@@ -10,6 +10,27 @@ const textEditableSelector = [
   "[contenteditable='true']"
 ].join(",");
 
+const dragDropSelector = [
+  "[draggable='true']",
+  "[aria-grabbed]",
+  "[aria-dropeffect]",
+  "[data-rbd-draggable-id]",
+  "[data-rbd-droppable-id]",
+  "[data-draggable]",
+  "[data-droppable]",
+  "[data-drag-handle]",
+  "[data-dnd-kit-draggable]",
+  "[data-dnd-kit-droppable]",
+  "[role='listbox']",
+  "[role='listitem']",
+  "[class*='drag']",
+  "[class*='Drag']",
+  "[class*='drop']",
+  "[class*='Drop']",
+  "[class*='sortable']",
+  "[class*='Sortable']"
+].join(",");
+
 const interactiveSelector = [
   "a[href]",
   "button",
@@ -34,7 +55,8 @@ const interactiveSelector = [
   ".MuiFilledInput-root",
   ".MuiFormControl-root",
   ".MuiAutocomplete-root",
-  ".MuiSelect-root"
+  ".MuiSelect-root",
+  dragDropSelector
 ].join(",");
 
 const weakIds = new WeakMap<Element, string>();
@@ -77,6 +99,12 @@ function getCandidateInteractiveElements(): HTMLElement[] {
     }
   }
 
+  for (const dragOrDropElement of Array.from(document.querySelectorAll<HTMLElement>(dragDropSelector))) {
+    if (isVisibleElement(dragOrDropElement)) {
+      candidates.add(dragOrDropElement);
+    }
+  }
+
   return Array.from(candidates);
 }
 
@@ -116,6 +144,8 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
   const nestedInput = input || getPrimaryTextEditableDescendant(element);
   const nestedSelect = select || getPrimarySelectDescendant(element);
   const questionContext = getElementQuestionContext(element);
+  const isDraggable = isDraggableElement(element);
+  const isDropTarget = isDropTargetElement(element);
 
   return {
     id,
@@ -131,6 +161,8 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
     value: getSafeValue(element),
     href: element instanceof HTMLAnchorElement ? element.href : undefined,
     options: nestedSelect ? Array.from(nestedSelect.options).map((option) => option.text || option.value).slice(0, 30) : undefined,
+    isDraggable: isDraggable || undefined,
+    isDropTarget: isDropTarget || undefined,
     isFocused: isElementFocused(element),
     isDisabled: isDisabled(element),
     isSensitive: isSensitiveElement(element) || Boolean(nestedInput && isSensitiveElement(nestedInput))
@@ -311,10 +343,38 @@ function shouldIncludeElementContext(element: HTMLElement): boolean {
     element instanceof HTMLTextAreaElement ||
     element instanceof HTMLSelectElement ||
     element instanceof HTMLLabelElement ||
+    isDraggableElement(element) ||
+    isDropTargetElement(element) ||
     role === "textbox" ||
     role === "combobox" ||
     Boolean(getPrimaryTextEditableDescendant(element)) ||
     Boolean(getPrimarySelectDescendant(element))
+  );
+}
+
+function isDraggableElement(element: HTMLElement): boolean {
+  return (
+    element.draggable ||
+    element.getAttribute("draggable") === "true" ||
+    element.hasAttribute("aria-grabbed") ||
+    element.hasAttribute("data-rbd-draggable-id") ||
+    element.hasAttribute("data-draggable") ||
+    element.hasAttribute("data-drag-handle") ||
+    element.hasAttribute("data-dnd-kit-draggable")
+  );
+}
+
+function isDropTargetElement(element: HTMLElement): boolean {
+  const className = String(element.getAttribute("class") || "");
+  const role = element.getAttribute("role") || "";
+
+  return (
+    element.hasAttribute("aria-dropeffect") ||
+    element.hasAttribute("data-rbd-droppable-id") ||
+    element.hasAttribute("data-droppable") ||
+    element.hasAttribute("data-dnd-kit-droppable") ||
+    role === "listbox" ||
+    /drop|droppable|sortable|destination|target|answer/i.test(className)
   );
 }
 

@@ -24,6 +24,8 @@ export function buildAgentMessages(args: {
         "- Do not mark ordinary quiz answer filling/selection as risky unless it submits or finalizes the assessment.",
         "- For text fields, prefer fill over separate click and type actions. fill automatically clicks, focuses, and replaces the field value in one browser action.",
         "- For custom form controls, an outer div may represent a textbox. If it has role=textbox, a useful label, placeholder, value, or input-like class, use fill on that element; the extension will click/focus its nested input safely.",
+        "- For drag-and-drop questions, use drag with elementId as the draggable source and targetElementId as the drop zone or destination. Use one drag per step, then observe again.",
+        "- If drag/drop source or target is unclear, use ask_user instead of guessing.",
         "- When multiple fields have the same label, use each element's problem and context fields to decide which question it belongs to. Do not rely only on repeated labels like \"Your Submission\".",
         "- Do not copy the same option number into multiple questions unless each field's own context independently supports that answer.",
         "- Do not fill any field that already has a non-empty value in the observation, even if the value differs from the answer you planned. Move to the next empty field or finish.",
@@ -31,7 +33,8 @@ export function buildAgentMessages(args: {
         "- If the user asks to keep pressing Tab or move to the next input, use press_key with key=\"Tab\". The next observation will mark the newly focused element with focused=true.",
         "",
         "Allowed action schema:",
-        "Action type must be one of: click, fill, type, select, press_key, scroll, navigate, extract, ask_user, done.",
+        "Action type must be one of: click, drag, fill, type, select, press_key, scroll, navigate, extract, ask_user, done.",
+        "For drag, set elementId to the draggable source and targetElementId to the destination/drop zone.",
         "For fill and type, set elementId and text. Use fill for normal form input because it combines click/focus and typing.",
         "For press_key, set key to Tab or Shift+Tab.",
         JSON.stringify(exampleResponse(), null, 2)
@@ -62,6 +65,7 @@ function exampleResponse(): AgentModelResponse {
     action: {
       type: "fill",
       elementId: "optional",
+      targetElementId: "optional",
       text: "optional",
       key: "Tab",
       url: "optional",
@@ -86,6 +90,8 @@ function formatObservation(observation: PageObservation): string {
         element.value ? `value=${quote(element.value)}` : "",
         element.href ? `href=${quote(element.href)}` : "",
         element.options?.length ? `options=${quote(element.options.join(" | "))}` : "",
+        element.isDraggable ? "draggable=true" : "",
+        element.isDropTarget ? "dropTarget=true" : "",
         element.isFocused ? "focused=true" : "",
         element.isDisabled ? "disabled=true" : "",
         element.isSensitive ? "sensitive=true" : ""
