@@ -14,6 +14,20 @@ interface OpenAiChatCompletionResponse {
   error?: {
     message?: string;
   };
+  usage?: ChatUsage;
+}
+
+interface ChatUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+  };
+  input_tokens_details?: {
+    cached_tokens?: number;
+    cache_read?: number;
+  };
 }
 
 export class ModelClientError extends Error {
@@ -35,24 +49,43 @@ export async function requestAgentStep(
   const timeoutId = setTimeout(() => controller.abort(), 60000);
 
   try {
-    let { response, responseText } = await postChatCompletion({
-      endpoint,
-      settings,
-      messages,
-      signal: controller.signal,
-      includeResponseFormat: true
-    });
+    let includeResponseFormat = true;
+    let includePromptCacheFields = shouldUsePromptCacheFields(settings);
+    let result: { response: Response; responseText: string } | undefined;
 
-    if (!response.ok && shouldRetryWithoutResponseFormat(response.status, responseText)) {
-      ({ response, responseText } = await postChatCompletion({
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      result = await postChatCompletion({
         endpoint,
         settings,
         messages,
         signal: controller.signal,
-        includeResponseFormat: false
-      }));
+        includeResponseFormat,
+        includePromptCacheFields
+      });
+
+      if (result.response.ok) {
+        break;
+      }
+
+      if (includePromptCacheFields && shouldRetryWithoutPromptCacheFields(result.response.status, result.responseText)) {
+        includePromptCacheFields = false;
+        console.warn("[BYOK Agent] Provider rejected prompt cache fields; retrying without them.");
+        continue;
+      }
+
+      if (includeResponseFormat && shouldRetryWithoutResponseFormat(result.response.status, result.responseText)) {
+        includeResponseFormat = false;
+        continue;
+      }
+
+      break;
     }
 
+    if (!result) {
+      throw new ModelClientError("The model request could not be started.");
+    }
+
+    const { response, responseText } = result;
     if (!response.ok) {
       throw new ModelClientError(formatHttpError(response.status, responseText), response.status);
     }
@@ -69,6 +102,7 @@ export async function requestAgentStep(
       throw new ModelClientError(data.error?.message || "The model response did not include content.");
     }
 
+    logTokenUsage(settings.provider, data.usage);
     return parseAgentJson(content);
   } finally {
     clearTimeout(timeoutId);
@@ -81,12 +115,18 @@ async function postChatCompletion(args: {
   messages: ChatMessage[];
   signal: AbortSignal;
   includeResponseFormat: boolean;
+  includePromptCacheFields: boolean;
 }): Promise<{ response: Response; responseText: string }> {
   const body: Record<string, unknown> = {
     model: args.settings.model,
     messages: args.messages,
     temperature: 0.2
   };
+
+  if (args.includePromptCacheFields) {
+    body.prompt_cache_key = buildPromptCacheKey(args.settings, args.messages);
+    body.prompt_cache_retention = "in_memory";
+  }
 
   if (args.includeResponseFormat) {
     body.response_format = { type: "json_object" };
@@ -96,6 +136,8 @@ async function postChatCompletion(args: {
     endpoint: args.endpoint,
     provider: args.settings.provider,
     body,
+    messages: args.messages,
+    includePromptCacheFields: args.includePromptCacheFields,
     includeResponseFormat: args.includeResponseFormat
   });
 
@@ -119,6 +161,8 @@ function logAiRequestPayload(args: {
   endpoint: string;
   provider: AgentSettings["provider"];
   body: Record<string, unknown>;
+  messages: ChatMessage[];
+  includePromptCacheFields: boolean;
   includeResponseFormat: boolean;
 }): void {
   const payload = {
@@ -135,8 +179,9 @@ function logAiRequestPayload(args: {
   console.groupCollapsed(
     `[BYOK Agent] Full AI request payload (${args.provider}, response_format=${
       args.includeResponseFormat ? "on" : "off"
-    })`
+    }, prompt_cache=${args.includePromptCacheFields ? "on" : "implicit"})`
   );
+  console.info("Prompt cache plan:", buildPromptCacheDebugInfo(args.messages, args.body.prompt_cache_key));
   console.info(payload);
   console.info("Request body JSON:", JSON.stringify(args.body, null, 2));
   console.groupEnd();
@@ -144,6 +189,79 @@ function logAiRequestPayload(args: {
 
 function shouldRetryWithoutResponseFormat(status: number, body: string): boolean {
   return status === 400 && /response_format|json_object|unsupported parameter|unknown field/i.test(body);
+}
+
+function shouldRetryWithoutPromptCacheFields(status: number, body: string): boolean {
+  return status === 400 && /prompt_cache_key|prompt_cache_retention|prompt cache|prompt caching/i.test(body);
+}
+
+function shouldUsePromptCacheFields(settings: AgentSettings): boolean {
+  return settings.provider === "openai";
+}
+
+function buildPromptCacheKey(settings: AgentSettings, messages: ChatMessage[]): string {
+  const stablePrefix = getStablePromptPrefix(messages);
+  const keyMaterial = [settings.apiBaseUrl, settings.model, stablePrefix].join("\n");
+  return `byok-agent-${shortHash(keyMaterial)}`;
+}
+
+function buildPromptCacheDebugInfo(messages: ChatMessage[], promptCacheKey: unknown): Record<string, unknown> {
+  const stablePrefix = getStablePromptPrefix(messages);
+  return {
+    providerCacheKey: typeof promptCacheKey === "string" ? promptCacheKey : undefined,
+    stablePrefixMessages: Math.min(messages.length, 2),
+    stablePrefixCharacters: stablePrefix.length,
+    estimatedStablePrefixTokens: Math.ceil(stablePrefix.length / 4),
+    note:
+      "Static instructions and task are kept before changing page observations so provider-side prefix caches can be reused."
+  };
+}
+
+function getStablePromptPrefix(messages: ChatMessage[]): string {
+  return messages
+    .slice(0, 2)
+    .map((message) => `${message.role}:\n${message.content}`)
+    .join("\n\n");
+}
+
+function shortHash(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function logTokenUsage(provider: AgentSettings["provider"], usage: ChatUsage | undefined): void {
+  if (!usage) {
+    return;
+  }
+
+  const cachedTokens = getCachedTokenCount(usage);
+  const cacheRate =
+    typeof cachedTokens === "number" && usage.prompt_tokens
+      ? `${Math.round((cachedTokens / usage.prompt_tokens) * 100)}%`
+      : undefined;
+
+  console.info("[BYOK Agent] AI token usage:", {
+    provider,
+    promptTokens: usage.prompt_tokens,
+    cachedPromptTokens: cachedTokens,
+    promptCacheHitRate: cacheRate,
+    completionTokens: usage.completion_tokens,
+    totalTokens: usage.total_tokens
+  });
+}
+
+function getCachedTokenCount(usage: ChatUsage): number | undefined {
+  const candidates = [
+    usage.prompt_tokens_details?.cached_tokens,
+    usage.input_tokens_details?.cached_tokens,
+    usage.input_tokens_details?.cache_read
+  ];
+
+  return candidates.find((value): value is number => typeof value === "number");
 }
 
 function buildChatCompletionsUrl(baseUrl: string): string {

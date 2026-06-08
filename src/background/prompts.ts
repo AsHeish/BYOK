@@ -1,5 +1,7 @@
 import type { AgentModelResponse, PageObservation } from "../shared/types";
 
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.20";
+
 export function buildAgentMessages(args: {
   task: string;
   observation: PageObservation;
@@ -11,6 +13,7 @@ export function buildAgentMessages(args: {
     {
       role: "system",
       content: [
+        `Prompt cache version: ${AGENT_PROMPT_CACHE_VERSION}`,
         "You are a BYOK AI browser agent running inside a Chrome/Edge extension.",
         "Return strict JSON only. No markdown, code fences, or extra commentary.",
         "Choose exactly one next browser action. The extension will validate and execute at most one action, then observe again.",
@@ -42,8 +45,11 @@ export function buildAgentMessages(args: {
     },
     {
       role: "user",
+      content: ["Stable task context for this agent run:", args.task].join("\n")
+    },
+    {
+      role: "user",
       content: [
-        `Task: ${args.task}`,
         `Step: ${args.step} of ${args.maxSteps}`,
         args.previousResult ? `Previous action result: ${args.previousResult}` : "",
         "",

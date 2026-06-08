@@ -70,6 +70,19 @@ The side-panel settings support:
 
 The extension uses `fetch` against `POST {apiBaseUrl}/chat/completions` with OpenAI-compatible chat-completions JSON. No paid SDK is used.
 
+## Prompt Caching
+
+The agent structures model requests for provider-side prefix caching:
+
+- Static agent instructions are sent first.
+- The user's task is sent as a stable message that remains unchanged during a run.
+- Changing step data, previous results, and page observations are sent last.
+- OpenAI provider requests include `prompt_cache_key` and `prompt_cache_retention: "in_memory"`.
+- If a compatible endpoint rejects OpenAI cache fields, the request is retried without them.
+- The background console logs `cachedPromptTokens` and `promptCacheHitRate` when the provider returns cache usage.
+
+OpenAI-compatible APIs are still stateless, so the extension must send the full current prompt on every step. The cache benefit comes from the model provider reusing repeated prefix tokens internally.
+
 ## Safety Model
 
 The agent loop executes one action at a time:
