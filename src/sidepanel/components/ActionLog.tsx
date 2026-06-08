@@ -29,20 +29,12 @@ export function ActionLog({ logs }: ActionLogProps) {
               <time>{formatTime(entry.timestamp)}</time>
               <span>{entry.level}</span>
             </div>
-            {isPromptLog(entry.message) ? (
-              <pre className="log-message prompt-log">{entry.message}</pre>
-            ) : (
-              <p className="log-message">{entry.message}</p>
-            )}
+            <p className="log-message">{entry.message}</p>
           </li>
         ))}
       </ol>
     </section>
   );
-}
-
-function isPromptLog(message: string): boolean {
-  return message.startsWith("Prompt sent to AI");
 }
 
 function formatTime(timestamp: number): string {

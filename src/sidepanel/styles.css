@@ -1,27 +1,31 @@
 :root {
-  --bg: #f4f0e8;
-  --bg-elevated: #fffdf8;
+  --bg: #edf4f6;
+  --bg-elevated: #f8fbfb;
   --surface: #ffffff;
-  --surface-strong: #f7f2e9;
-  --field: #fffaf1;
-  --border: #d9d0c1;
-  --border-strong: #b9ab96;
-  --text: #231f1a;
-  --muted: #6f6659;
-  --muted-strong: #51483d;
-  --primary: #23715d;
-  --primary-hover: #1b604f;
+  --surface-strong: #e8f1f3;
+  --field: #f8fbfb;
+  --border: #bfd0d5;
+  --border-strong: #7d9ba5;
+  --text: #111a1e;
+  --muted: #657982;
+  --muted-strong: #33484f;
+  --primary: #117d6c;
+  --primary-hover: #0d6a5c;
   --primary-contrast: #ffffff;
-  --primary-soft: #e6f4ef;
-  --danger: #b4232a;
-  --danger-hover: #941b21;
-  --danger-soft: #fde8e8;
-  --warning: #b56a13;
-  --warning-soft: #fff3d6;
-  --success-soft: #e6f6ee;
-  --info-soft: #e7f0ff;
-  --shadow: 0 16px 34px rgb(50 39 28 / 13%);
-  --shadow-soft: 0 2px 8px rgb(50 39 28 / 8%);
+  --primary-soft: #dff8f1;
+  --danger: #c22f4a;
+  --danger-hover: #a9263d;
+  --danger-soft: #ffe6eb;
+  --warning: #b87500;
+  --warning-soft: #fff2d5;
+  --success-soft: #ddf7ed;
+  --info-soft: #e2f0ff;
+  --code-green: #0a9f75;
+  --cyan: #1979a9;
+  --grid-line: rgb(17 125 108 / 9%);
+  --scan-line: rgb(17 125 108 / 5%);
+  --shadow: 0 18px 34px rgb(26 45 52 / 16%);
+  --shadow-soft: 0 2px 10px rgb(26 45 52 / 10%);
   color: var(--text);
   background: var(--bg);
   font-family:
@@ -31,29 +35,33 @@
 }
 
 :root[data-theme="dark"] {
-  --bg: #0d1114;
-  --bg-elevated: #12181c;
-  --surface: #171e23;
-  --surface-strong: #1f2a30;
-  --field: #0f1519;
-  --border: #2c3940;
-  --border-strong: #49606b;
-  --text: #f2efe8;
-  --muted: #aeb8b8;
-  --muted-strong: #d4d9d6;
-  --primary: #62c5a5;
-  --primary-hover: #7bd7bb;
-  --primary-contrast: #06110e;
-  --primary-soft: #183a32;
-  --danger: #ff6b6b;
-  --danger-hover: #ff8585;
-  --danger-soft: #3a1d21;
-  --warning: #f4b84e;
-  --warning-soft: #332816;
-  --success-soft: #14352b;
-  --info-soft: #172b45;
-  --shadow: 0 18px 42px rgb(0 0 0 / 35%);
-  --shadow-soft: 0 2px 12px rgb(0 0 0 / 24%);
+  --bg: #05090c;
+  --bg-elevated: #071014;
+  --surface: #0c1418;
+  --surface-strong: #101d22;
+  --field: #070d11;
+  --border: #1c353d;
+  --border-strong: #3d6871;
+  --text: #edfdf8;
+  --muted: #87a3a8;
+  --muted-strong: #c3ddd9;
+  --primary: #35e7b1;
+  --primary-hover: #7ef8ce;
+  --primary-contrast: #03120e;
+  --primary-soft: #0d332b;
+  --danger: #ff5d7a;
+  --danger-hover: #ff8399;
+  --danger-soft: #36151f;
+  --warning: #ffd166;
+  --warning-soft: #312814;
+  --success-soft: #0c2c24;
+  --info-soft: #0c2234;
+  --code-green: #6cffc7;
+  --cyan: #62c9ff;
+  --grid-line: rgb(53 231 177 / 9%);
+  --scan-line: rgb(98 201 255 / 4%);
+  --shadow: 0 20px 48px rgb(0 0 0 / 52%);
+  --shadow-soft: 0 2px 16px rgb(0 0 0 / 34%);
 }
 
 * {
@@ -63,14 +71,14 @@
 html {
   width: 100%;
   height: 100%;
-  min-width: 360px;
+  min-width: 300px;
   background: var(--bg);
 }
 
 body {
   width: 100%;
   height: 100%;
-  min-width: 360px;
+  min-width: 300px;
   min-height: 0;
   margin: 0;
   overflow: hidden;
@@ -80,7 +88,7 @@ body {
 #root {
   width: 100%;
   height: 100%;
-  min-width: 360px;
+  min-width: 300px;
 }
 
 button,
@@ -101,47 +109,109 @@ button:disabled {
 }
 
 .app-shell {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 12px;
   width: 100%;
   height: 100%;
-  min-width: 360px;
+  min-width: 300px;
   min-height: 0;
   padding: 16px;
   overflow: hidden;
-  background: var(--bg);
+  background:
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(180deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(180deg, var(--scan-line), transparent 42%),
+    var(--bg);
+  background-size:
+    28px 28px,
+    28px 28px,
+    100% 100%,
+    auto;
 }
 
 .topbar {
+  position: relative;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  padding: 2px 0 4px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--primary) 12%, transparent), transparent 42%),
+    var(--bg-elevated);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+
+.topbar::after {
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+  width: 84px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--primary), var(--cyan));
+  content: "";
+  opacity: 0.75;
+  pointer-events: none;
 }
 
 .brand-block {
   min-width: 0;
 }
 
+.brand-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid color-mix(in srgb, var(--primary) 52%, var(--border));
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--primary) 22%, transparent), transparent),
+    var(--field);
+  color: var(--code-green);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--primary) 10%, transparent),
+    0 0 22px color-mix(in srgb, var(--primary) 24%, transparent);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  font-weight: 850;
+}
+
 .topbar h1 {
   margin: 0;
   color: var(--text);
-  font-size: 22px;
-  font-weight: 780;
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 21px;
+  font-weight: 850;
   line-height: 1.05;
 }
 
-.topbar p {
+.status-pill {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  margin: 7px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 650;
+  min-height: 25px;
+  margin: 9px 0 0;
+  padding: 3px 9px;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--field) 86%, transparent);
+  color: var(--muted-strong);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  font-weight: 760;
 }
 
 .status-dot {
@@ -160,6 +230,7 @@ button:disabled {
 .status-dot.running {
   background: #60a5fa;
   box-shadow: 0 0 0 4px rgb(96 165 250 / 18%);
+  animation: pulse-dot 1.15s ease-in-out infinite;
 }
 
 .top-actions {
@@ -176,12 +247,13 @@ button:disabled {
   gap: 8px;
   min-height: 28px;
   padding: 3px 8px 3px 4px;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
   border-radius: 999px;
-  background: var(--surface);
+  background: var(--field);
   color: var(--muted-strong);
   box-shadow: var(--shadow-soft);
-  font-size: 12px;
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
   font-weight: 750;
 }
 
@@ -202,6 +274,7 @@ button:disabled {
   height: 14px;
   border-radius: 999px;
   background: var(--primary);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--primary) 70%, transparent);
   transition:
     transform 160ms ease,
     background 160ms ease;
@@ -217,9 +290,9 @@ button:disabled {
   width: 100%;
   min-width: 172px;
   padding: 4px;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--border) 80%, var(--primary));
   border-radius: 8px;
-  background: var(--surface-strong);
+  background: color-mix(in srgb, var(--field) 82%, transparent);
   box-shadow: var(--shadow-soft);
 }
 
@@ -228,14 +301,19 @@ button:disabled {
   border-radius: 6px;
   background: transparent;
   color: var(--muted);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 13px;
   font-weight: 740;
 }
 
 .tabs button.active {
-  background: var(--surface);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--primary) 20%, transparent), transparent 62%),
+    var(--surface);
   color: var(--text);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 14%);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--primary) 12%, transparent),
+    0 0 18px color-mix(in srgb, var(--primary) 14%, transparent);
 }
 
 .notice,
@@ -288,14 +366,28 @@ button:disabled {
 }
 
 .panel {
-  border: 1px solid var(--border);
+  position: relative;
+  border: 1px solid color-mix(in srgb, var(--border) 86%, var(--primary));
   border-radius: 8px;
-  background: var(--surface);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--primary) 5%, transparent), transparent 76%),
+    var(--surface);
   box-shadow: var(--shadow);
 }
 
 .panel {
   padding: 13px;
+}
+
+.panel::before {
+  position: absolute;
+  top: -1px;
+  left: 12px;
+  width: 48px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--primary), transparent);
+  content: "";
+  pointer-events: none;
 }
 
 .task-panel,
@@ -310,10 +402,9 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 11px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-strong);
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
 }
 
 label {
@@ -329,7 +420,7 @@ textarea,
 input,
 select {
   width: 100%;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
   border-radius: 8px;
   background: var(--field);
   color: var(--text);
@@ -360,7 +451,9 @@ textarea:focus,
 input:focus,
 select:focus {
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent),
+    0 0 20px color-mix(in srgb, var(--primary) 10%, transparent);
 }
 
 .button-row {
@@ -382,6 +475,7 @@ select:focus {
   min-height: 38px;
   padding: 0 14px;
   border-radius: 8px;
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-weight: 780;
   transition:
     transform 120ms ease,
@@ -390,9 +484,13 @@ select:focus {
 }
 
 .primary-button {
-  background: var(--primary);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, #ffffff 22%, transparent), transparent 45%),
+    var(--primary);
   color: var(--primary-contrast);
-  box-shadow: 0 8px 20px color-mix(in srgb, var(--primary) 26%, transparent);
+  box-shadow:
+    0 8px 20px color-mix(in srgb, var(--primary) 24%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, #000000 18%, transparent);
 }
 
 .primary-button:hover:not(:disabled) {
@@ -401,7 +499,9 @@ select:focus {
 }
 
 .danger-button {
-  background: var(--danger);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, #ffffff 18%, transparent), transparent 45%),
+    var(--danger);
   color: #ffffff;
   box-shadow: 0 8px 20px color-mix(in srgb, var(--danger) 20%, transparent);
 }
@@ -423,7 +523,7 @@ select:focus {
 }
 
 .secondary-button {
-  background: var(--surface-strong);
+  background: var(--field);
   color: var(--text);
   border: 1px solid var(--border);
 }
@@ -462,12 +562,14 @@ select:focus {
 .section-heading h2 {
   margin: 0;
   color: var(--text);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 14px;
   font-weight: 780;
 }
 
 .section-heading span {
   color: var(--muted);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   font-weight: 720;
 }
@@ -515,7 +617,9 @@ select:focus {
   border: 1px solid var(--border);
   border-left-width: 4px;
   border-radius: 8px;
-  background: var(--surface-strong);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--primary) 4%, transparent), transparent 55%),
+    var(--surface-strong);
   color: var(--text);
   box-shadow: var(--shadow-soft);
 }
@@ -545,6 +649,7 @@ select:focus {
 
 .log-meta time {
   color: var(--muted);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -555,6 +660,7 @@ select:focus {
   padding: 2px 7px;
   background: color-mix(in srgb, var(--muted) 12%, transparent);
   color: var(--muted-strong);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 10px;
   font-weight: 780;
   text-transform: uppercase;
@@ -569,34 +675,6 @@ select:focus {
   line-height: 1.45;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
-}
-
-.prompt-log {
-  max-height: 280px;
-  padding: 9px;
-  overflow: auto;
-  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--field) 82%, #000000 18%);
-  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  scrollbar-color: var(--border-strong) transparent;
-  scrollbar-width: thin;
-}
-
-.prompt-log::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.prompt-log::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.prompt-log::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: var(--border-strong);
 }
 
 .log-entry.info {
@@ -617,4 +695,15 @@ select:focus {
 .log-entry.error {
   border-left-color: var(--danger);
   background: var(--danger-soft);
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    box-shadow: 0 0 0 4px rgb(96 165 250 / 18%);
+  }
+
+  50% {
+    box-shadow: 0 0 0 6px rgb(96 165 250 / 28%);
+  }
 }

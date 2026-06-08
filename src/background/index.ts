@@ -100,7 +100,7 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
     case "SIDEPANEL_GET_STATE":
       return {
         running: Boolean(runningSession && !runningSession.stopped),
-        logs: logs.filter((entry) => !isLegacyApprovalLog(entry.message))
+        logs: logs.filter((entry) => !isHiddenActionLog(entry.message))
       };
 
     default:
@@ -268,7 +268,7 @@ function stopCurrentTask(reason: string): void {
 }
 
 function appendLog(level: AgentLogEntry["level"], message: string): void {
-  if (isLegacyApprovalLog(message)) {
+  if (isHiddenActionLog(message)) {
     return;
   }
 
@@ -284,21 +284,18 @@ function appendLog(level: AgentLogEntry["level"], message: string): void {
 }
 
 function logPromptBeforeModelCall(step: number, messages: ReturnType<typeof buildAgentMessages>): void {
-  const formattedPrompt = formatMessagesForLog(messages);
   console.groupCollapsed(`[BYOK Agent] Prompt messages for step ${step}`);
   console.info({ messages });
   console.info("Messages JSON:", JSON.stringify(messages, null, 2));
   console.groupEnd();
-  appendLog("info", `Prompt sent to AI (step ${step}):\n\n${formattedPrompt}`);
 }
 
-function formatMessagesForLog(messages: ReturnType<typeof buildAgentMessages>): string {
-  return messages.map((message) => `[${message.role.toUpperCase()}]\n${message.content}`).join("\n\n");
-}
-
-function isLegacyApprovalLog(message: string): boolean {
-  return /This page appears to be an assessment|Waiting for|model marked this action as high risk|This looks like a quiz|This looks like a payment/i.test(
-    message
+function isHiddenActionLog(message: string): boolean {
+  return (
+    message.startsWith("Prompt sent to AI") ||
+    /This page appears to be an assessment|Waiting for|model marked this action as high risk|This looks like a quiz|This looks like a payment/i.test(
+      message
+    )
   );
 }
 

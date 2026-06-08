@@ -25,13 +25,13 @@ export function App() {
     void sendBackgroundMessage({ type: "SIDEPANEL_GET_STATE" }).then((state) => {
       if (isAgentState(state)) {
         setRunning(state.running);
-        setLogs(filterLegacyApprovalLogs(state.logs));
+        setLogs(filterHiddenActionLogs(state.logs));
       }
     });
 
     const listener = (message: BackgroundToSidePanelMessage) => {
       if (message.type === "AGENT_LOG") {
-        if (!isLegacyApprovalLog(message.entry.message)) {
+        if (!isHiddenActionLog(message.entry.message)) {
           setLogs((current) => [...current, message.entry].slice(-80));
         }
       }
@@ -79,8 +79,13 @@ export function App() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-block">
-          <h1>BYOK Agent</h1>
-          <p>
+          <div className="brand-line">
+            <span className="brand-mark" aria-hidden="true">
+              BA
+            </span>
+            <h1>BYOK Agent</h1>
+          </div>
+          <p className="status-pill">
             <span className={`status-dot ${running ? "running" : hasApiKey ? "ready" : "needs-settings"}`} />
             {running ? "Running" : hasApiKey ? "Ready" : "Needs settings"}
           </p>
@@ -144,12 +149,15 @@ function isAgentState(value: unknown): value is {
   return value !== null && typeof value === "object" && "running" in value && "logs" in value;
 }
 
-function filterLegacyApprovalLogs(logs: AgentLogEntry[]): AgentLogEntry[] {
-  return logs.filter((entry) => !isLegacyApprovalLog(entry.message));
+function filterHiddenActionLogs(logs: AgentLogEntry[]): AgentLogEntry[] {
+  return logs.filter((entry) => !isHiddenActionLog(entry.message));
 }
 
-function isLegacyApprovalLog(message: string): boolean {
-  return /This page appears to be an assessment|Waiting for|model marked this action as high risk|This looks like a quiz|This looks like a payment/i.test(
-    message
+function isHiddenActionLog(message: string): boolean {
+  return (
+    message.startsWith("Prompt sent to AI") ||
+    /This page appears to be an assessment|Waiting for|model marked this action as high risk|This looks like a quiz|This looks like a payment/i.test(
+      message
+    )
   );
 }
