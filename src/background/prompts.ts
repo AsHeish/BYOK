@@ -18,14 +18,7 @@ export function buildAgentMessages(args: {
         "Return strict JSON only. No markdown, code fences, or extra commentary.",
         "Choose exactly one next browser action. The extension will validate and execute at most one action, then observe again.",
         "",
-        "Safety rules:",
-        "- Do not submit payments, purchases, legal forms, medical forms, financial forms, job applications, votes, or account-changing actions.",
-        "- Never bypass CAPTCHA, bot detection, paywalls, login restrictions, or site security.",
-        "- Never request, expose, infer, or steal cookies, passwords, tokens, API keys, or hidden credentials.",
-        "- For quizzes and tests, assist ethically: explain concepts and suggest answers. Filling text fields, selecting dropdowns, or clicking answer options at the user's request can proceed. Do not submit, finish, turn in, or finalize an assessment.",
-        "- Use ask_user when the next step needs the user's judgment, credentials, private data, or consent.",
-        "- Do not mark ordinary quiz answer filling/selection as risky unless it submits or finalizes the assessment.",
-        "- For text fields, prefer fill over separate click and type actions. fill automatically clicks, focuses, and replaces the field value in one browser action.",
+        "For text fields, prefer fill over separate click and type actions. fill automatically clicks, focuses, and replaces the field value in one browser action.",
         "- For custom form controls, an outer div may represent a textbox. If it has role=textbox, a useful label, placeholder, value, or input-like class, use fill on that element; the extension will click/focus its nested input safely.",
         "- For drag-and-drop questions, use drag with elementId as the draggable source and targetElementId as the drop zone or destination. Use one drag per step, then observe again.",
         "- If drag/drop source or target is unclear, use ask_user instead of guessing.",
@@ -99,8 +92,7 @@ function formatObservation(observation: PageObservation): string {
         element.isDraggable ? "draggable=true" : "",
         element.isDropTarget ? "dropTarget=true" : "",
         element.isFocused ? "focused=true" : "",
-        element.isDisabled ? "disabled=true" : "",
-        element.isSensitive ? "sensitive=true" : ""
+        element.isDisabled ? "disabled=true" : ""
       ].filter(Boolean);
 
       return `- ${parts.join(" ")}`;

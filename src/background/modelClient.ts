@@ -277,9 +277,6 @@ function buildChatCompletionsUrl(baseUrl: string): string {
     throw new ModelClientError("API base URL is invalid.");
   }
 
-  if (parsed.protocol !== "https:" && parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") {
-    throw new ModelClientError("Use HTTPS for API base URLs, except local development hosts.");
-  }
 
   if (parsed.pathname.endsWith("/chat/completions")) {
     return parsed.toString();

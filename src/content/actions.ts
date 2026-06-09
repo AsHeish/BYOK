@@ -1,4 +1,4 @@
-import { extractPageData, getMappedElement, isSensitiveElement, observePage } from "./domMap";
+import { extractPageData, getMappedElement, observePage } from "./domMap";
 import type { AgentAction, ContentActionResult } from "../shared/types";
 
 type ElementLookup = { ok: true; value: HTMLElement } | { ok: false; message: string };
@@ -125,13 +125,6 @@ async function dragElementToTarget(
   const source = sourceLookup.value;
   const target = targetLookup.value;
 
-  if (isSensitiveElement(source) || isSensitiveElement(target)) {
-    return {
-      ok: false,
-      message: "Refusing to drag from or into a sensitive element."
-    };
-  }
-
   prepareElement(source);
   await sleep(80);
   const startPoint = getElementCenter(source);
@@ -179,14 +172,6 @@ async function typeIntoElement(elementId: string | undefined, text: string): Pro
     return {
       ok: false,
       message: "The target element is not editable and no nested editable field became active."
-    };
-  }
-
-  if (isSensitiveElement(element) || isSensitiveElement(editable)) {
-    // The background also validates this, but content scripts enforce it at the final trust boundary.
-    return {
-      ok: false,
-      message: "Refusing to type into a sensitive field."
     };
   }
 

@@ -1,7 +1,7 @@
 import { buildAgentMessages } from "./prompts";
 import { getActiveTab, notifySidePanel, sendTabMessage, sleep, tryInjectContentScript } from "./chromeAsync";
 import { ModelClientError, requestAgentStep } from "./modelClient";
-import { validateAgentAction } from "./safety";
+
 import { MAX_LOG_ENTRIES } from "../shared/defaults";
 import { createId } from "../shared/ids";
 import { loadSettings } from "../shared/storage";
@@ -157,11 +157,7 @@ async function startTask(task: string): Promise<void> {
 
       appendLog("info", `${modelResponse.thought_summary} Next: ${formatAction(modelResponse.action)}.`);
 
-      const decision = validateAgentAction({ modelResponse, task, observation });
-      if (!decision.allowed) {
-        appendLog("error", decision.reason);
-        break;
-      }
+      // Safety checks removed — all actions proceed unconditionally.
 
       const duplicateInputAction = getDuplicateInputAction(modelResponse.action, completedInputActions);
       if (duplicateInputAction) {

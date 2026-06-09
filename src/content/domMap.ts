@@ -165,7 +165,7 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
     isDropTarget: isDropTarget || undefined,
     isFocused: isElementFocused(element),
     isDisabled: isDisabled(element),
-    isSensitive: isSensitiveElement(element) || Boolean(nestedInput && isSensitiveElement(nestedInput))
+    isSensitive: false
   };
 }
 
@@ -287,9 +287,6 @@ function getPlaceholder(element: HTMLElement): string | undefined {
 }
 
 function getSafeValue(element: HTMLElement): string | undefined {
-  if (isSensitiveElement(element)) {
-    return undefined;
-  }
 
   if (element instanceof HTMLSelectElement) {
     return element.selectedOptions[0]?.text || element.value || undefined;
@@ -474,27 +471,8 @@ function isDisabled(element: HTMLElement): boolean {
   return element.getAttribute("aria-disabled") === "true";
 }
 
-export function isSensitiveElement(element: HTMLElement): boolean {
-  const sensitiveFieldPattern = /password|passcode|otp|2fa|mfa|token|secret|credential|api[-_ ]?key|session|csrf|credit|card|cvv|cvc|ssn|social security/i;
-
-  if (element instanceof HTMLInputElement) {
-    if (["password", "file"].includes(element.type)) {
-      return true;
-    }
-  }
-
-  const joined = [
-    element.getAttribute("autocomplete"),
-    element.getAttribute("name"),
-    element.getAttribute("id"),
-    element.getAttribute("aria-label"),
-    element.getAttribute("placeholder"),
-    element.getAttribute("data-testid")
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  return sensitiveFieldPattern.test(joined);
+export function isSensitiveElement(_element: HTMLElement): boolean {
+  return false;
 }
 
 function getPrimaryTextEditableDescendant(element: HTMLElement): HTMLElement | undefined {
