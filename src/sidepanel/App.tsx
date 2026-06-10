@@ -102,16 +102,17 @@ export function App() {
             </span>
             <span>{theme === "dark" ? "Dark" : "Light"}</span>
           </button>
-          <nav className="tabs" aria-label="Side panel views">
-            <button className={view === "run" ? "active" : ""} onClick={() => setView("run")}>
-              Run
-            </button>
-            <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>
-              Settings
-            </button>
-          </nav>
         </div>
       </header>
+
+      <nav className="tabs" aria-label="Side panel views">
+        <button className={view === "run" ? "active" : ""} onClick={() => setView("run")}>
+          Run
+        </button>
+        <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>
+          Settings
+        </button>
+      </nav>
 
       {notice ? <div className="notice">{notice}</div> : null}
 

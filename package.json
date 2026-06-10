@@ -1,6 +1,6 @@
 {
   "name": "byok-browser-agent",
-  "version": "0.1.22",
+  "version": "0.1.24",
   "private": true,
   "description": "Manifest V3 BYOK AI browser agent extension for Chrome and Edge.",
   "type": "module",
