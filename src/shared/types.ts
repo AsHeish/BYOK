@@ -25,6 +25,7 @@ export type RiskLevel = "low" | "medium" | "high";
 
 export type AgentActionType =
   | "click"
+  | "multi_click"
   | "drag"
   | "fill"
   | "type"
@@ -39,6 +40,7 @@ export type AgentActionType =
 export interface AgentAction {
   type: AgentActionType;
   elementId?: string;
+  elementIds?: string[];
   targetElementId?: string;
   text?: string;
   key?: "Tab" | "Shift+Tab";
@@ -64,6 +66,7 @@ export interface DomElementInfo {
   context?: string;
   questionNumber?: string;
   value?: string;
+  checkedState?: "checked" | "unchecked" | "mixed";
   href?: string;
   options?: string[];
   isDraggable?: boolean;
@@ -83,6 +86,7 @@ export interface PageObservation {
 export interface ContentActionResult {
   ok: boolean;
   message: string;
+  recoverable?: boolean;
   observation?: PageObservation;
   data?: unknown;
 }

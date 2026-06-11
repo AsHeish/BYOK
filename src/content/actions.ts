@@ -1,7 +1,7 @@
-import { extractPageData, getMappedElement, observePage } from "./domMap";
+import { extractPageData, findMappedElementReplacement, getMappedElement, observePage } from "./domMap";
 import type { AgentAction, ContentActionResult } from "../shared/types";
 
-type ElementLookup = { ok: true; value: HTMLElement } | { ok: false; message: string };
+type ElementLookup = { ok: true; value: HTMLElement } | { ok: false; message: string; recoverable?: boolean };
 type TextEditableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
 
 const textEditableSelector = [
@@ -34,6 +34,9 @@ export async function executeAction(action: AgentAction): Promise<ContentActionR
   switch (action.type) {
     case "click":
       return withFreshObservation(clickElement(action.elementId));
+
+    case "multi_click":
+      return withFreshObservation(clickMultipleElements(action.elementIds));
 
     case "drag":
       return withFreshObservation(dragElementToTarget(action.elementId, action.targetElementId));
@@ -83,6 +86,12 @@ async function withFreshObservation(
 ): Promise<ContentActionResult> {
   const result = await resultOrPromise;
   if (!result.ok) {
+    if (result.recoverable) {
+      return {
+        ...result,
+        observation: observePage()
+      };
+    }
     return result;
   }
 
@@ -105,6 +114,49 @@ function clickElement(elementId?: string): ContentActionResult {
   return {
     ok: true,
     message: `Clicked ${describeElement(element)}.`
+  };
+}
+
+async function clickMultipleElements(elementIds?: string[]): Promise<ContentActionResult> {
+  const uniqueElementIds = Array.from(new Set(elementIds || [])).filter(Boolean);
+  if (uniqueElementIds.length === 0) {
+    return {
+      ok: false,
+      message: "multi_click requires at least one elementId in elementIds."
+    };
+  }
+
+  const elements: HTMLElement[] = [];
+  for (const elementId of uniqueElementIds) {
+    const lookup = requireElement(elementId);
+    if (!lookup.ok) {
+      return {
+        ok: false,
+        recoverable: lookup.recoverable,
+        message: `Could not multi-click ${elementId}: ${lookup.message}`
+      };
+    }
+    elements.push(lookup.value);
+  }
+
+  const clicked: string[] = [];
+  const skipped: string[] = [];
+  for (const element of elements) {
+    const target = getBestActivationTarget(element);
+    if (isAlreadySelectedChoice(target)) {
+      skipped.push(describeElement(target));
+      continue;
+    }
+
+    activateElement(element);
+    clicked.push(describeElement(target));
+    await sleep(80);
+  }
+
+  const skippedMessage = skipped.length ? ` Skipped already selected: ${skipped.join(", ")}.` : "";
+  return {
+    ok: true,
+    message: `Selected ${clicked.length} option${clicked.length === 1 ? "" : "s"}: ${clicked.join(", ") || "none"}.${skippedMessage}`
   };
 }
 
@@ -675,21 +727,23 @@ function requireElement(elementId?: string): ElementLookup {
   }
 
   const element = getMappedElement(elementId);
-  if (!element || !document.documentElement.contains(element)) {
+  const currentElement = element && document.documentElement.contains(element) ? element : findMappedElementReplacement(elementId);
+  if (!currentElement || !document.documentElement.contains(currentElement)) {
     return {
       ok: false,
-      message: "The target element is no longer available."
+      recoverable: true,
+      message: "The target element is no longer available. Refreshed the page context; choose a current visible element ID next."
     };
   }
 
-  if (isDisabled(element)) {
+  if (isDisabled(currentElement)) {
     return {
       ok: false,
       message: "The target element is disabled."
     };
   }
 
-  return { ok: true, value: element };
+  return { ok: true, value: currentElement };
 }
 
 function isDisabled(element: HTMLElement): boolean {
@@ -738,6 +792,19 @@ function activateElement(element: HTMLElement): void {
 
   dispatchPointerSequence(target);
   target.click();
+}
+
+function isAlreadySelectedChoice(element: HTMLElement): boolean {
+  if (element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")) {
+    return element.checked;
+  }
+
+  const nestedChoice = element.querySelector<HTMLInputElement>("input[type='checkbox'],input[type='radio']");
+  if (nestedChoice) {
+    return nestedChoice.checked;
+  }
+
+  return element.getAttribute("aria-checked") === "true" || element.getAttribute("aria-selected") === "true";
 }
 
 function getBestActivationTarget(element: HTMLElement): HTMLElement {

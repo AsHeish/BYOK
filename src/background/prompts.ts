@@ -1,6 +1,6 @@
 import type { AgentModelResponse, PageObservation } from "../shared/types";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.20";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.27";
 
 export function buildAgentMessages(args: {
   task: string;
@@ -22,14 +22,18 @@ export function buildAgentMessages(args: {
         "- For custom form controls, an outer div may represent a textbox. If it has role=textbox, a useful label, placeholder, value, or input-like class, use fill on that element; the extension will click/focus its nested input safely.",
         "- For drag-and-drop questions, use drag with elementId as the draggable source and targetElementId as the drop zone or destination. Use one drag per step, then observe again.",
         "- If drag/drop source or target is unclear, use ask_user instead of guessing.",
+        "- For multiple-answer checkbox or multi-select questions where several options are correct for the same question, use one multi_click action with elementIds containing all correct option element IDs. Do not call one click at a time for those options.",
+        "- Use multi_click only for options that can be selected together. For single-answer radio questions, use one click for the single correct option.",
         "- When multiple fields have the same label, use each element's problem and context fields to decide which question it belongs to. Do not rely only on repeated labels like \"Your Submission\".",
         "- Do not copy the same option number into multiple questions unless each field's own context independently supports that answer.",
         "- Do not fill any field that already has a non-empty value in the observation, even if the value differs from the answer you planned. Move to the next empty field or finish.",
         "- If the previous action result says a field was skipped because it already has a value or was skipped and advanced, never retry that same element. Use the element marked focused=true, choose the next empty field, or return done.",
+        "- If the previous action result says the target element is no longer available, do not retry that stale elementId. Use the refreshed observation and pick a current element ID.",
         "- If the user asks to keep pressing Tab or move to the next input, use press_key with key=\"Tab\". The next observation will mark the newly focused element with focused=true.",
         "",
         "Allowed action schema:",
-        "Action type must be one of: click, drag, fill, type, select, press_key, scroll, navigate, extract, ask_user, done.",
+        "Action type must be one of: click, multi_click, drag, fill, type, select, press_key, scroll, navigate, extract, ask_user, done.",
+        "For multi_click, set elementIds to an array of the option IDs to select in the same browser action.",
         "For drag, set elementId to the draggable source and targetElementId to the destination/drop zone.",
         "For fill and type, set elementId and text. Use fill for normal form input because it combines click/focus and typing.",
         "For press_key, set key to Tab or Shift+Tab.",
@@ -64,6 +68,7 @@ function exampleResponse(): AgentModelResponse {
     action: {
       type: "fill",
       elementId: "optional",
+      elementIds: ["optional"],
       targetElementId: "optional",
       text: "optional",
       key: "Tab",
@@ -87,6 +92,7 @@ function formatObservation(observation: PageObservation): string {
         element.questionNumber ? `problem=${element.questionNumber}` : "",
         element.context ? `context=${quote(element.context, 700)}` : "",
         element.value ? `value=${quote(element.value)}` : "",
+        element.checkedState ? `checkedState=${element.checkedState}` : "",
         element.href ? `href=${quote(element.href)}` : "",
         element.options?.length ? `options=${quote(element.options.join(" | "))}` : "",
         element.isDraggable ? "draggable=true" : "",

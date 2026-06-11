@@ -354,8 +354,16 @@ function isAgentModelResponse(value: unknown): value is AgentModelResponse {
     return false;
   }
 
-  const actionTypes = ["click", "drag", "fill", "type", "select", "press_key", "scroll", "navigate", "extract", "ask_user", "done"];
-  return actionTypes.includes(value.action.type);
+  const actionTypes = ["click", "multi_click", "drag", "fill", "type", "select", "press_key", "scroll", "navigate", "extract", "ask_user", "done"];
+  if (!actionTypes.includes(value.action.type)) {
+    return false;
+  }
+
+  if (value.action.type === "multi_click") {
+    return Array.isArray(value.action.elementIds) && value.action.elementIds.every((elementId) => typeof elementId === "string");
+  }
+
+  return true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -61,10 +61,13 @@ const interactiveSelector = [
 
 const weakIds = new WeakMap<Element, string>();
 const currentElements = new Map<string, HTMLElement>();
+const currentElementInfo = new Map<string, DomElementInfo>();
+const historicalElementInfo = new Map<string, DomElementInfo>();
 let nextElementId = 1;
 
 export function observePage(): PageObservation {
   currentElements.clear();
+  currentElementInfo.clear();
 
   const elements = getCandidateInteractiveElements()
     .filter(isVisibleElement)
@@ -112,6 +115,37 @@ export function getMappedElement(elementId: string): HTMLElement | undefined {
   return currentElements.get(elementId);
 }
 
+export function findMappedElementReplacement(elementId: string): HTMLElement | undefined {
+  const snapshot = currentElementInfo.get(elementId) || historicalElementInfo.get(elementId);
+  if (!snapshot) {
+    return undefined;
+  }
+
+  observePage();
+
+  const refreshedElement = currentElements.get(elementId);
+  if (refreshedElement && document.documentElement.contains(refreshedElement)) {
+    return refreshedElement;
+  }
+
+  let bestMatch: { element: HTMLElement; score: number; tiedMatches: number } | undefined;
+  for (const candidate of getCandidateInteractiveElements().filter(isVisibleElement)) {
+    if (isDisabled(candidate)) {
+      continue;
+    }
+
+    const score = scoreElementMatch(snapshot, toElementInfo(candidate));
+    if (!bestMatch || score > bestMatch.score) {
+      bestMatch = { element: candidate, score, tiedMatches: 1 };
+    } else if (score === bestMatch.score) {
+      bestMatch.tiedMatches += 1;
+    }
+  }
+
+  const minimumScore = snapshot.context || snapshot.questionNumber ? 12 : 8;
+  return bestMatch && bestMatch.score >= minimumScore && bestMatch.tiedMatches === 1 ? bestMatch.element : undefined;
+}
+
 export function extractPageData(): ExtractedPageData {
   return {
     url: location.href,
@@ -147,7 +181,7 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
   const isDraggable = isDraggableElement(element);
   const isDropTarget = isDropTargetElement(element);
 
-  return {
+  const info: DomElementInfo = {
     id,
     tag,
     role: element.getAttribute("role") || implicitRole(element),
@@ -159,6 +193,7 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
     context: questionContext?.text,
     questionNumber: questionContext?.questionNumber,
     value: getSafeValue(element),
+    checkedState: getCheckedState(element),
     href: element instanceof HTMLAnchorElement ? element.href : undefined,
     options: nestedSelect ? Array.from(nestedSelect.options).map((option) => option.text || option.value).slice(0, 30) : undefined,
     isDraggable: isDraggable || undefined,
@@ -167,6 +202,80 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
     isDisabled: isDisabled(element),
     isSensitive: false
   };
+
+  rememberElementInfo(info);
+  return info;
+}
+
+function rememberElementInfo(info: DomElementInfo): void {
+  currentElementInfo.set(info.id, info);
+  historicalElementInfo.set(info.id, info);
+
+  while (historicalElementInfo.size > 300) {
+    const oldestId = historicalElementInfo.keys().next().value;
+    if (!oldestId) {
+      break;
+    }
+    historicalElementInfo.delete(oldestId);
+  }
+}
+
+function scoreElementMatch(snapshot: DomElementInfo, candidate: DomElementInfo): number {
+  let score = 0;
+
+  if (snapshot.tag === candidate.tag) {
+    score += 2;
+  }
+  if (snapshot.role && snapshot.role === candidate.role) {
+    score += 2;
+  }
+  if (snapshot.type && snapshot.type === candidate.type) {
+    score += 2;
+  }
+  if (snapshot.name && snapshot.name === candidate.name) {
+    score += 5;
+  }
+  if (snapshot.placeholder && snapshot.placeholder === candidate.placeholder) {
+    score += 4;
+  }
+  if (snapshot.questionNumber && snapshot.questionNumber === candidate.questionNumber) {
+    score += 8;
+  }
+
+  score += scoreTextField(snapshot.label, candidate.label, 8, 4);
+  score += scoreTextField(snapshot.text, candidate.text, 7, 3);
+  score += scoreTextField(snapshot.context, candidate.context, 10, 5);
+
+  if (snapshot.checkedState && candidate.checkedState) {
+    score += 1;
+  }
+  if (snapshot.isDraggable && candidate.isDraggable) {
+    score += 3;
+  }
+  if (snapshot.isDropTarget && candidate.isDropTarget) {
+    score += 3;
+  }
+
+  return score;
+}
+
+function scoreTextField(
+  snapshotValue: string | undefined,
+  candidateValue: string | undefined,
+  exactScore: number,
+  partialScore: number
+): number {
+  const snapshotText = normalizeText(snapshotValue || "").toLowerCase();
+  const candidateText = normalizeText(candidateValue || "").toLowerCase();
+  if (!snapshotText || !candidateText) {
+    return 0;
+  }
+
+  if (snapshotText === candidateText) {
+    return exactScore;
+  }
+
+  return snapshotText.includes(candidateText) || candidateText.includes(snapshotText) ? partialScore : 0;
 }
 
 function getOrCreateElementId(element: Element): string {
@@ -304,6 +413,29 @@ function getSafeValue(element: HTMLElement): string | undefined {
   const nestedEditable = getPrimaryTextEditableDescendant(element);
   if (nestedEditable && nestedEditable !== element) {
     return getSafeValue(nestedEditable);
+  }
+
+  return undefined;
+}
+
+function getCheckedState(element: HTMLElement): "checked" | "unchecked" | "mixed" | undefined {
+  if (element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")) {
+    return element.checked ? "checked" : "unchecked";
+  }
+
+  const nestedChoice = element.querySelector<HTMLInputElement>("input[type='checkbox'],input[type='radio']");
+  if (nestedChoice) {
+    return nestedChoice.checked ? "checked" : "unchecked";
+  }
+
+  const ariaChecked = element.getAttribute("aria-checked");
+  if (ariaChecked === "true" || ariaChecked === "false" || ariaChecked === "mixed") {
+    return ariaChecked === "true" ? "checked" : ariaChecked === "mixed" ? "mixed" : "unchecked";
+  }
+
+  const ariaSelected = element.getAttribute("aria-selected");
+  if (ariaSelected === "true" || ariaSelected === "false") {
+    return ariaSelected === "true" ? "checked" : "unchecked";
   }
 
   return undefined;

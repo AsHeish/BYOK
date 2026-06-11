@@ -108,6 +108,7 @@ The model must return strict JSON only:
   "action": {
     "type": "click",
     "elementId": "optional",
+    "elementIds": ["optional"],
     "targetElementId": "optional",
     "text": "optional",
     "key": "Tab",
@@ -117,7 +118,7 @@ The model must return strict JSON only:
 }
 ```
 
-Supported action types are `click`, `drag`, `fill`, `type`, `select`, `press_key`, `scroll`, `navigate`, `extract`, `ask_user`, and `done`. For drag-and-drop widgets, the model uses `elementId` as the draggable item and `targetElementId` as the destination.
+Supported action types are `click`, `multi_click`, `drag`, `fill`, `type`, `select`, `press_key`, `scroll`, `navigate`, `extract`, `ask_user`, and `done`. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For drag-and-drop widgets, the model uses `elementId` as the draggable item and `targetElementId` as the destination.
 
 ## Known First-Version Limits
 

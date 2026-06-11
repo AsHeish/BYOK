@@ -163,8 +163,8 @@ async function startTask(task: string): Promise<void> {
       if (duplicateInputAction) {
         const duplicateResult = await handleDuplicateInputAction(tab.id, modelResponse.action, duplicateInputAction);
         previousResult = duplicateResult.message;
-        appendLog(duplicateResult.ok ? "warning" : "error", duplicateResult.message);
-        if (!duplicateResult.ok || isStopped(taskId)) {
+        appendLog(duplicateResult.ok || duplicateResult.recoverable ? "warning" : "error", duplicateResult.message);
+        if ((!duplicateResult.ok && !duplicateResult.recoverable) || isStopped(taskId)) {
           break;
         }
         await sleep(300);
@@ -176,9 +176,9 @@ async function startTask(task: string): Promise<void> {
         rememberCompletedInputAction(modelResponse.action, completedInputActions);
       }
       previousResult = loopResult.message;
-      appendLog(loopResult.ok ? "success" : "error", loopResult.message);
+      appendLog(loopResult.ok ? "success" : loopResult.recoverable ? "warning" : "error", loopResult.message);
 
-      if (loopResult.shouldStop || !loopResult.ok || isStopped(taskId)) {
+      if (loopResult.shouldStop || (!loopResult.ok && !loopResult.recoverable) || isStopped(taskId)) {
         break;
       }
 
@@ -201,7 +201,7 @@ async function startTask(task: string): Promise<void> {
 async function handleValidatedAction(
   tabId: number,
   modelResponse: AgentModelResponse
-): Promise<{ ok: boolean; message: string; shouldStop: boolean }> {
+): Promise<{ ok: boolean; message: string; shouldStop: boolean; recoverable?: boolean }> {
   const action = modelResponse.action;
 
   if (action.type === "done") {
@@ -224,7 +224,8 @@ async function handleValidatedAction(
   return {
     ok: result.ok,
     message: result.message,
-    shouldStop: false
+    shouldStop: false,
+    recoverable: result.recoverable
   };
 }
 
@@ -321,6 +322,9 @@ function isSupportedTabUrl(url?: string): url is string {
 }
 
 function formatAction(action: AgentAction): string {
+  if (action.type === "multi_click") {
+    return `select ${action.elementIds?.length || 0} options`;
+  }
   if (action.type === "drag") {
     return `drag ${action.elementId || "source"} to ${action.targetElementId || "target"}`;
   }
@@ -357,7 +361,7 @@ async function handleDuplicateInputAction(
   tabId: number,
   action: AgentAction,
   duplicate: DuplicateInputAction
-): Promise<{ ok: boolean; message: string }> {
+): Promise<{ ok: boolean; message: string; recoverable?: boolean }> {
   if (!duplicate.shouldAdvanceFocus) {
     return {
       ok: true,
@@ -374,6 +378,7 @@ async function handleDuplicateInputAction(
   if (!advanceResult.ok) {
     return {
       ok: false,
+      recoverable: advanceResult.recoverable,
       message: `${duplicate.message} Could not advance automatically: ${advanceResult.message}`
     };
   }
@@ -390,6 +395,13 @@ function getDuplicateInputAction(action: AgentAction, completedInputActions: Set
     return undefined;
   }
 
+  if (action.type === "multi_click") {
+    return {
+      message: `Skipped repeated multi_click for ${action.elementIds?.length || 0} options; that option set was already handled.`,
+      shouldAdvanceFocus: false
+    };
+  }
+
   return {
     message: `Skipped repeated ${action.type} on ${action.elementId}; that field was already handled.`,
     shouldAdvanceFocus: action.type === "fill" || action.type === "type"
@@ -404,6 +416,10 @@ function rememberCompletedInputAction(action: AgentAction, completedInputActions
 }
 
 function getInputActionKey(action: AgentAction): string | undefined {
+  if (action.type === "multi_click") {
+    return action.elementIds?.length ? `multi_click:${[...action.elementIds].sort().join(",")}` : undefined;
+  }
+
   if ((action.type !== "fill" && action.type !== "type" && action.type !== "select") || !action.elementId) {
     return undefined;
   }
