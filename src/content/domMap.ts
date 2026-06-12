@@ -1,8 +1,30 @@
 import type { DomElementInfo, ExtractedPageData, PageObservation } from "../shared/types";
 
 const MAX_DOM_ELEMENTS = 80;
-const MAX_PAGE_TEXT_CHARS = 12000;
+const MAX_PAGE_TEXT_CHARS = 10000;
 const MAX_ELEMENT_CONTEXT_CHARS = 900;
+const READABLE_TEXT_SELECTOR = [
+  "main",
+  "article",
+  "section",
+  "form",
+  "[role='main']",
+  "[class*='question']",
+  "[class*='Question']",
+  "[class*='problem']",
+  "[class*='Problem']",
+  "h1",
+  "h2",
+  "h3",
+  "p",
+  "li",
+  "label",
+  "button",
+  "summary",
+  "td",
+  "th",
+  "div"
+].join(",");
 
 const textEditableSelector = [
   "input:not([type='hidden']):not([type='button']):not([type='submit']):not([type='reset']):not([type='checkbox']):not([type='radio']):not([type='file'])",
@@ -71,6 +93,7 @@ export function observePage(): PageObservation {
 
   const elements = getCandidateInteractiveElements()
     .filter(isVisibleElement)
+    .sort(compareElementsForCurrentViewport)
     .slice(0, MAX_DOM_ELEMENTS)
     .map(toElementInfo);
 
@@ -291,8 +314,104 @@ function getOrCreateElementId(element: Element): string {
 }
 
 function getReadableText(): string {
+  const viewportText = getScrollAwareReadableText();
+  if (viewportText) {
+    return viewportText;
+  }
+
   const text = normalizeText(document.body?.innerText || document.documentElement.textContent || "");
   return text.slice(0, MAX_PAGE_TEXT_CHARS);
+}
+
+function getScrollAwareReadableText(): string {
+  const textBlocks = Array.from(document.querySelectorAll<HTMLElement>(READABLE_TEXT_SELECTOR))
+    .filter(isVisibleElement)
+    .map((element) => ({ element, rect: element.getBoundingClientRect(), text: getDirectReadableBlockText(element) }))
+    .filter((block) => block.text.length > 0)
+    .sort((a, b) => scoreBlockForCurrentViewport(a.rect) - scoreBlockForCurrentViewport(b.rect));
+
+  const selectedBlocks: Array<{ top: number; text: string }> = [];
+  let usedChars = 0;
+  const seen = new Set<string>();
+
+  for (const block of textBlocks) {
+    const text = block.text.slice(0, 900);
+    if (seen.has(text)) {
+      continue;
+    }
+
+    const nextCost = text.length + 1;
+    if (usedChars + nextCost > MAX_PAGE_TEXT_CHARS) {
+      continue;
+    }
+
+    selectedBlocks.push({ top: block.rect.top + window.scrollY, text });
+    seen.add(text);
+    usedChars += nextCost;
+  }
+
+  return normalizeText(
+    selectedBlocks
+      .sort((a, b) => a.top - b.top)
+      .map((block) => block.text)
+      .join("\n")
+  ).slice(0, MAX_PAGE_TEXT_CHARS);
+}
+
+function getDirectReadableBlockText(element: HTMLElement): string {
+  const tag = element.tagName.toLowerCase();
+  const text = normalizeText(element.innerText || element.textContent || "");
+  if (!text) {
+    return "";
+  }
+
+  const className = String(element.getAttribute("class") || "");
+  const isQuestionLike = /question|problem|prompt|answer|quiz|module|task/i.test(className);
+
+  if (["main", "article", "section", "form"].includes(tag) || element.getAttribute("role") === "main") {
+    return text.length <= 1400 ? text : "";
+  }
+
+  if (tag === "div" && text.length > 700 && !isQuestionLike) {
+    return "";
+  }
+
+  return text;
+}
+
+function scoreBlockForCurrentViewport(rect: DOMRect): number {
+  const viewportHeight = Math.max(window.innerHeight, 1);
+  const viewportTop = 0;
+  const viewportBottom = viewportHeight;
+
+  if (rect.bottom >= viewportTop && rect.top <= viewportBottom) {
+    return Math.abs(rect.top) * 0.1;
+  }
+
+  if (rect.top > viewportBottom) {
+    return viewportHeight + rect.top - viewportBottom;
+  }
+
+  return viewportHeight * 4 + Math.abs(rect.bottom);
+}
+
+function compareElementsForCurrentViewport(a: HTMLElement, b: HTMLElement): number {
+  return scoreElementForCurrentViewport(a) - scoreElementForCurrentViewport(b);
+}
+
+function scoreElementForCurrentViewport(element: HTMLElement): number {
+  const rect = element.getBoundingClientRect();
+  const viewportHeight = Math.max(window.innerHeight, 1);
+
+  if (rect.bottom >= 0 && rect.top <= viewportHeight) {
+    return Math.max(0, rect.top);
+  }
+
+  if (rect.top > viewportHeight) {
+    return viewportHeight + rect.top - viewportHeight;
+  }
+
+  return viewportHeight * 4 + Math.abs(rect.bottom);
 }
 
 function getElementText(element: HTMLElement): string | undefined {

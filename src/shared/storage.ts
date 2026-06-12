@@ -4,6 +4,10 @@ import type { AgentSettings, AiConfigurationProfile, Provider } from "./types";
 const SETTINGS_KEY = "byokAgentSettings";
 const TASK_DRAFT_KEY = "byokAgentTaskDraft";
 const CONFIG_PROFILES_KEY = "byokAgentConfigProfiles";
+const MIN_MAX_STEPS = 1;
+const MAX_MAX_STEPS = 60;
+const MIN_REQUEST_TIMEOUT_SECONDS = 10;
+const MAX_REQUEST_TIMEOUT_SECONDS = 300;
 
 function normalizeProvider(value: unknown): Provider {
   if (
@@ -32,8 +36,15 @@ export async function loadSettings(): Promise<AgentSettings> {
     apiKey: String(raw?.apiKey || ""),
     model: String(raw?.model || DEFAULT_SETTINGS.model),
     maxSteps: Math.min(
-      Math.max(Number(raw?.maxSteps || DEFAULT_SETTINGS.maxSteps), 1),
-      60,
+      Math.max(Number(raw?.maxSteps || DEFAULT_SETTINGS.maxSteps), MIN_MAX_STEPS),
+      MAX_MAX_STEPS,
+    ),
+    requestTimeoutSeconds: Math.min(
+      Math.max(
+        Number(raw?.requestTimeoutSeconds || DEFAULT_SETTINGS.requestTimeoutSeconds),
+        MIN_REQUEST_TIMEOUT_SECONDS,
+      ),
+      MAX_REQUEST_TIMEOUT_SECONDS,
     ),
     theme:
       raw?.theme === "light" || raw?.theme === "dark"
@@ -49,7 +60,11 @@ export async function saveSettings(settings: AgentSettings): Promise<void> {
     [SETTINGS_KEY]: {
       ...settings,
       apiBaseUrl: settings.apiBaseUrl.replace(/\/+$/, ""),
-      maxSteps: Math.min(Math.max(settings.maxSteps, 1), 30),
+      maxSteps: Math.min(Math.max(settings.maxSteps, MIN_MAX_STEPS), MAX_MAX_STEPS),
+      requestTimeoutSeconds: Math.min(
+        Math.max(settings.requestTimeoutSeconds, MIN_REQUEST_TIMEOUT_SECONDS),
+        MAX_REQUEST_TIMEOUT_SECONDS,
+      ),
     },
   });
 }
@@ -93,7 +108,11 @@ export async function saveConfigurationProfile(
     apiBaseUrl: settings.apiBaseUrl.replace(/\/+$/, ""),
     apiKey: settings.apiKey,
     model: settings.model,
-    maxSteps: Math.min(Math.max(settings.maxSteps, 1), 30),
+    maxSteps: Math.min(Math.max(settings.maxSteps, MIN_MAX_STEPS), MAX_MAX_STEPS),
+    requestTimeoutSeconds: Math.min(
+      Math.max(settings.requestTimeoutSeconds, MIN_REQUEST_TIMEOUT_SECONDS),
+      MAX_REQUEST_TIMEOUT_SECONDS,
+    ),
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   };
@@ -132,6 +151,7 @@ export function applyConfigurationProfile(
     apiKey: profile.apiKey,
     model: profile.model,
     maxSteps: profile.maxSteps,
+    requestTimeoutSeconds: profile.requestTimeoutSeconds,
   };
 }
 
@@ -162,8 +182,15 @@ function normalizeProfiles(value: unknown): AiConfigurationProfile[] {
         apiKey: String(raw.apiKey || ""),
         model: String(raw.model || DEFAULT_SETTINGS.model),
         maxSteps: Math.min(
-          Math.max(Number(raw.maxSteps || DEFAULT_SETTINGS.maxSteps), 1),
-          30,
+          Math.max(Number(raw.maxSteps || DEFAULT_SETTINGS.maxSteps), MIN_MAX_STEPS),
+          MAX_MAX_STEPS,
+        ),
+        requestTimeoutSeconds: Math.min(
+          Math.max(
+            Number(raw.requestTimeoutSeconds || DEFAULT_SETTINGS.requestTimeoutSeconds),
+            MIN_REQUEST_TIMEOUT_SECONDS,
+          ),
+          MAX_REQUEST_TIMEOUT_SECONDS,
         ),
         createdAt: Number(raw.createdAt || Date.now()),
         updatedAt: Number(raw.updatedAt || Date.now()),

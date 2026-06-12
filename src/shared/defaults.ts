@@ -5,7 +5,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   apiBaseUrl: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-4o-mini",
-  maxSteps: 12,
+  maxSteps: 60,
+  requestTimeoutSeconds: 60,
   theme: "dark"
 };
 
@@ -23,6 +24,6 @@ export const PROVIDER_DEFAULT_MODELS = {
   custom: ""
 } as const;
 
-export const MAX_PAGE_TEXT_CHARS = 12000;
+export const MAX_PAGE_TEXT_CHARS = 10000;
 export const MAX_DOM_ELEMENTS = 80;
 export const MAX_LOG_ENTRIES = 80;

@@ -65,10 +65,12 @@ The side-panel settings support:
 - `apiBaseUrl`: defaults to `https://api.openai.com/v1`, `https://generativelanguage.googleapis.com/v1beta/openai`, or `https://api.groq.com/openai/v1`.
 - `apiKey`: stored with `chrome.storage.local`.
 - `model`: any model name accepted by the configured compatible endpoint.
-- `maxSteps`: maximum observe/act loop iterations.
-- Named AI profiles: save the current provider/base URL/API key/model/max steps under a name, then apply or delete profiles from Settings.
+- `maxSteps`: maximum observe/act loop iterations, default `60`.
+- `requestTimeoutSeconds`: AI request timeout per attempt, default `60`.
+- Named AI profiles: save the current provider/base URL/API key/model/max steps/timeout under a name, then apply or delete profiles from Settings.
 
 The extension uses `fetch` against `POST {apiBaseUrl}/chat/completions` with OpenAI-compatible chat-completions JSON. No paid SDK is used.
+Each AI request uses the configured timeout and automatically retries before surfacing a timeout error.
 
 ## Prompt Caching
 
@@ -89,9 +91,9 @@ The agent loop executes one action or a bounded action batch at a time:
 
 1. Content script observes readable page text and visible interactive elements.
 2. Background service worker asks the model for strict JSON.
-3. Background normalizes either `action` or `actions` into up to 5 ordered actions.
-4. Content script executes supported actions in order and observes again.
-5. If an action fails recoverably, the loop continues with a fresh observation.
+3. Background normalizes either `action` or `actions` into ordered actions.
+4. Content script executes up to 10 supported actions in order.
+5. Fail-safe mode stops the remaining batch on failure, stale elements, `ask_user`, `done`, or navigation, then sends completed-action progress into the next model prompt.
 
 `src/background/safety.ts` is present for reinstating policy checks, but this local test build currently bypasses background safety validation. Content execution still only supports the defined action schema.
 
@@ -99,7 +101,7 @@ API keys are profile-local extension data, not a secure vault. Use scoped, revoc
 
 ## Model Response Format
 
-The model must return strict JSON only. Use `action` for one action, or `actions` for a 2-5 step ordered batch:
+The model must return strict JSON only. Use `action` for one action, or `actions` for an ordered batch of up to 10 actions. The extension executes until the batch ends or a fail-safe stop condition:
 
 ```json
 {
@@ -120,6 +122,8 @@ The model must return strict JSON only. Use `action` for one action, or `actions
 ```
 
 Supported action types are `click`, `multi_click`, `drag`, `multi_drag`, `fill`, `type`, `select`, `press_key`, `scroll`, `navigate`, `extract`, `ask_user`, and `done`. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For multiple drag-and-drop pairs, `multi_drag` uses `dragPairs: [{ "elementId": "source", "targetElementId": "target" }]`.
+
+Page observations are trimmed to roughly 4,000 input tokens. The readable text window is scroll-aware, so as the page scrolls down, old upper-page text drops out and lower-page text enters the model context.
 
 ## Known First-Version Limits
 

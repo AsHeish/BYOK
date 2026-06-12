@@ -1,6 +1,9 @@
 import type { AgentAction, AgentModelResponse, AgentSettings, RiskLevel } from "../shared/types";
 
-const MAX_ACTIONS_PER_MODEL_RESPONSE = 5;
+const MAX_ACTIONS_PER_MODEL_RESPONSE = 10;
+const MAX_MODEL_REQUEST_ATTEMPTS = 4;
+const MIN_REQUEST_TIMEOUT_SECONDS = 10;
+const MAX_REQUEST_TIMEOUT_SECONDS = 300;
 
 interface ChatMessage {
   role: "system" | "user";
@@ -47,18 +50,20 @@ export async function requestAgentStep(
   messages: ChatMessage[]
 ): Promise<AgentModelResponse> {
   const endpoint = buildChatCompletionsUrl(settings.apiBaseUrl);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const requestTimeoutMs = getRequestTimeoutMs(settings);
   const requestStartedAt = Date.now();
   let attempts = 0;
 
-  try {
-    let includeResponseFormat = true;
-    let includePromptCacheFields = shouldUsePromptCacheFields(settings);
-    let result: { response: Response; responseText: string } | undefined;
+  let includeResponseFormat = true;
+  let includePromptCacheFields = shouldUsePromptCacheFields(settings);
+  let result: { response: Response; responseText: string } | undefined;
 
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      attempts = attempt + 1;
+  for (let attempt = 0; attempt < MAX_MODEL_REQUEST_ATTEMPTS; attempt += 1) {
+    attempts = attempt + 1;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+
+    try {
       result = await postChatCompletion({
         endpoint,
         settings,
@@ -67,52 +72,72 @@ export async function requestAgentStep(
         includeResponseFormat,
         includePromptCacheFields
       });
+    } catch (error) {
+      if (isAbortError(error)) {
+        const willRetry = attempt < MAX_MODEL_REQUEST_ATTEMPTS - 1;
+        console.warn(
+          `[BYOK Agent] AI request timed out after ${requestTimeoutMs / 1000}s${
+            willRetry ? `; retrying automatically (${attempts + 1}/${MAX_MODEL_REQUEST_ATTEMPTS}).` : "."
+          }`
+        );
 
-      if (result.response.ok) {
-        break;
+        if (willRetry) {
+          continue;
+        }
+
+        logAiResponseTiming(settings, requestStartedAt, attempts, "timeout", false);
+        throw new ModelClientError(
+          `The model request timed out after ${requestTimeoutMs / 1000} seconds and automatic retries were exhausted.`
+        );
       }
 
-      if (includePromptCacheFields && shouldRetryWithoutPromptCacheFields(result.response.status, result.responseText)) {
-        includePromptCacheFields = false;
-        console.warn("[BYOK Agent] Provider rejected prompt cache fields; retrying without them.");
-        continue;
-      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
-      if (includeResponseFormat && shouldRetryWithoutResponseFormat(result.response.status, result.responseText)) {
-        includeResponseFormat = false;
-        continue;
-      }
-
+    if (result.response.ok) {
       break;
     }
 
-    if (!result) {
-      throw new ModelClientError("The model request could not be started.");
+    if (includePromptCacheFields && shouldRetryWithoutPromptCacheFields(result.response.status, result.responseText)) {
+      includePromptCacheFields = false;
+      console.warn("[BYOK Agent] Provider rejected prompt cache fields; retrying without them.");
+      continue;
     }
 
-    const { response, responseText } = result;
-    logAiResponseTiming(settings, requestStartedAt, attempts, response.status, response.ok);
-    if (!response.ok) {
-      throw new ModelClientError(formatHttpError(response.status, responseText), response.status);
+    if (includeResponseFormat && shouldRetryWithoutResponseFormat(result.response.status, result.responseText)) {
+      includeResponseFormat = false;
+      continue;
     }
 
-    let data: OpenAiChatCompletionResponse;
-    try {
-      data = JSON.parse(responseText) as OpenAiChatCompletionResponse;
-    } catch {
-      throw new ModelClientError("The model provider returned a non-JSON HTTP response.");
-    }
-
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new ModelClientError(data.error?.message || "The model response did not include content.");
-    }
-
-    logTokenUsage(settings.provider, data.usage);
-    return parseAgentJson(content);
-  } finally {
-    clearTimeout(timeoutId);
+    break;
   }
+
+  if (!result) {
+    throw new ModelClientError("The model request could not be started.");
+  }
+
+  const { response, responseText } = result;
+  logAiResponseTiming(settings, requestStartedAt, attempts, response.status, response.ok);
+  if (!response.ok) {
+    throw new ModelClientError(formatHttpError(response.status, responseText), response.status);
+  }
+
+  let data: OpenAiChatCompletionResponse;
+  try {
+    data = JSON.parse(responseText) as OpenAiChatCompletionResponse;
+  } catch {
+    throw new ModelClientError("The model provider returned a non-JSON HTTP response.");
+  }
+
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new ModelClientError(data.error?.message || "The model response did not include content.");
+  }
+
+  logTokenUsage(settings.provider, data.usage);
+  return parseAgentJson(content);
 }
 
 async function postChatCompletion(args: {
@@ -201,6 +226,14 @@ function shouldRetryWithoutPromptCacheFields(status: number, body: string): bool
   return status === 400 && /prompt_cache_key|prompt_cache_retention|prompt cache|prompt caching/i.test(body);
 }
 
+function getRequestTimeoutMs(settings: AgentSettings): number {
+  const seconds = Math.min(
+    Math.max(Number(settings.requestTimeoutSeconds || 60), MIN_REQUEST_TIMEOUT_SECONDS),
+    MAX_REQUEST_TIMEOUT_SECONDS
+  );
+  return seconds * 1000;
+}
+
 function shouldUsePromptCacheFields(settings: AgentSettings): boolean {
   return settings.provider === "openai";
 }
@@ -264,7 +297,7 @@ function logAiResponseTiming(
   settings: AgentSettings,
   startedAt: number,
   attempts: number,
-  status: number,
+  status: number | "timeout",
   ok: boolean
 ): void {
   console.info("[BYOK Agent] AI response time:", {
@@ -275,6 +308,13 @@ function logAiResponseTiming(
     status,
     ok
   });
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof DOMException && error.name === "AbortError" ||
+    isRecord(error) && error.name === "AbortError"
+  );
 }
 
 function getCachedTokenCount(usage: ChatUsage): number | undefined {
@@ -371,9 +411,7 @@ function normalizeAgentModelResponse(value: unknown): AgentModelResponse | undef
   }
 
   const rawActions = getRawActions(value);
-  const actions = rawActions
-    .flatMap(normalizeAgentAction)
-    .slice(0, MAX_ACTIONS_PER_MODEL_RESPONSE);
+  const actions = rawActions.flatMap(normalizeAgentAction).slice(0, MAX_ACTIONS_PER_MODEL_RESPONSE);
 
   if (actions.length === 0) {
     return undefined;

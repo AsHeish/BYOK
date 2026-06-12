@@ -25,7 +25,9 @@ let runningSession: RunningSession | undefined;
 let logs: AgentLogEntry[] = [];
 
 const SIDE_PANEL_PATH = "sidepanel.html";
-const MAX_ACTIONS_PER_AGENT_STEP = 5;
+const MAX_ACTIONS_PER_AGENT_STEP = 10;
+const MAX_PROGRESS_LINES_FOR_PROMPT = 30;
+const MAX_ACTION_LOG_PREVIEW = 20;
 
 configureSidePanelSafely();
 
@@ -154,7 +156,19 @@ async function startTask(task: string): Promise<void> {
       const messages = buildAgentMessages({ task, observation, step, maxSteps: settings.maxSteps, previousResult });
       logPromptBeforeModelCall(step, messages);
 
-      const modelResponse = await requestAgentStep(settings, messages);
+      let modelResponse: AgentModelResponse;
+      try {
+        modelResponse = await requestAgentStep(settings, messages);
+      } catch (error) {
+        if (error instanceof ModelClientError && /JSON|schema/i.test(error.message)) {
+          previousResult = buildModelErrorProgress(previousResult, error.message);
+          appendLog("warning", `${error.message} Asking the model to continue with valid action JSON.`);
+          await sleep(450);
+          continue;
+        }
+        throw error;
+      }
+
       const plannedActions = getPlannedActions(modelResponse);
 
       appendLog("info", `${modelResponse.thought_summary} Next: ${formatActions(plannedActions)}.`);
@@ -162,7 +176,7 @@ async function startTask(task: string): Promise<void> {
       // Safety checks removed — all actions proceed unconditionally.
 
       const loopResult = await handlePlannedActions(tab.id, modelResponse, plannedActions, completedInputActions, taskId);
-      previousResult = loopResult.message;
+      previousResult = buildPreviousResultForModel(loopResult);
       appendLog(loopResult.ok ? "success" : loopResult.recoverable ? "warning" : "error", loopResult.message);
 
       if (loopResult.shouldStop || (!loopResult.ok && !loopResult.recoverable) || isStopped(taskId)) {
@@ -190,6 +204,9 @@ interface ActionLoopResult {
   message: string;
   shouldStop: boolean;
   recoverable?: boolean;
+  completedActions: string[];
+  failedAction?: string;
+  lastObservation?: PageObservation;
 }
 
 async function handlePlannedActions(
@@ -200,13 +217,17 @@ async function handlePlannedActions(
   taskId: string
 ): Promise<ActionLoopResult> {
   const messages: string[] = [];
+  const completedActions: string[] = [];
+  let lastObservation: PageObservation | undefined;
 
   for (let index = 0; index < actions.length; index += 1) {
     if (isStopped(taskId)) {
       return {
         ok: true,
         message: messages.join(" ") || "Stopped by user.",
-        shouldStop: true
+        shouldStop: true,
+        completedActions,
+        lastObservation
       };
     }
 
@@ -215,12 +236,18 @@ async function handlePlannedActions(
     if (duplicateInputAction) {
       const duplicateResult = await handleDuplicateInputAction(tabId, action, duplicateInputAction);
       messages.push(formatActionResult(index, actions.length, duplicateResult.message));
+      if (duplicateResult.ok && !duplicateResult.recoverable) {
+        completedActions.push(formatCompletedAction(index, action, duplicateResult.message, "skipped"));
+      }
       if (!duplicateResult.ok || duplicateResult.recoverable) {
         return {
           ok: duplicateResult.ok,
           recoverable: duplicateResult.recoverable,
           message: messages.join(" "),
-          shouldStop: false
+          shouldStop: false,
+          completedActions,
+          failedAction: formatActionFailure(index, action, duplicateResult.message),
+          lastObservation
         };
       }
       await sleep(160);
@@ -229,9 +256,13 @@ async function handlePlannedActions(
 
     const result = await handleSingleAction(tabId, modelResponse, action);
     messages.push(formatActionResult(index, actions.length, result.message));
+    if (result.lastObservation) {
+      lastObservation = result.lastObservation;
+    }
 
     if (result.ok) {
       rememberCompletedInputAction(action, completedInputActions);
+      completedActions.push(formatCompletedAction(index, action, result.message, "done"));
     }
 
     if (result.shouldStop || !result.ok) {
@@ -240,7 +271,10 @@ async function handlePlannedActions(
       }
       return {
         ...result,
-        message: messages.join(" ")
+        message: messages.join(" "),
+        completedActions,
+        failedAction: result.ok ? undefined : formatActionFailure(index, action, result.message),
+        lastObservation
       };
     }
 
@@ -257,7 +291,9 @@ async function handlePlannedActions(
   return {
     ok: true,
     message: messages.join(" "),
-    shouldStop: false
+    shouldStop: false,
+    completedActions,
+    lastObservation
   };
 }
 
@@ -270,7 +306,8 @@ async function handleSingleAction(
     return {
       ok: true,
       message: action.text || modelResponse.thought_summary || "Done.",
-      shouldStop: true
+      shouldStop: true,
+      completedActions: []
     };
   }
 
@@ -278,7 +315,8 @@ async function handleSingleAction(
     return {
       ok: true,
       message: action.text || modelResponse.thought_summary || "The agent needs input from you.",
-      shouldStop: true
+      shouldStop: true,
+      completedActions: []
     };
   }
 
@@ -287,7 +325,9 @@ async function handleSingleAction(
     ok: result.ok,
     message: result.message,
     shouldStop: false,
-    recoverable: result.recoverable
+    recoverable: result.recoverable,
+    completedActions: [],
+    lastObservation: result.observation
   };
 }
 
@@ -399,7 +439,9 @@ function formatActions(actions: AgentAction[]): string {
     return formatAction(actions[0]);
   }
 
-  return `${actions.length} actions: ${actions.map(formatAction).join(" -> ")}`;
+  const visibleActions = actions.slice(0, MAX_ACTION_LOG_PREVIEW).map(formatAction).join(" -> ");
+  const suffix = actions.length > MAX_ACTION_LOG_PREVIEW ? ` -> ... (${actions.length - MAX_ACTION_LOG_PREVIEW} more)` : "";
+  return `${actions.length} actions: ${visibleActions}${suffix}`;
 }
 
 function formatAction(action: AgentAction): string {
@@ -438,6 +480,65 @@ function formatAction(action: AgentAction): string {
 
 function formatActionResult(index: number, total: number, message: string): string {
   return total > 1 ? `[${index + 1}/${total}] ${message}` : message;
+}
+
+function formatCompletedAction(index: number, action: AgentAction, message: string, status: "done" | "skipped"): string {
+  return `${index + 1}. ${status}: ${formatAction(action)} -> ${message}`;
+}
+
+function formatActionFailure(index: number, action: AgentAction, message: string): string {
+  return `${index + 1}. failed: ${formatAction(action)} -> ${message}`;
+}
+
+function buildPreviousResultForModel(result: ActionLoopResult): string {
+  const parts = [
+    `Last browser execution result: ${result.message}`,
+    formatCompletedActionsForModel(result.completedActions),
+    result.failedAction ? `Action needing correction: ${result.failedAction}` : "",
+    result.recoverable
+      ? "Recovery note: the page was re-observed after the issue. Continue from the current observation, do not retry stale element IDs, and do not repeat completed actions."
+      : "",
+    result.lastObservation ? formatObservationProgress(result.lastObservation) : ""
+  ].filter(Boolean);
+
+  return parts.join("\n");
+}
+
+function buildModelErrorProgress(previousResult: string | undefined, errorMessage: string): string {
+  return [
+    previousResult ? `Progress before invalid model JSON:\n${previousResult}` : "",
+    `The last AI response could not be used: ${errorMessage}`,
+    "Return valid strict JSON using action or actions, and continue from the current page observation without repeating completed actions."
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatCompletedActionsForModel(completedActions: string[]): string {
+  if (completedActions.length === 0) {
+    return "";
+  }
+
+  const hiddenCount = Math.max(0, completedActions.length - MAX_PROGRESS_LINES_FOR_PROMPT);
+  const visibleActions = completedActions.slice(-MAX_PROGRESS_LINES_FOR_PROMPT);
+  const prefix = hiddenCount ? `Completed actions before this AI call (${hiddenCount} earlier omitted, latest shown):` : "Completed actions before this AI call:";
+  return [prefix, ...visibleActions.map((action) => `- ${action}`)].join("\n");
+}
+
+function formatObservationProgress(observation: PageObservation): string {
+  const focusedElement = observation.elements.find((element) => element.isFocused);
+  const filledElements = observation.elements
+    .filter((element) => element.value)
+    .slice(0, 8)
+    .map((element) => `${element.id}${element.questionNumber ? ` problem=${element.questionNumber}` : ""} value=${element.value}`);
+
+  return [
+    `Latest page after browser execution: ${observation.title || observation.url}`,
+    focusedElement ? `Focused element after execution: ${focusedElement.id} ${focusedElement.label || focusedElement.text || focusedElement.tag}` : "",
+    filledElements.length ? `Visible filled fields after execution: ${filledElements.join(" | ")}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function getPostBatchDelay(actions: AgentAction[]): number {

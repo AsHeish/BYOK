@@ -1,6 +1,10 @@
 import type { AgentModelResponse, PageObservation } from "../shared/types";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.29";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.31";
+const MAX_ACTIONS_PER_RESPONSE = 10;
+const MAX_OBSERVATION_INPUT_TOKENS = 4000;
+const APPROX_CHARS_PER_TOKEN = 4;
+const MAX_OBSERVATION_CHARS = MAX_OBSERVATION_INPUT_TOKENS * APPROX_CHARS_PER_TOKEN;
 
 export function buildAgentMessages(args: {
   task: string;
@@ -20,7 +24,8 @@ export function buildAgentMessages(args: {
         "",
         "For text fields, prefer fill over separate click and type actions. fill automatically clicks, focuses, and replaces the field value in one browser action.",
         "- For custom form controls, an outer div may represent a textbox. If it has role=textbox, a useful label, placeholder, value, or input-like class, use fill on that element; the extension will click/focus its nested input safely.",
-        "- You may return actions instead of action when several low-risk UI steps can be done from the same current observation. Use at most 5 actions; if more are needed, return only the next 5.",
+        `- You may return actions instead of action when several UI steps can be done from the same current observation. Return at most ${MAX_ACTIONS_PER_RESPONSE} actions.`,
+        "- The browser executes batches in fail-safe mode: it stops the remaining batch if an action fails, goes stale, asks the user, finishes, or navigates, then sends you the latest progress and page observation.",
         "- Good batches: fill an answer then click a visible Continue button; select several visible controls; drag several visible items to visible targets.",
         "- Do not batch actions after navigate, after a click that likely changes the page, after a final submit-like action, or when you need the next page observation to decide.",
         "- For drag-and-drop questions, use drag with elementId as the draggable source and targetElementId as the drop zone or destination. For several visible drag/drop pairs in the same question, prefer multi_drag with dragPairs.",
@@ -31,13 +36,14 @@ export function buildAgentMessages(args: {
         "- Do not copy the same option number into multiple questions unless each field's own context independently supports that answer.",
         "- Do not fill any field that already has a non-empty value in the observation, even if the value differs from the answer you planned. Move to the next empty field or finish.",
         "- If the previous action result says a field was skipped because it already has a value or was skipped and advanced, never retry that same element. Use the element marked focused=true, choose the next empty field, or return done.",
+        "- The previous action result lists what was actually completed. Continue from the last completed action; do not repeat completed or skipped actions.",
         "- If the previous action result says the target element is no longer available, do not retry that stale elementId. Use the refreshed observation and pick a current element ID.",
         "- If the user asks to keep pressing Tab or move to the next input, use press_key with key=\"Tab\". The next observation will mark the newly focused element with focused=true.",
         "",
         "Allowed action schema:",
         "Return either action for one action or actions for an ordered batch. Do not include both unless actions is the intended plan.",
         "Action type must be one of: click, multi_click, drag, multi_drag, fill, type, select, press_key, scroll, navigate, extract, ask_user, done.",
-        "For action batches, set actions to an array of 2 to 5 action objects. Never return more than 5 actions.",
+        `For action batches, set actions to an array of up to ${MAX_ACTIONS_PER_RESPONSE} action objects.`,
         "For multi_click, set elementIds to an array of the option IDs to select in the same browser action.",
         "For multi_drag, set dragPairs to an array of { elementId, targetElementId } pairs to drag in order.",
         "For drag, set elementId to the draggable source and targetElementId to the destination/drop zone.",
@@ -86,42 +92,64 @@ function exampleResponse(): AgentModelResponse {
 }
 
 function formatObservation(observation: PageObservation): string {
-  const elements = observation.elements
-    .map((element) => {
-      const parts = [
-        `id=${element.id}`,
-        `tag=${element.tag}`,
-        element.role ? `role=${element.role}` : "",
-        element.type ? `type=${element.type}` : "",
-        element.label ? `label=${quote(element.label)}` : "",
-        element.text ? `text=${quote(element.text)}` : "",
-        element.placeholder ? `placeholder=${quote(element.placeholder)}` : "",
-        element.questionNumber ? `problem=${element.questionNumber}` : "",
-        element.context ? `context=${quote(element.context, 700)}` : "",
-        element.value ? `value=${quote(element.value)}` : "",
-        element.checkedState ? `checkedState=${element.checkedState}` : "",
-        element.href ? `href=${quote(element.href)}` : "",
-        element.options?.length ? `options=${quote(element.options.join(" | "))}` : "",
-        element.isDraggable ? "draggable=true" : "",
-        element.isDropTarget ? "dropTarget=true" : "",
-        element.isFocused ? "focused=true" : "",
-        element.isDisabled ? "disabled=true" : ""
-      ].filter(Boolean);
+  const elementLines = observation.elements.map(formatElementLine);
+  const header = [`URL: ${observation.url}`, `Title: ${observation.title}`, "", "Readable text:"].join("\n");
+  const elementHeader = "\n\nInteractive elements:\n";
+  const reservedForElements = Math.min(7000, Math.max(2500, Math.floor(MAX_OBSERVATION_CHARS * 0.45)));
+  const textBudget = Math.max(1200, MAX_OBSERVATION_CHARS - header.length - elementHeader.length - reservedForElements);
+  const readableText = truncateByChars(observation.text, textBudget);
+  const elementBudget = MAX_OBSERVATION_CHARS - header.length - readableText.length - elementHeader.length;
+  const elements = fitLinesWithinBudget(elementLines, elementBudget) || "(none found)";
 
-      return `- ${parts.join(" ")}`;
-    })
-    .join("\n");
+  return truncateByChars(`${header}\n${readableText}${elementHeader}${elements}`, MAX_OBSERVATION_CHARS);
+}
 
-  return [
-    `URL: ${observation.url}`,
-    `Title: ${observation.title}`,
-    "",
-    "Readable text:",
-    observation.text,
-    "",
-    "Interactive elements:",
-    elements || "(none found)"
-  ].join("\n");
+function formatElementLine(element: PageObservation["elements"][number]): string {
+  const parts = [
+    `id=${element.id}`,
+    `tag=${element.tag}`,
+    element.role ? `role=${element.role}` : "",
+    element.type ? `type=${element.type}` : "",
+    element.label ? `label=${quote(element.label)}` : "",
+    element.text ? `text=${quote(element.text)}` : "",
+    element.placeholder ? `placeholder=${quote(element.placeholder)}` : "",
+    element.questionNumber ? `problem=${element.questionNumber}` : "",
+    element.context ? `context=${quote(element.context, 420)}` : "",
+    element.value ? `value=${quote(element.value)}` : "",
+    element.checkedState ? `checkedState=${element.checkedState}` : "",
+    element.href ? `href=${quote(element.href)}` : "",
+    element.options?.length ? `options=${quote(element.options.join(" | "))}` : "",
+    element.isDraggable ? "draggable=true" : "",
+    element.isDropTarget ? "dropTarget=true" : "",
+    element.isFocused ? "focused=true" : "",
+    element.isDisabled ? "disabled=true" : ""
+  ].filter(Boolean);
+
+  return `- ${parts.join(" ")}`;
+}
+
+function fitLinesWithinBudget(lines: string[], budget: number): string {
+  const selected: string[] = [];
+  let used = 0;
+
+  for (const line of lines) {
+    const cost = line.length + 1;
+    if (used + cost > budget) {
+      break;
+    }
+    selected.push(line);
+    used += cost;
+  }
+
+  return selected.join("\n");
+}
+
+function truncateByChars(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxChars - 28))}\n[truncated to prompt budget]`;
 }
 
 function quote(value: string, maxLength = 180): string {

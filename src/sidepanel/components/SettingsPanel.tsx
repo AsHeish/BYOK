@@ -249,6 +249,22 @@ export function SettingsPanel({
             }
           />
         </label>
+
+        <label>
+          AI timeout seconds
+          <input
+            value={settings.requestTimeoutSeconds}
+            min={10}
+            max={300}
+            type="number"
+            onChange={(event) =>
+              onChange({
+                ...settings,
+                requestTimeoutSeconds: Number(event.target.value),
+              })
+            }
+          />
+        </label>
       </div>
 
       <p className="storage-note">

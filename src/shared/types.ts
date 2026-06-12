@@ -6,6 +6,7 @@ export interface AgentSettings {
   apiKey: string;
   model: string;
   maxSteps: number;
+  requestTimeoutSeconds: number;
   theme: "light" | "dark";
 }
 
@@ -17,6 +18,7 @@ export interface AiConfigurationProfile {
   apiKey: string;
   model: string;
   maxSteps: number;
+  requestTimeoutSeconds: number;
   createdAt: number;
   updatedAt: number;
 }
