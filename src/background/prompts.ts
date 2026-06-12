@@ -1,6 +1,6 @@
 import type { AgentModelResponse, PageObservation } from "../shared/types";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.28";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.29";
 
 export function buildAgentMessages(args: {
   task: string;
@@ -20,7 +20,7 @@ export function buildAgentMessages(args: {
         "",
         "For text fields, prefer fill over separate click and type actions. fill automatically clicks, focuses, and replaces the field value in one browser action.",
         "- For custom form controls, an outer div may represent a textbox. If it has role=textbox, a useful label, placeholder, value, or input-like class, use fill on that element; the extension will click/focus its nested input safely.",
-        "- You may return actions instead of action when several low-risk UI steps can be done from the same current observation. Use at most 5 actions.",
+        "- You may return actions instead of action when several low-risk UI steps can be done from the same current observation. Use at most 5 actions; if more are needed, return only the next 5.",
         "- Good batches: fill an answer then click a visible Continue button; select several visible controls; drag several visible items to visible targets.",
         "- Do not batch actions after navigate, after a click that likely changes the page, after a final submit-like action, or when you need the next page observation to decide.",
         "- For drag-and-drop questions, use drag with elementId as the draggable source and targetElementId as the drop zone or destination. For several visible drag/drop pairs in the same question, prefer multi_drag with dragPairs.",
@@ -37,7 +37,7 @@ export function buildAgentMessages(args: {
         "Allowed action schema:",
         "Return either action for one action or actions for an ordered batch. Do not include both unless actions is the intended plan.",
         "Action type must be one of: click, multi_click, drag, multi_drag, fill, type, select, press_key, scroll, navigate, extract, ask_user, done.",
-        "For action batches, set actions to an array of 2 to 5 action objects.",
+        "For action batches, set actions to an array of 2 to 5 action objects. Never return more than 5 actions.",
         "For multi_click, set elementIds to an array of the option IDs to select in the same browser action.",
         "For multi_drag, set dragPairs to an array of { elementId, targetElementId } pairs to drag in order.",
         "For drag, set elementId to the draggable source and targetElementId to the destination/drop zone.",

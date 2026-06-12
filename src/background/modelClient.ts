@@ -1,4 +1,4 @@
-import type { AgentModelResponse, AgentSettings } from "../shared/types";
+import type { AgentAction, AgentModelResponse, AgentSettings, RiskLevel } from "../shared/types";
 
 const MAX_ACTIONS_PER_MODEL_RESPONSE = 5;
 
@@ -338,11 +338,16 @@ function parseAgentJson(content: string): AgentModelResponse {
     throw new ModelClientError("The model did not return strict JSON.");
   }
 
-  if (!isAgentModelResponse(parsed)) {
+  const normalized = normalizeAgentModelResponse(parsed);
+  if (!normalized) {
+    console.warn("[BYOK Agent] Model JSON did not match the action schema.", {
+      parsed,
+      rawContent: content
+    });
     throw new ModelClientError("The model JSON did not match the required action schema.");
   }
 
-  return parsed;
+  return normalized;
 }
 
 function extractJsonObject(content: string): string {
@@ -360,82 +365,190 @@ function extractJsonObject(content: string): string {
   return trimmed;
 }
 
-function isAgentModelResponse(value: unknown): value is AgentModelResponse {
+function normalizeAgentModelResponse(value: unknown): AgentModelResponse | undefined {
   if (!isRecord(value)) {
-    return false;
+    return undefined;
   }
 
-  if (typeof value.thought_summary !== "string") {
-    return false;
+  const rawActions = getRawActions(value);
+  const actions = rawActions
+    .flatMap(normalizeAgentAction)
+    .slice(0, MAX_ACTIONS_PER_MODEL_RESPONSE);
+
+  if (actions.length === 0) {
+    return undefined;
   }
 
-  if (!["low", "medium", "high"].includes(String(value.risk_level))) {
-    return false;
-  }
-
-  const actionBatch = Array.isArray(value.actions) ? value.actions : undefined;
-  const hasSingleAction = isRecord(value.action);
-  if (!hasSingleAction && !actionBatch) {
-    return false;
-  }
-
-  if (hasSingleAction && !isAgentAction(value.action)) {
-    return false;
-  }
-
-  if (actionBatch) {
-    if (actionBatch.length === 0 || actionBatch.length > MAX_ACTIONS_PER_MODEL_RESPONSE) {
-      return false;
-    }
-    return actionBatch.every(isAgentAction);
-  }
-
-  return true;
+  return {
+    thought_summary: getString(value.thought_summary) || getString(value.thought) || getString(value.summary) || "Next browser action.",
+    risk_level: normalizeRiskLevel(value.risk_level),
+    actions
+  };
 }
 
-function isAgentAction(value: unknown): boolean {
+function getRawActions(value: Record<string, unknown>): unknown[] {
+  if (Array.isArray(value.actions)) {
+    return value.actions;
+  }
+
+  if (Array.isArray(value.action)) {
+    return value.action;
+  }
+
+  if (isRecord(value.actions)) {
+    return [value.actions];
+  }
+
+  if (isRecord(value.action)) {
+    return [value.action];
+  }
+
+  if (Array.isArray(value.plan)) {
+    return value.plan;
+  }
+
+  if (isRecord(value.next_action)) {
+    return [value.next_action];
+  }
+
+  return [];
+}
+
+function normalizeAgentAction(value: unknown): AgentAction[] {
   if (!isRecord(value) || typeof value.type !== "string") {
-    return false;
+    return [];
   }
 
-  const actionTypes = [
-    "click",
-    "multi_click",
-    "drag",
-    "multi_drag",
-    "fill",
-    "type",
-    "select",
-    "press_key",
-    "scroll",
-    "navigate",
-    "extract",
-    "ask_user",
-    "done"
-  ];
-  if (!actionTypes.includes(value.type)) {
-    return false;
+  const type = normalizeActionType(value.type);
+  if (!type) {
+    return [];
   }
 
-  if (value.type === "multi_click") {
-    return Array.isArray(value.elementIds) && value.elementIds.every((elementId) => typeof elementId === "string");
+  const elementId = getString(value.elementId) || getString(value.element_id) || getString(value.id);
+  const targetElementId =
+    getString(value.targetElementId) || getString(value.target_element_id) || getString(value.targetId) || getString(value.target_id);
+  const action: AgentAction = {
+    type,
+    elementId,
+    elementIds: getStringArray(value.elementIds) || getStringArray(value.element_ids),
+    targetElementId,
+    dragPairs: normalizeDragPairs(value.dragPairs) || normalizeDragPairs(value.drag_pairs) || normalizeDragPairs(value.pairs),
+    text: getString(value.text) || getString(value.value) || getString(value.answer),
+    key: normalizeKey(value.key) || normalizeKey(value.text),
+    url: getString(value.url),
+    direction: normalizeDirection(value.direction)
+  };
+
+  if (action.type === "multi_click" && !action.elementIds?.length && action.elementId) {
+    action.elementIds = [action.elementId];
   }
 
-  if (value.type === "multi_drag") {
-    return (
-      Array.isArray(value.dragPairs) &&
-      value.dragPairs.length > 0 &&
-      value.dragPairs.length <= MAX_ACTIONS_PER_MODEL_RESPONSE &&
-      value.dragPairs.every(
-        (pair) =>
-          isRecord(pair) &&
-          typeof pair.elementId === "string" &&
-          typeof pair.targetElementId === "string"
-      )
-    );
+  if (action.type === "multi_drag") {
+    if (!action.dragPairs?.length && action.elementId && action.targetElementId) {
+      action.dragPairs = [{ elementId: action.elementId, targetElementId: action.targetElementId }];
+    }
+    action.dragPairs = action.dragPairs?.slice(0, MAX_ACTIONS_PER_MODEL_RESPONSE);
   }
 
-  return true;
+  if (action.type === "multi_click" && !action.elementIds?.length) {
+    return [];
+  }
+
+  if (action.type === "multi_drag" && !action.dragPairs?.length) {
+    return [];
+  }
+
+  return [action];
+}
+
+function normalizeActionType(type: string): AgentAction["type"] | undefined {
+  const normalized = type.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const aliases: Record<string, AgentAction["type"]> = {
+    click: "click",
+    multi_click: "multi_click",
+    multiclick: "multi_click",
+    click_many: "multi_click",
+    drag: "drag",
+    drag_and_drop: "drag",
+    multi_drag: "multi_drag",
+    multidrag: "multi_drag",
+    drag_many: "multi_drag",
+    fill: "fill",
+    type: "type",
+    select: "select",
+    press_key: "press_key",
+    key: "press_key",
+    scroll: "scroll",
+    navigate: "navigate",
+    open_url: "navigate",
+    extract: "extract",
+    ask_user: "ask_user",
+    ask: "ask_user",
+    done: "done"
+  };
+  return aliases[normalized];
+}
+
+function normalizeRiskLevel(value: unknown): RiskLevel {
+  const normalized = String(value || "").toLowerCase();
+  return normalized === "medium" || normalized === "high" ? normalized : "low";
+}
+
+function normalizeKey(value: unknown): AgentAction["key"] | undefined {
+  const normalized = String(value || "").trim().toLowerCase().replace(/\s+/g, "");
+  if (normalized === "tab") {
+    return "Tab";
+  }
+  if (normalized === "shift+tab" || normalized === "shifttab") {
+    return "Shift+Tab";
+  }
+  return undefined;
+}
+
+function normalizeDirection(value: unknown): AgentAction["direction"] | undefined {
+  const normalized = String(value || "").toLowerCase();
+  return normalized === "up" || normalized === "down" || normalized === "left" || normalized === "right" ? normalized : undefined;
+}
+
+function normalizeDragPairs(value: unknown): AgentAction["dragPairs"] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const pairs = value
+    .map((pair) => {
+      if (!isRecord(pair)) {
+        return undefined;
+      }
+
+      const elementId = getString(pair.elementId) || getString(pair.element_id) || getString(pair.sourceElementId) || getString(pair.source_id);
+      const targetElementId =
+        getString(pair.targetElementId) ||
+        getString(pair.target_element_id) ||
+        getString(pair.destinationElementId) ||
+        getString(pair.destination_id) ||
+        getString(pair.targetId);
+
+      return elementId && targetElementId ? { elementId, targetElementId } : undefined;
+    })
+    .filter((pair): pair is { elementId: string; targetElementId: string } => Boolean(pair));
+
+  return pairs.length ? pairs : undefined;
+}
+
+function getString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function getStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const values = value
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    .map((item) => item.trim());
+  return values.length ? values : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

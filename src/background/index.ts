@@ -235,6 +235,9 @@ async function handlePlannedActions(
     }
 
     if (result.shouldStop || !result.ok) {
+      if (result.recoverable && index < actions.length - 1) {
+        messages.push("Skipped the remaining batch actions and will re-observe the page.");
+      }
       return {
         ...result,
         message: messages.join(" ")
