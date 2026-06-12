@@ -27,6 +27,7 @@ export type AgentActionType =
   | "click"
   | "multi_click"
   | "drag"
+  | "multi_drag"
   | "fill"
   | "type"
   | "select"
@@ -37,11 +38,17 @@ export type AgentActionType =
   | "ask_user"
   | "done";
 
+export interface AgentDragPair {
+  elementId: string;
+  targetElementId: string;
+}
+
 export interface AgentAction {
   type: AgentActionType;
   elementId?: string;
   elementIds?: string[];
   targetElementId?: string;
+  dragPairs?: AgentDragPair[];
   text?: string;
   key?: "Tab" | "Shift+Tab";
   url?: string;
@@ -51,7 +58,8 @@ export interface AgentAction {
 export interface AgentModelResponse {
   thought_summary: string;
   risk_level: RiskLevel;
-  action: AgentAction;
+  action?: AgentAction;
+  actions?: AgentAction[];
 }
 
 export interface DomElementInfo {

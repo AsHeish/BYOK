@@ -25,6 +25,7 @@ let runningSession: RunningSession | undefined;
 let logs: AgentLogEntry[] = [];
 
 const SIDE_PANEL_PATH = "sidepanel.html";
+const MAX_ACTIONS_PER_AGENT_STEP = 5;
 
 configureSidePanelSafely();
 
@@ -154,27 +155,13 @@ async function startTask(task: string): Promise<void> {
       logPromptBeforeModelCall(step, messages);
 
       const modelResponse = await requestAgentStep(settings, messages);
+      const plannedActions = getPlannedActions(modelResponse);
 
-      appendLog("info", `${modelResponse.thought_summary} Next: ${formatAction(modelResponse.action)}.`);
+      appendLog("info", `${modelResponse.thought_summary} Next: ${formatActions(plannedActions)}.`);
 
       // Safety checks removed — all actions proceed unconditionally.
 
-      const duplicateInputAction = getDuplicateInputAction(modelResponse.action, completedInputActions);
-      if (duplicateInputAction) {
-        const duplicateResult = await handleDuplicateInputAction(tab.id, modelResponse.action, duplicateInputAction);
-        previousResult = duplicateResult.message;
-        appendLog(duplicateResult.ok || duplicateResult.recoverable ? "warning" : "error", duplicateResult.message);
-        if ((!duplicateResult.ok && !duplicateResult.recoverable) || isStopped(taskId)) {
-          break;
-        }
-        await sleep(300);
-        continue;
-      }
-
-      const loopResult = await handleValidatedAction(tab.id, modelResponse);
-      if (loopResult.ok) {
-        rememberCompletedInputAction(modelResponse.action, completedInputActions);
-      }
+      const loopResult = await handlePlannedActions(tab.id, modelResponse, plannedActions, completedInputActions, taskId);
       previousResult = loopResult.message;
       appendLog(loopResult.ok ? "success" : loopResult.recoverable ? "warning" : "error", loopResult.message);
 
@@ -182,7 +169,7 @@ async function startTask(task: string): Promise<void> {
         break;
       }
 
-      await sleep(modelResponse.action.type === "navigate" ? 1500 : 450);
+      await sleep(getPostBatchDelay(plannedActions));
     }
 
     if (!isStopped(taskId)) {
@@ -198,12 +185,84 @@ async function startTask(task: string): Promise<void> {
   }
 }
 
-async function handleValidatedAction(
-  tabId: number,
-  modelResponse: AgentModelResponse
-): Promise<{ ok: boolean; message: string; shouldStop: boolean; recoverable?: boolean }> {
-  const action = modelResponse.action;
+interface ActionLoopResult {
+  ok: boolean;
+  message: string;
+  shouldStop: boolean;
+  recoverable?: boolean;
+}
 
+async function handlePlannedActions(
+  tabId: number,
+  modelResponse: AgentModelResponse,
+  actions: AgentAction[],
+  completedInputActions: Set<string>,
+  taskId: string
+): Promise<ActionLoopResult> {
+  const messages: string[] = [];
+
+  for (let index = 0; index < actions.length; index += 1) {
+    if (isStopped(taskId)) {
+      return {
+        ok: true,
+        message: messages.join(" ") || "Stopped by user.",
+        shouldStop: true
+      };
+    }
+
+    const action = actions[index];
+    const duplicateInputAction = getDuplicateInputAction(action, completedInputActions);
+    if (duplicateInputAction) {
+      const duplicateResult = await handleDuplicateInputAction(tabId, action, duplicateInputAction);
+      messages.push(formatActionResult(index, actions.length, duplicateResult.message));
+      if (!duplicateResult.ok || duplicateResult.recoverable) {
+        return {
+          ok: duplicateResult.ok,
+          recoverable: duplicateResult.recoverable,
+          message: messages.join(" "),
+          shouldStop: false
+        };
+      }
+      await sleep(160);
+      continue;
+    }
+
+    const result = await handleSingleAction(tabId, modelResponse, action);
+    messages.push(formatActionResult(index, actions.length, result.message));
+
+    if (result.ok) {
+      rememberCompletedInputAction(action, completedInputActions);
+    }
+
+    if (result.shouldStop || !result.ok) {
+      return {
+        ...result,
+        message: messages.join(" ")
+      };
+    }
+
+    if (shouldHaltBatchAfterAction(action)) {
+      if (index < actions.length - 1) {
+        messages.push("Paused the remaining batch until the next page observation.");
+      }
+      break;
+    }
+
+    await sleep(getInterActionDelay(action));
+  }
+
+  return {
+    ok: true,
+    message: messages.join(" "),
+    shouldStop: false
+  };
+}
+
+async function handleSingleAction(
+  tabId: number,
+  modelResponse: AgentModelResponse,
+  action: AgentAction
+): Promise<ActionLoopResult> {
   if (action.type === "done") {
     return {
       ok: true,
@@ -321,9 +380,31 @@ function isSupportedTabUrl(url?: string): url is string {
   }
 }
 
+function getPlannedActions(modelResponse: AgentModelResponse): AgentAction[] {
+  const fallbackAction: AgentAction = { type: "done", text: "No action returned by the model." };
+  const actions = modelResponse.actions?.length
+    ? modelResponse.actions
+    : modelResponse.action
+      ? [modelResponse.action]
+      : [fallbackAction];
+
+  return actions.slice(0, MAX_ACTIONS_PER_AGENT_STEP);
+}
+
+function formatActions(actions: AgentAction[]): string {
+  if (actions.length === 1) {
+    return formatAction(actions[0]);
+  }
+
+  return `${actions.length} actions: ${actions.map(formatAction).join(" -> ")}`;
+}
+
 function formatAction(action: AgentAction): string {
   if (action.type === "multi_click") {
     return `select ${action.elementIds?.length || 0} options`;
+  }
+  if (action.type === "multi_drag") {
+    return `drag ${action.dragPairs?.length || 0} pairs`;
   }
   if (action.type === "drag") {
     return `drag ${action.elementId || "source"} to ${action.targetElementId || "target"}`;
@@ -350,6 +431,28 @@ function formatAction(action: AgentAction): string {
     return `scroll ${action.direction || "down"}`;
   }
   return action.type;
+}
+
+function formatActionResult(index: number, total: number, message: string): string {
+  return total > 1 ? `[${index + 1}/${total}] ${message}` : message;
+}
+
+function getPostBatchDelay(actions: AgentAction[]): number {
+  return actions.some((action) => action.type === "navigate") ? 1500 : 450;
+}
+
+function getInterActionDelay(action: AgentAction): number {
+  if (action.type === "navigate") {
+    return 1200;
+  }
+  if (action.type === "drag" || action.type === "multi_drag") {
+    return 300;
+  }
+  return 180;
+}
+
+function shouldHaltBatchAfterAction(action: AgentAction): boolean {
+  return action.type === "navigate";
 }
 
 interface DuplicateInputAction {
@@ -402,6 +505,20 @@ function getDuplicateInputAction(action: AgentAction, completedInputActions: Set
     };
   }
 
+  if (action.type === "multi_drag") {
+    return {
+      message: `Skipped repeated multi_drag for ${action.dragPairs?.length || 0} pairs; that drag/drop set was already handled.`,
+      shouldAdvanceFocus: false
+    };
+  }
+
+  if (action.type === "drag") {
+    return {
+      message: `Skipped repeated drag from ${action.elementId} to ${action.targetElementId}; that drag/drop action was already handled.`,
+      shouldAdvanceFocus: false
+    };
+  }
+
   return {
     message: `Skipped repeated ${action.type} on ${action.elementId}; that field was already handled.`,
     shouldAdvanceFocus: action.type === "fill" || action.type === "type"
@@ -418,6 +535,16 @@ function rememberCompletedInputAction(action: AgentAction, completedInputActions
 function getInputActionKey(action: AgentAction): string | undefined {
   if (action.type === "multi_click") {
     return action.elementIds?.length ? `multi_click:${[...action.elementIds].sort().join(",")}` : undefined;
+  }
+
+  if (action.type === "multi_drag") {
+    return action.dragPairs?.length
+      ? `multi_drag:${action.dragPairs.map((pair) => `${pair.elementId}->${pair.targetElementId}`).join("|")}`
+      : undefined;
+  }
+
+  if (action.type === "drag") {
+    return action.elementId && action.targetElementId ? `drag:${action.elementId}->${action.targetElementId}` : undefined;
   }
 
   if ((action.type !== "fill" && action.type !== "type" && action.type !== "select") || !action.elementId) {

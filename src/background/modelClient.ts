@@ -1,5 +1,7 @@
 import type { AgentModelResponse, AgentSettings } from "../shared/types";
 
+const MAX_ACTIONS_PER_MODEL_RESPONSE = 5;
+
 interface ChatMessage {
   role: "system" | "user";
   content: string;
@@ -47,6 +49,8 @@ export async function requestAgentStep(
   const endpoint = buildChatCompletionsUrl(settings.apiBaseUrl);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const requestStartedAt = Date.now();
+  let attempts = 0;
 
   try {
     let includeResponseFormat = true;
@@ -54,6 +58,7 @@ export async function requestAgentStep(
     let result: { response: Response; responseText: string } | undefined;
 
     for (let attempt = 0; attempt < 4; attempt += 1) {
+      attempts = attempt + 1;
       result = await postChatCompletion({
         endpoint,
         settings,
@@ -86,6 +91,7 @@ export async function requestAgentStep(
     }
 
     const { response, responseText } = result;
+    logAiResponseTiming(settings, requestStartedAt, attempts, response.status, response.ok);
     if (!response.ok) {
       throw new ModelClientError(formatHttpError(response.status, responseText), response.status);
     }
@@ -254,6 +260,23 @@ function logTokenUsage(provider: AgentSettings["provider"], usage: ChatUsage | u
   });
 }
 
+function logAiResponseTiming(
+  settings: AgentSettings,
+  startedAt: number,
+  attempts: number,
+  status: number,
+  ok: boolean
+): void {
+  console.info("[BYOK Agent] AI response time:", {
+    provider: settings.provider,
+    model: settings.model,
+    elapsedMs: Date.now() - startedAt,
+    attempts,
+    status,
+    ok
+  });
+}
+
 function getCachedTokenCount(usage: ChatUsage): number | undefined {
   const candidates = [
     usage.prompt_tokens_details?.cached_tokens,
@@ -350,17 +373,66 @@ function isAgentModelResponse(value: unknown): value is AgentModelResponse {
     return false;
   }
 
-  if (!isRecord(value.action) || typeof value.action.type !== "string") {
+  const actionBatch = Array.isArray(value.actions) ? value.actions : undefined;
+  const hasSingleAction = isRecord(value.action);
+  if (!hasSingleAction && !actionBatch) {
     return false;
   }
 
-  const actionTypes = ["click", "multi_click", "drag", "fill", "type", "select", "press_key", "scroll", "navigate", "extract", "ask_user", "done"];
-  if (!actionTypes.includes(value.action.type)) {
+  if (hasSingleAction && !isAgentAction(value.action)) {
     return false;
   }
 
-  if (value.action.type === "multi_click") {
-    return Array.isArray(value.action.elementIds) && value.action.elementIds.every((elementId) => typeof elementId === "string");
+  if (actionBatch) {
+    if (actionBatch.length === 0 || actionBatch.length > MAX_ACTIONS_PER_MODEL_RESPONSE) {
+      return false;
+    }
+    return actionBatch.every(isAgentAction);
+  }
+
+  return true;
+}
+
+function isAgentAction(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return false;
+  }
+
+  const actionTypes = [
+    "click",
+    "multi_click",
+    "drag",
+    "multi_drag",
+    "fill",
+    "type",
+    "select",
+    "press_key",
+    "scroll",
+    "navigate",
+    "extract",
+    "ask_user",
+    "done"
+  ];
+  if (!actionTypes.includes(value.type)) {
+    return false;
+  }
+
+  if (value.type === "multi_click") {
+    return Array.isArray(value.elementIds) && value.elementIds.every((elementId) => typeof elementId === "string");
+  }
+
+  if (value.type === "multi_drag") {
+    return (
+      Array.isArray(value.dragPairs) &&
+      value.dragPairs.length > 0 &&
+      value.dragPairs.length <= MAX_ACTIONS_PER_MODEL_RESPONSE &&
+      value.dragPairs.every(
+        (pair) =>
+          isRecord(pair) &&
+          typeof pair.elementId === "string" &&
+          typeof pair.targetElementId === "string"
+      )
+    );
   }
 
   return true;

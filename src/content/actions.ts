@@ -41,6 +41,9 @@ export async function executeAction(action: AgentAction): Promise<ContentActionR
     case "drag":
       return withFreshObservation(dragElementToTarget(action.elementId, action.targetElementId));
 
+    case "multi_drag":
+      return withFreshObservation(dragMultipleElementsToTargets(action.dragPairs));
+
     case "fill":
     case "type":
       return withFreshObservation(typeIntoElement(action.elementId, action.text || ""));
@@ -208,6 +211,38 @@ async function dragElementToTarget(
   return {
     ok: true,
     message: `Dragged ${describeElement(source)} to ${describeElement(target)}.`
+  };
+}
+
+async function dragMultipleElementsToTargets(
+  dragPairs: AgentAction["dragPairs"]
+): Promise<ContentActionResult> {
+  if (!dragPairs?.length) {
+    return {
+      ok: false,
+      message: "multi_drag requires at least one drag pair."
+    };
+  }
+
+  const completed: string[] = [];
+  for (let index = 0; index < dragPairs.length; index += 1) {
+    const pair = dragPairs[index];
+    const result = await dragElementToTarget(pair.elementId, pair.targetElementId);
+    if (!result.ok) {
+      return {
+        ok: false,
+        recoverable: result.recoverable,
+        message: `Could not finish multi_drag pair ${index + 1}: ${result.message}`
+      };
+    }
+
+    completed.push(result.message.replace(/\.$/, ""));
+    await sleep(140);
+  }
+
+  return {
+    ok: true,
+    message: `Completed ${completed.length} drag/drop action${completed.length === 1 ? "" : "s"}: ${completed.join("; ")}.`
   };
 }
 

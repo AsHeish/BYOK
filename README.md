@@ -1,6 +1,6 @@
 # BYOK AI Browser Agent
 
-A minimal Manifest V3 Chrome/Edge side-panel extension that runs a bring-your-own-key AI browser agent. The user configures an OpenAI-compatible, Gemini-compatible, Groq, or custom API endpoint, enters a task, and the extension observes the current page, asks the model for one JSON action, validates it, executes it, and repeats until done or stopped.
+A minimal Manifest V3 Chrome/Edge side-panel extension that runs a bring-your-own-key AI browser agent. The user configures an OpenAI-compatible, Gemini-compatible, Groq, or custom API endpoint, enters a task, and the extension observes the current page, asks the model for one JSON action or a short action batch, executes it, and repeats until done or stopped.
 
 ## File Tree
 
@@ -83,42 +83,43 @@ The agent structures model requests for provider-side prefix caching:
 
 OpenAI-compatible APIs are still stateless, so the extension must send the full current prompt on every step. The cache benefit comes from the model provider reusing repeated prefix tokens internally.
 
-## Safety Model
+## Agent Loop
 
-The agent loop executes one action at a time:
+The agent loop executes one action or a bounded action batch at a time:
 
 1. Content script observes readable page text and visible interactive elements.
 2. Background service worker asks the model for strict JSON.
-3. `src/background/safety.ts` validates the action.
-4. Hard safety blocks stop unsupported or sensitive actions.
-5. Content script executes the validated action and observes again.
+3. Background normalizes either `action` or `actions` into up to 5 ordered actions.
+4. Content script executes supported actions in order and observes again.
+5. If an action fails recoverably, the loop continues with a fresh observation.
 
-The extension refuses CAPTCHA/security bypass, paywall bypass, secret extraction, and sensitive-field typing. For quizzes and tests, it can explain, suggest, fill, select, or drag answers at the user's request.
+`src/background/safety.ts` is present for reinstating policy checks, but this local test build currently bypasses background safety validation. Content execution still only supports the defined action schema.
 
 API keys are profile-local extension data, not a secure vault. Use scoped, revocable keys.
 
 ## Model Response Format
 
-The model must return strict JSON only:
+The model must return strict JSON only. Use `action` for one action, or `actions` for a 2-5 step ordered batch:
 
 ```json
 {
   "thought_summary": "short user-visible reasoning",
   "risk_level": "low",
-  "action": {
-    "type": "click",
-    "elementId": "optional",
-    "elementIds": ["optional"],
-    "targetElementId": "optional",
-    "text": "optional",
-    "key": "Tab",
-    "url": "optional",
-    "direction": "down"
-  }
+  "actions": [
+    {
+      "type": "fill",
+      "elementId": "el-12",
+      "text": "answer text"
+    },
+    {
+      "type": "click",
+      "elementId": "el-20"
+    }
+  ]
 }
 ```
 
-Supported action types are `click`, `multi_click`, `drag`, `fill`, `type`, `select`, `press_key`, `scroll`, `navigate`, `extract`, `ask_user`, and `done`. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For drag-and-drop widgets, the model uses `elementId` as the draggable item and `targetElementId` as the destination.
+Supported action types are `click`, `multi_click`, `drag`, `multi_drag`, `fill`, `type`, `select`, `press_key`, `scroll`, `navigate`, `extract`, `ask_user`, and `done`. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For multiple drag-and-drop pairs, `multi_drag` uses `dragPairs: [{ "elementId": "source", "targetElementId": "target" }]`.
 
 ## Known First-Version Limits
 
