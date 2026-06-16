@@ -1,6 +1,6 @@
 import type { AgentModelResponse, PageObservation } from "../shared/types";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.31";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.34";
 const MAX_ACTIONS_PER_RESPONSE = 10;
 const MAX_OBSERVATION_INPUT_TOKENS = 4000;
 const APPROX_CHARS_PER_TOKEN = 4;
@@ -93,7 +93,10 @@ function exampleResponse(): AgentModelResponse {
 
 function formatObservation(observation: PageObservation): string {
   const elementLines = observation.elements.map(formatElementLine);
-  const header = [`URL: ${observation.url}`, `Title: ${observation.title}`, "", "Readable text:"].join("\n");
+  const stateSummary = formatObservationState(observation);
+  const header = [`URL: ${observation.url}`, `Title: ${observation.title}`, stateSummary, "", "Readable text:"]
+    .filter(Boolean)
+    .join("\n");
   const elementHeader = "\n\nInteractive elements:\n";
   const reservedForElements = Math.min(7000, Math.max(2500, Math.floor(MAX_OBSERVATION_CHARS * 0.45)));
   const textBudget = Math.max(1200, MAX_OBSERVATION_CHARS - header.length - elementHeader.length - reservedForElements);
@@ -102,6 +105,95 @@ function formatObservation(observation: PageObservation): string {
   const elements = fitLinesWithinBudget(elementLines, elementBudget) || "(none found)";
 
   return truncateByChars(`${header}\n${readableText}${elementHeader}${elements}`, MAX_OBSERVATION_CHARS);
+}
+
+function formatObservationState(observation: PageObservation): string {
+  const focusedElement = observation.elements.find((element) => element.isFocused);
+  const emptyFillableElements = observation.elements
+    .filter((element) => isLikelyFillableElement(element) && !hasCompletedControlValue(element) && !element.isDisabled)
+    .slice(0, 14);
+  const completedControls = observation.elements
+    .filter((element) => hasCompletedControlValue(element))
+    .slice(0, 14);
+  const dragDropElements = observation.elements
+    .filter((element) => element.isDraggable || element.isDropTarget)
+    .slice(0, 14);
+
+  return [
+    "Page state summary:",
+    formatViewportState(observation),
+    "Element IDs are current only for this observation. Use the IDs below, not stale IDs from earlier steps.",
+    focusedElement ? `Focused element: ${formatCompactElementRef(focusedElement)}` : "",
+    emptyFillableElements.length
+      ? `Empty fillable controls: ${emptyFillableElements.map((element) => formatCompactElementRef(element)).join(" | ")}`
+      : "Empty fillable controls: none visible",
+    completedControls.length
+      ? `Already filled/selected controls: ${completedControls.map((element) => formatCompactElementRef(element, true)).join(" | ")}`
+      : "",
+    dragDropElements.length
+      ? `Drag/drop candidates: ${dragDropElements.map((element) => formatCompactElementRef(element)).join(" | ")}`
+      : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatViewportState(observation: PageObservation): string {
+  const viewport = observation.viewport;
+  if (!viewport) {
+    return "";
+  }
+
+  return `Viewport: ${viewport.viewportWidth}x${viewport.viewportHeight}, scrollY=${viewport.scrollY}, pageHeight=${viewport.pageHeight}, pageProgress=${viewport.progressPercent}%`;
+}
+
+function formatCompactElementRef(element: PageObservation["elements"][number], includeValue = false): string {
+  const descriptor = element.label || element.placeholder || element.text || element.name || element.role || element.tag;
+  const parts = [
+    element.id,
+    element.questionNumber ? `problem=${element.questionNumber}` : "",
+    descriptor ? `label=${quote(descriptor, 90)}` : "",
+    element.isFocused ? "focused=true" : "",
+    element.isDraggable ? "draggable=true" : "",
+    element.isDropTarget ? "dropTarget=true" : "",
+    includeValue && element.value ? `value=${quote(element.value, 80)}` : "",
+    includeValue && element.checkedState ? `checkedState=${element.checkedState}` : ""
+  ].filter(Boolean);
+
+  return parts.join(" ");
+}
+
+function isLikelyFillableElement(element: PageObservation["elements"][number]): boolean {
+  if (element.checkedState || element.href || element.isDraggable || element.isDropTarget) {
+    return false;
+  }
+
+  if (element.type && /^(button|submit|reset|checkbox|radio|file|hidden)$/i.test(element.type)) {
+    return false;
+  }
+
+  if (element.tag === "input" || element.tag === "textarea" || element.tag === "select") {
+    return true;
+  }
+
+  if (element.role === "textbox" || element.role === "combobox") {
+    return true;
+  }
+
+  if (element.options?.length) {
+    return true;
+  }
+
+  const descriptor = [element.label, element.placeholder, element.text, element.context].filter(Boolean).join(" ");
+  return /answer|submission|input|field|textbox|response|option number/i.test(descriptor);
+}
+
+function hasCompletedControlValue(element: PageObservation["elements"][number]): boolean {
+  if (element.checkedState) {
+    return element.checkedState === "checked" || element.checkedState === "mixed";
+  }
+
+  return Boolean(element.value && !/\bunchecked\)?$/i.test(element.value.trim()));
 }
 
 function formatElementLine(element: PageObservation["elements"][number]): string {

@@ -101,7 +101,34 @@ export function observePage(): PageObservation {
     url: location.href,
     title: document.title,
     text: getReadableText(),
-    elements
+    elements,
+    viewport: getViewportInfo()
+  };
+}
+
+function getViewportInfo(): PageObservation["viewport"] {
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const pageWidth = Math.max(
+    document.documentElement.scrollWidth,
+    document.body?.scrollWidth || 0,
+    viewportWidth
+  );
+  const pageHeight = Math.max(
+    document.documentElement.scrollHeight,
+    document.body?.scrollHeight || 0,
+    viewportHeight
+  );
+  const maxScrollableY = Math.max(1, pageHeight - viewportHeight);
+
+  return {
+    scrollX: Math.max(0, Math.round(window.scrollX || window.pageXOffset || 0)),
+    scrollY: Math.max(0, Math.round(window.scrollY || window.pageYOffset || 0)),
+    viewportWidth: Math.round(viewportWidth),
+    viewportHeight: Math.round(viewportHeight),
+    pageWidth: Math.round(pageWidth),
+    pageHeight: Math.round(pageHeight),
+    progressPercent: Math.min(100, Math.max(0, Math.round(((window.scrollY || window.pageYOffset || 0) / maxScrollableY) * 100)))
   };
 }
 

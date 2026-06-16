@@ -528,17 +528,33 @@ function formatCompletedActionsForModel(completedActions: string[]): string {
 function formatObservationProgress(observation: PageObservation): string {
   const focusedElement = observation.elements.find((element) => element.isFocused);
   const filledElements = observation.elements
-    .filter((element) => element.value)
+    .filter(hasCompletedControlValue)
     .slice(0, 8)
-    .map((element) => `${element.id}${element.questionNumber ? ` problem=${element.questionNumber}` : ""} value=${element.value}`);
+    .map(
+      (element) =>
+        `${element.id}${element.questionNumber ? ` problem=${element.questionNumber}` : ""} ${
+          element.value ? `value=${element.value}` : `checkedState=${element.checkedState}`
+        }`
+    );
 
   return [
     `Latest page after browser execution: ${observation.title || observation.url}`,
+    observation.viewport
+      ? `Viewport after execution: scrollY=${observation.viewport.scrollY}, pageProgress=${observation.viewport.progressPercent}%`
+      : "",
     focusedElement ? `Focused element after execution: ${focusedElement.id} ${focusedElement.label || focusedElement.text || focusedElement.tag}` : "",
     filledElements.length ? `Visible filled fields after execution: ${filledElements.join(" | ")}` : ""
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function hasCompletedControlValue(element: PageObservation["elements"][number]): boolean {
+  if (element.checkedState) {
+    return element.checkedState === "checked" || element.checkedState === "mixed";
+  }
+
+  return Boolean(element.value && !/\bunchecked\)?$/i.test(element.value.trim()));
 }
 
 function getPostBatchDelay(actions: AgentAction[]): number {

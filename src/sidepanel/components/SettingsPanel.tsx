@@ -265,6 +265,23 @@ export function SettingsPanel({
             }
           />
         </label>
+
+        <label>
+          Prompt cache
+          <select
+            value={settings.promptCacheMode}
+            onChange={(event) =>
+              onChange({
+                ...settings,
+                promptCacheMode: event.target.value as AgentSettings["promptCacheMode"],
+              })
+            }
+          >
+            <option value="auto">Auto: OpenAI + custom</option>
+            <option value="on">On: send cache hints</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
       </div>
 
       <p className="storage-note">

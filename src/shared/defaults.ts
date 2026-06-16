@@ -7,6 +7,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   model: "gpt-4o-mini",
   maxSteps: 60,
   requestTimeoutSeconds: 60,
+  promptCacheMode: "auto",
   theme: "dark"
 };
 

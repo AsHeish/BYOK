@@ -166,6 +166,7 @@ async function postChatCompletion(args: {
   logAiRequestPayload({
     endpoint: args.endpoint,
     provider: args.settings.provider,
+    promptCacheMode: args.settings.promptCacheMode || "auto",
     body,
     messages: args.messages,
     includePromptCacheFields: args.includePromptCacheFields,
@@ -191,6 +192,7 @@ async function postChatCompletion(args: {
 function logAiRequestPayload(args: {
   endpoint: string;
   provider: AgentSettings["provider"];
+  promptCacheMode: AgentSettings["promptCacheMode"];
   body: Record<string, unknown>;
   messages: ChatMessage[];
   includePromptCacheFields: boolean;
@@ -210,20 +212,20 @@ function logAiRequestPayload(args: {
   console.groupCollapsed(
     `[BYOK Agent] Full AI request payload (${args.provider}, response_format=${
       args.includeResponseFormat ? "on" : "off"
-    }, prompt_cache=${args.includePromptCacheFields ? "on" : "implicit"})`
+    }, prompt_cache=${args.includePromptCacheFields ? "on" : "off"}, cache_mode=${args.promptCacheMode})`
   );
-  console.info("Prompt cache plan:", buildPromptCacheDebugInfo(args.messages, args.body.prompt_cache_key));
+  console.info("Prompt cache plan:", buildPromptCacheDebugInfo(args.messages, args.body.prompt_cache_key, args.promptCacheMode));
   console.info(payload);
   console.info("Request body JSON:", JSON.stringify(args.body, null, 2));
   console.groupEnd();
 }
 
 function shouldRetryWithoutResponseFormat(status: number, body: string): boolean {
-  return status === 400 && /response_format|json_object|unsupported parameter|unknown field/i.test(body);
+  return (status === 400 || status === 422) && /response_format|json_object|unsupported parameter|unknown field/i.test(body);
 }
 
 function shouldRetryWithoutPromptCacheFields(status: number, body: string): boolean {
-  return status === 400 && /prompt_cache_key|prompt_cache_retention|prompt cache|prompt caching/i.test(body);
+  return (status === 400 || status === 422) && /prompt_cache_key|prompt_cache_retention|prompt cache|prompt caching/i.test(body);
 }
 
 function getRequestTimeoutMs(settings: AgentSettings): number {
@@ -235,7 +237,14 @@ function getRequestTimeoutMs(settings: AgentSettings): number {
 }
 
 function shouldUsePromptCacheFields(settings: AgentSettings): boolean {
-  return settings.provider === "openai";
+  const mode = settings.promptCacheMode || "auto";
+  if (mode === "off") {
+    return false;
+  }
+  if (mode === "on") {
+    return true;
+  }
+  return settings.provider === "openai" || settings.provider === "custom";
 }
 
 function buildPromptCacheKey(settings: AgentSettings, messages: ChatMessage[]): string {
@@ -244,15 +253,21 @@ function buildPromptCacheKey(settings: AgentSettings, messages: ChatMessage[]): 
   return `byok-agent-${shortHash(keyMaterial)}`;
 }
 
-function buildPromptCacheDebugInfo(messages: ChatMessage[], promptCacheKey: unknown): Record<string, unknown> {
+function buildPromptCacheDebugInfo(
+  messages: ChatMessage[],
+  promptCacheKey: unknown,
+  promptCacheMode: AgentSettings["promptCacheMode"]
+): Record<string, unknown> {
   const stablePrefix = getStablePromptPrefix(messages);
   return {
+    mode: promptCacheMode,
+    active: typeof promptCacheKey === "string",
     providerCacheKey: typeof promptCacheKey === "string" ? promptCacheKey : undefined,
     stablePrefixMessages: Math.min(messages.length, 2),
     stablePrefixCharacters: stablePrefix.length,
     estimatedStablePrefixTokens: Math.ceil(stablePrefix.length / 4),
     note:
-      "Static instructions and task are kept before changing page observations so provider-side prefix caches can be reused."
+      "Static instructions and task are kept before changing page observations so provider-side prefix caches can be reused. Auto mode sends explicit cache hints for OpenAI and custom endpoints."
   };
 }
 

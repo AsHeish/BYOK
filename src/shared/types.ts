@@ -1,4 +1,5 @@
 export type Provider = "openai" | "gemini" | "groq" | "custom";
+export type PromptCacheMode = "auto" | "on" | "off";
 
 export interface AgentSettings {
   provider: Provider;
@@ -7,6 +8,7 @@ export interface AgentSettings {
   model: string;
   maxSteps: number;
   requestTimeoutSeconds: number;
+  promptCacheMode: PromptCacheMode;
   theme: "light" | "dark";
 }
 
@@ -19,6 +21,7 @@ export interface AiConfigurationProfile {
   model: string;
   maxSteps: number;
   requestTimeoutSeconds: number;
+  promptCacheMode: PromptCacheMode;
   createdAt: number;
   updatedAt: number;
 }
@@ -91,6 +94,17 @@ export interface PageObservation {
   title: string;
   text: string;
   elements: DomElementInfo[];
+  viewport?: PageViewportInfo;
+}
+
+export interface PageViewportInfo {
+  scrollX: number;
+  scrollY: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  pageWidth: number;
+  pageHeight: number;
+  progressPercent: number;
 }
 
 export interface ContentActionResult {

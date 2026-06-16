@@ -67,7 +67,8 @@ The side-panel settings support:
 - `model`: any model name accepted by the configured compatible endpoint.
 - `maxSteps`: maximum observe/act loop iterations, default `60`.
 - `requestTimeoutSeconds`: AI request timeout per attempt, default `60`.
-- Named AI profiles: save the current provider/base URL/API key/model/max steps/timeout under a name, then apply or delete profiles from Settings.
+- `promptCacheMode`: `auto` sends cache hints for OpenAI and custom endpoints, `on` sends them for any provider, and `off` disables explicit cache hints.
+- Named AI profiles: save the current provider/base URL/API key/model/max steps/timeout/cache mode under a name, then apply or delete profiles from Settings.
 
 The extension uses `fetch` against `POST {apiBaseUrl}/chat/completions` with OpenAI-compatible chat-completions JSON. No paid SDK is used.
 Each AI request uses the configured timeout and automatically retries before surfacing a timeout error.
@@ -79,11 +80,14 @@ The agent structures model requests for provider-side prefix caching:
 - Static agent instructions are sent first.
 - The user's task is sent as a stable message that remains unchanged during a run.
 - Changing step data, previous results, and page observations are sent last.
-- OpenAI provider requests include `prompt_cache_key` and `prompt_cache_retention: "in_memory"`.
+- OpenAI and custom provider requests include `prompt_cache_key` and `prompt_cache_retention: "in_memory"` when prompt cache mode is `auto`.
+- Prompt cache mode `on` forces those cache hints for any provider; `off` omits them.
 - If a compatible endpoint rejects OpenAI cache fields, the request is retried without them.
 - The background console logs `cachedPromptTokens` and `promptCacheHitRate` when the provider returns cache usage.
 
 OpenAI-compatible APIs are still stateless, so the extension must send the full current prompt on every step. The cache benefit comes from the model provider reusing repeated prefix tokens internally.
+
+The dynamic observation also begins with a compact page-state summary: viewport progress, focused element, empty fillable controls, already filled/selected controls, and visible drag/drop candidates. That high-signal state is followed by trimmed readable text and the full interactive element list.
 
 ## Agent Loop
 

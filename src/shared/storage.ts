@@ -1,11 +1,12 @@
 import { DEFAULT_SETTINGS } from "./defaults";
-import type { AgentSettings, AiConfigurationProfile, Provider } from "./types";
+import type { AgentSettings, AiConfigurationProfile, PromptCacheMode, Provider } from "./types";
 
 const SETTINGS_KEY = "byokAgentSettings";
 const TASK_DRAFT_KEY = "byokAgentTaskDraft";
 const CONFIG_PROFILES_KEY = "byokAgentConfigProfiles";
 const MIN_MAX_STEPS = 1;
 const MAX_MAX_STEPS = 60;
+const LEGACY_DEFAULT_MAX_STEPS = new Set([12, 30]);
 const MIN_REQUEST_TIMEOUT_SECONDS = 10;
 const MAX_REQUEST_TIMEOUT_SECONDS = 300;
 
@@ -19,6 +20,25 @@ function normalizeProvider(value: unknown): Provider {
     return value;
   }
   return DEFAULT_SETTINGS.provider;
+}
+
+function normalizePromptCacheMode(value: unknown): PromptCacheMode {
+  if (value === "auto" || value === "on" || value === "off") {
+    return value;
+  }
+  return DEFAULT_SETTINGS.promptCacheMode;
+}
+
+function clampMaxSteps(value: unknown): number {
+  const numericValue = Number(value || DEFAULT_SETTINGS.maxSteps);
+  return Math.min(Math.max(numericValue, MIN_MAX_STEPS), MAX_MAX_STEPS);
+}
+
+function normalizeStoredMaxSteps(value: unknown): number {
+  const numericValue = Number(value || DEFAULT_SETTINGS.maxSteps);
+  return LEGACY_DEFAULT_MAX_STEPS.has(numericValue)
+    ? DEFAULT_SETTINGS.maxSteps
+    : clampMaxSteps(numericValue);
 }
 
 export async function loadSettings(): Promise<AgentSettings> {
@@ -35,10 +55,7 @@ export async function loadSettings(): Promise<AgentSettings> {
     ),
     apiKey: String(raw?.apiKey || ""),
     model: String(raw?.model || DEFAULT_SETTINGS.model),
-    maxSteps: Math.min(
-      Math.max(Number(raw?.maxSteps || DEFAULT_SETTINGS.maxSteps), MIN_MAX_STEPS),
-      MAX_MAX_STEPS,
-    ),
+    maxSteps: normalizeStoredMaxSteps(raw?.maxSteps),
     requestTimeoutSeconds: Math.min(
       Math.max(
         Number(raw?.requestTimeoutSeconds || DEFAULT_SETTINGS.requestTimeoutSeconds),
@@ -46,6 +63,7 @@ export async function loadSettings(): Promise<AgentSettings> {
       ),
       MAX_REQUEST_TIMEOUT_SECONDS,
     ),
+    promptCacheMode: normalizePromptCacheMode(raw?.promptCacheMode),
     theme:
       raw?.theme === "light" || raw?.theme === "dark"
         ? raw.theme
@@ -60,11 +78,12 @@ export async function saveSettings(settings: AgentSettings): Promise<void> {
     [SETTINGS_KEY]: {
       ...settings,
       apiBaseUrl: settings.apiBaseUrl.replace(/\/+$/, ""),
-      maxSteps: Math.min(Math.max(settings.maxSteps, MIN_MAX_STEPS), MAX_MAX_STEPS),
+      maxSteps: clampMaxSteps(settings.maxSteps),
       requestTimeoutSeconds: Math.min(
         Math.max(settings.requestTimeoutSeconds, MIN_REQUEST_TIMEOUT_SECONDS),
         MAX_REQUEST_TIMEOUT_SECONDS,
       ),
+      promptCacheMode: normalizePromptCacheMode(settings.promptCacheMode),
     },
   });
 }
@@ -108,11 +127,12 @@ export async function saveConfigurationProfile(
     apiBaseUrl: settings.apiBaseUrl.replace(/\/+$/, ""),
     apiKey: settings.apiKey,
     model: settings.model,
-    maxSteps: Math.min(Math.max(settings.maxSteps, MIN_MAX_STEPS), MAX_MAX_STEPS),
+    maxSteps: clampMaxSteps(settings.maxSteps),
     requestTimeoutSeconds: Math.min(
       Math.max(settings.requestTimeoutSeconds, MIN_REQUEST_TIMEOUT_SECONDS),
       MAX_REQUEST_TIMEOUT_SECONDS,
     ),
+    promptCacheMode: normalizePromptCacheMode(settings.promptCacheMode),
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   };
@@ -152,6 +172,7 @@ export function applyConfigurationProfile(
     model: profile.model,
     maxSteps: profile.maxSteps,
     requestTimeoutSeconds: profile.requestTimeoutSeconds,
+    promptCacheMode: profile.promptCacheMode,
   };
 }
 
@@ -181,10 +202,7 @@ function normalizeProfiles(value: unknown): AiConfigurationProfile[] {
         ).replace(/\/+$/, ""),
         apiKey: String(raw.apiKey || ""),
         model: String(raw.model || DEFAULT_SETTINGS.model),
-        maxSteps: Math.min(
-          Math.max(Number(raw.maxSteps || DEFAULT_SETTINGS.maxSteps), MIN_MAX_STEPS),
-          MAX_MAX_STEPS,
-        ),
+        maxSteps: normalizeStoredMaxSteps(raw.maxSteps),
         requestTimeoutSeconds: Math.min(
           Math.max(
             Number(raw.requestTimeoutSeconds || DEFAULT_SETTINGS.requestTimeoutSeconds),
@@ -192,6 +210,7 @@ function normalizeProfiles(value: unknown): AiConfigurationProfile[] {
           ),
           MAX_REQUEST_TIMEOUT_SECONDS,
         ),
+        promptCacheMode: normalizePromptCacheMode(raw.promptCacheMode),
         createdAt: Number(raw.createdAt || Date.now()),
         updatedAt: Number(raw.updatedAt || Date.now()),
       };
