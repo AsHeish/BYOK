@@ -1,6 +1,6 @@
 import type { AgentModelResponse, PageObservation } from "../shared/types";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.34";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.36";
 const MAX_ACTIONS_PER_RESPONSE = 10;
 const MAX_OBSERVATION_INPUT_TOKENS = 4000;
 const APPROX_CHARS_PER_TOKEN = 4;
@@ -38,6 +38,7 @@ export function buildAgentMessages(args: {
         "- If the previous action result says a field was skipped because it already has a value or was skipped and advanced, never retry that same element. Use the element marked focused=true, choose the next empty field, or return done.",
         "- The previous action result lists what was actually completed. Continue from the last completed action; do not repeat completed or skipped actions.",
         "- If the previous action result says the target element is no longer available, do not retry that stale elementId. Use the refreshed observation and pick a current element ID.",
+        "- If the previous action result says the target is not editable, do not retry the same wrapper. Use the refreshed focused element or an empty fillable control from the page state summary.",
         "- If the user asks to keep pressing Tab or move to the next input, use press_key with key=\"Tab\". The next observation will mark the newly focused element with focused=true.",
         "",
         "Allowed action schema:",

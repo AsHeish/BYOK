@@ -30,6 +30,23 @@ const keyboardFocusableSelector = [
   ".MuiSelect-root"
 ].join(",");
 
+const editableContextSelector = [
+  "form",
+  "[role='form']",
+  "label",
+  "[class*='question']",
+  "[class*='Question']",
+  "[class*='problem']",
+  "[class*='Problem']",
+  "[class*='answer']",
+  "[class*='Answer']",
+  ".MuiFormControl-root",
+  ".MuiInputBase-root",
+  ".MuiOutlinedInput-root",
+  ".MuiFilledInput-root",
+  ".MuiAutocomplete-root"
+].join(",");
+
 export async function executeAction(action: AgentAction): Promise<ContentActionResult> {
   switch (action.type) {
     case "click":
@@ -258,7 +275,9 @@ async function typeIntoElement(elementId: string | undefined, text: string): Pro
   if (!editable) {
     return {
       ok: false,
-      message: "The target element is not editable and no nested editable field became active."
+      recoverable: true,
+      message:
+        "The target element is not editable and no related editable field became active. Refreshed the page context; choose a visible empty fillable control, the focused editable field, or click the wrapper before filling."
     };
   }
 
@@ -302,36 +321,56 @@ async function typeIntoElement(elementId: string | undefined, text: string): Pro
 
   return {
     ok: false,
-    message: "The target element is not editable."
+    recoverable: true,
+    message:
+      "The resolved target is not editable. Refreshed the page context; choose a current visible empty fillable control next."
   };
 }
 
 async function resolveTextEditableTarget(element: HTMLElement): Promise<TextEditableElement | undefined> {
-  const initialTarget = getTextEditableElement(element) || findNestedTextEditable(element);
-  const activationTarget = getEditableActivationTarget(element, initialTarget);
+  const activeBefore = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  const initialTarget =
+    getTextEditableElement(element) ||
+    getAssociatedTextEditable(element) ||
+    findNestedTextEditable(element) ||
+    findNearbyTextEditable(element);
 
-  if (activationTarget) {
+  for (const activationTarget of getEditableActivationTargets(element, initialTarget)) {
     activateForTyping(activationTarget);
-    await sleep(90);
-  }
 
-  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
-  if (activeElement) {
-    const activeEditable = getTextEditableElement(activeElement) || findNestedTextEditable(activeElement);
-    if (activeEditable && (element.contains(activeEditable) || activeEditable === initialTarget)) {
+    const activeEditable = await waitForActiveTextEditable(element, activeBefore, initialTarget, 260);
+    if (activeEditable) {
       return activeEditable;
+    }
+
+    const currentTarget =
+      getTextEditableElement(element) ||
+      getAssociatedTextEditable(element) ||
+      findNestedTextEditable(element) ||
+      findNearbyTextEditable(element);
+    if (currentTarget) {
+      return currentTarget;
     }
   }
 
-  return initialTarget || findNestedTextEditable(element);
+  const activeEditable = getActiveTextEditable();
+  if (activeEditable && isLikelyEditableForTarget(element, activeEditable, activeBefore, initialTarget)) {
+    return activeEditable;
+  }
+
+  return initialTarget || findNearbyTextEditable(element);
 }
 
 function getTextEditableElement(element: HTMLElement): TextEditableElement | undefined {
+  if (!isVisibleElement(element) || isDisabled(element)) {
+    return undefined;
+  }
+
   if (element instanceof HTMLInputElement && isTextEntryInput(element)) {
     return element;
   }
 
-  if (element instanceof HTMLTextAreaElement) {
+  if (element instanceof HTMLTextAreaElement && !element.readOnly) {
     return element;
   }
 
@@ -370,25 +409,87 @@ function skipAlreadyFilledField(editable: TextEditableElement): ContentActionRes
 }
 
 function findNestedTextEditable(element: HTMLElement): TextEditableElement | undefined {
-  const nested = element.querySelector<HTMLElement>(textEditableSelector);
-  return nested ? getTextEditableElement(nested) : undefined;
+  const nestedElements = Array.from(element.querySelectorAll<HTMLElement>(textEditableSelector));
+  for (const nested of nestedElements) {
+    const editable = getTextEditableElement(nested);
+    if (editable) {
+      return editable;
+    }
+  }
+
+  return undefined;
 }
 
-function getEditableActivationTarget(
+function getAssociatedTextEditable(element: HTMLElement): TextEditableElement | undefined {
+  const associatedElements = getAssociatedElements(element);
+  for (const associatedElement of associatedElements) {
+    const editable = getTextEditableElement(associatedElement) || findNestedTextEditable(associatedElement);
+    if (editable) {
+      return editable;
+    }
+  }
+
+  return undefined;
+}
+
+function getAssociatedElements(element: HTMLElement): HTMLElement[] {
+  const elements: HTMLElement[] = [];
+  const labelControl = element instanceof HTMLLabelElement ? element.control : undefined;
+  if (labelControl instanceof HTMLElement) {
+    elements.push(labelControl);
+  }
+
+  const closestLabel = element.closest("label");
+  if (closestLabel?.control instanceof HTMLElement) {
+    elements.push(closestLabel.control);
+  }
+
+  const idReferences = [
+    element.getAttribute("for"),
+    element.getAttribute("aria-controls"),
+    element.getAttribute("aria-owns"),
+    element.getAttribute("aria-activedescendant")
+  ]
+    .filter((value): value is string => Boolean(value))
+    .flatMap((value) => value.split(/\s+/));
+
+  for (const id of idReferences) {
+    const referencedElement = document.getElementById(id);
+    if (referencedElement instanceof HTMLElement) {
+      elements.push(referencedElement);
+    }
+  }
+
+  return uniqueElements(elements);
+}
+
+function getEditableActivationTargets(
   originalElement: HTMLElement,
   editable?: TextEditableElement
-): HTMLElement | undefined {
+): HTMLElement[] {
+  const targets: HTMLElement[] = [];
   const labelControl = originalElement instanceof HTMLLabelElement ? originalElement.control : undefined;
   if (labelControl instanceof HTMLElement) {
-    return originalElement;
+    targets.push(originalElement);
   }
 
   const wrapper = editable ? findLikelyEditableWrapper(editable, originalElement) : undefined;
   if (wrapper) {
-    return wrapper;
+    targets.push(wrapper);
   }
 
-  return originalElement;
+  const nearestContext = originalElement.closest(editableContextSelector);
+  if (nearestContext instanceof HTMLElement && isLikelyEditableWrapper(nearestContext)) {
+    targets.push(nearestContext);
+  }
+
+  targets.push(originalElement);
+
+  if (editable && editable !== originalElement) {
+    targets.push(editable);
+  }
+
+  return uniqueElements(targets).filter((target) => isVisibleElement(target) && !isDisabled(target));
 }
 
 function findLikelyEditableWrapper(editable: HTMLElement, boundary: HTMLElement): HTMLElement | undefined {
@@ -421,6 +522,146 @@ function isLikelyEditableWrapper(element: HTMLElement): boolean {
   );
 }
 
+async function waitForActiveTextEditable(
+  originalElement: HTMLElement,
+  activeBefore: HTMLElement | undefined,
+  initialTarget: TextEditableElement | undefined,
+  timeoutMs: number
+): Promise<TextEditableElement | undefined> {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt <= timeoutMs) {
+    const activeEditable = getActiveTextEditable();
+    if (activeEditable && isLikelyEditableForTarget(originalElement, activeEditable, activeBefore, initialTarget)) {
+      return activeEditable;
+    }
+
+    await sleep(40);
+  }
+
+  return undefined;
+}
+
+function getActiveTextEditable(): TextEditableElement | undefined {
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  if (!activeElement) {
+    return undefined;
+  }
+
+  return getTextEditableElement(activeElement) || findNestedTextEditable(activeElement);
+}
+
+function isLikelyEditableForTarget(
+  originalElement: HTMLElement,
+  editable: TextEditableElement,
+  activeBefore: HTMLElement | undefined,
+  initialTarget: TextEditableElement | undefined
+): boolean {
+  if (editable === initialTarget || originalElement === editable || originalElement.contains(editable)) {
+    return true;
+  }
+
+  const activeChanged = !activeBefore || (editable !== activeBefore && !editable.contains(activeBefore));
+  if (activeChanged) {
+    return true;
+  }
+
+  return areElementsInSameEditableContext(originalElement, editable);
+}
+
+function findNearbyTextEditable(element: HTMLElement): TextEditableElement | undefined {
+  let bestMatch: { editable: TextEditableElement; score: number } | undefined;
+
+  for (const candidate of getVisibleTextEditableCandidates()) {
+    const score = scoreNearbyEditable(element, candidate);
+    if (!bestMatch || score > bestMatch.score) {
+      bestMatch = { editable: candidate, score };
+    }
+  }
+
+  return bestMatch && bestMatch.score >= 35 ? bestMatch.editable : undefined;
+}
+
+function getVisibleTextEditableCandidates(): TextEditableElement[] {
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>(textEditableSelector))
+    .map(getTextEditableElement)
+    .filter((element): element is TextEditableElement => Boolean(element));
+
+  return uniqueElements(candidates);
+}
+
+function scoreNearbyEditable(source: HTMLElement, candidate: TextEditableElement): number {
+  let score = 0;
+
+  if (source === candidate) {
+    score += 500;
+  }
+  if (source.contains(candidate)) {
+    score += 250;
+  }
+  if (candidate.contains(source)) {
+    score += 160;
+  }
+  if (areElementsInSameEditableContext(source, candidate)) {
+    score += 120;
+  }
+  if (!hasExistingEditableValue(candidate)) {
+    score += 35;
+  } else {
+    score -= 25;
+  }
+
+  const sourceRect = source.getBoundingClientRect();
+  const candidateRect = candidate.getBoundingClientRect();
+  const distance = getRectDistance(sourceRect, candidateRect);
+  score += Math.max(0, 140 - distance / 3);
+
+  if (Math.abs(sourceRect.top - candidateRect.top) < 90) {
+    score += 20;
+  }
+  if (candidateRect.top >= sourceRect.top - 40 && candidateRect.top <= sourceRect.bottom + 180) {
+    score += 18;
+  }
+
+  return score;
+}
+
+function areElementsInSameEditableContext(a: HTMLElement, b: HTMLElement): boolean {
+  const aContext = getEditableContext(a);
+  const bContext = getEditableContext(b);
+  return Boolean(aContext && bContext && aContext === bContext);
+}
+
+function getEditableContext(element: HTMLElement): HTMLElement | undefined {
+  const context = element.closest(editableContextSelector);
+  return context instanceof HTMLElement ? context : undefined;
+}
+
+function getElementDistance(a: HTMLElement, b: HTMLElement): number {
+  return getRectDistance(a.getBoundingClientRect(), b.getBoundingClientRect());
+}
+
+function getRectDistance(a: DOMRect, b: DOMRect): number {
+  const aCenterX = a.left + a.width / 2;
+  const aCenterY = a.top + a.height / 2;
+  const bCenterX = b.left + b.width / 2;
+  const bCenterY = b.top + b.height / 2;
+  return Math.hypot(aCenterX - bCenterX, aCenterY - bCenterY);
+}
+
+function uniqueElements<T extends HTMLElement>(elements: T[]): T[] {
+  const seen = new Set<T>();
+  const unique: T[] = [];
+  for (const element of elements) {
+    if (seen.has(element)) {
+      continue;
+    }
+    seen.add(element);
+    unique.push(element);
+  }
+  return unique;
+}
+
 function activateForTyping(element: HTMLElement): void {
   prepareElement(element);
   dispatchPointerSequence(element);
@@ -428,7 +669,7 @@ function activateForTyping(element: HTMLElement): void {
 }
 
 function isTextEntryInput(element: HTMLInputElement): boolean {
-  return !["button", "submit", "reset", "checkbox", "radio", "file", "hidden"].includes(element.type);
+  return !element.readOnly && !["button", "submit", "reset", "checkbox", "radio", "file", "hidden"].includes(element.type);
 }
 
 async function pressKey(key: string, startingElementId?: string): Promise<ContentActionResult> {

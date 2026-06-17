@@ -496,7 +496,7 @@ function buildPreviousResultForModel(result: ActionLoopResult): string {
     formatCompletedActionsForModel(result.completedActions),
     result.failedAction ? `Action needing correction: ${result.failedAction}` : "",
     result.recoverable
-      ? "Recovery note: the page was re-observed after the issue. Continue from the current observation, do not retry stale element IDs, and do not repeat completed actions."
+      ? "Recovery note: the page was re-observed after the issue. Continue from the current observation, do not retry stale or non-editable element IDs, use the focused or empty fillable control when available, and do not repeat completed actions."
       : "",
     result.lastObservation ? formatObservationProgress(result.lastObservation) : ""
   ].filter(Boolean);
