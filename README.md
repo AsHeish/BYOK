@@ -125,7 +125,7 @@ The model must return strict JSON only. Use `action` for one action, or `actions
 }
 ```
 
-Supported action types are `click`, `multi_click`, `drag`, `multi_drag`, `fill`, `type`, `select`, `press_key`, `scroll`, `navigate`, `extract`, `ask_user`, and `done`. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For multiple drag-and-drop pairs, `multi_drag` uses `dragPairs: [{ "elementId": "source", "targetElementId": "target" }]`.
+Supported action types are `click`, `multi_click`, `drag`, `multi_drag`, `fill`, `type`, `select`, `press_key`, `scroll`, `navigate`, `go_back`, `extract`, `ask_user`, and `done`. `go_back` returns to the previous browser history page. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For multiple drag-and-drop pairs, `multi_drag` uses `dragPairs: [{ "elementId": "source", "targetElementId": "target" }]`.
 
 Page observations are trimmed to roughly 4,000 input tokens. The readable text window is scroll-aware, so as the page scrolls down, old upper-page text drops out and lower-page text enters the model context.
 

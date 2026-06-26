@@ -39,6 +39,7 @@ export type AgentActionType =
   | "press_key"
   | "scroll"
   | "navigate"
+  | "go_back"
   | "extract"
   | "ask_user"
   | "done";

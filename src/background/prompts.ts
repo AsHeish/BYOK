@@ -1,6 +1,6 @@
 import type { AgentModelResponse, PageObservation } from "../shared/types";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.36";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.37";
 const MAX_ACTIONS_PER_RESPONSE = 10;
 const MAX_OBSERVATION_INPUT_TOKENS = 4000;
 const APPROX_CHARS_PER_TOKEN = 4;
@@ -27,7 +27,8 @@ export function buildAgentMessages(args: {
         `- You may return actions instead of action when several UI steps can be done from the same current observation. Return at most ${MAX_ACTIONS_PER_RESPONSE} actions.`,
         "- The browser executes batches in fail-safe mode: it stops the remaining batch if an action fails, goes stale, asks the user, finishes, or navigates, then sends you the latest progress and page observation.",
         "- Good batches: fill an answer then click a visible Continue button; select several visible controls; drag several visible items to visible targets.",
-        "- Do not batch actions after navigate, after a click that likely changes the page, after a final submit-like action, or when you need the next page observation to decide.",
+        "- Use go_back when you need to return to the previous browser history page.",
+        "- Do not batch actions after navigate, go_back, after a click that likely changes the page, after a final submit-like action, or when you need the next page observation to decide.",
         "- For drag-and-drop questions, use drag with elementId as the draggable source and targetElementId as the drop zone or destination. For several visible drag/drop pairs in the same question, prefer multi_drag with dragPairs.",
         "- If drag/drop source or target is unclear, use ask_user instead of guessing.",
         "- For multiple-answer checkbox or multi-select questions where several options are correct for the same question, use one multi_click action with elementIds containing all correct option element IDs. Do not call one click at a time for those options.",
@@ -39,17 +40,19 @@ export function buildAgentMessages(args: {
         "- The previous action result lists what was actually completed. Continue from the last completed action; do not repeat completed or skipped actions.",
         "- If the previous action result says the target element is no longer available, do not retry that stale elementId. Use the refreshed observation and pick a current element ID.",
         "- If the previous action result says the target is not editable, do not retry the same wrapper. Use the refreshed focused element or an empty fillable control from the page state summary.",
+        "- If the previous action result says an action likely changed the page before the content script replied, treat it as a navigation/page-change recovery. Continue from the refreshed current page and do not repeat that click unless still visibly needed.",
         "- If the user asks to keep pressing Tab or move to the next input, use press_key with key=\"Tab\". The next observation will mark the newly focused element with focused=true.",
         "",
         "Allowed action schema:",
         "Return either action for one action or actions for an ordered batch. Do not include both unless actions is the intended plan.",
-        "Action type must be one of: click, multi_click, drag, multi_drag, fill, type, select, press_key, scroll, navigate, extract, ask_user, done.",
+        "Action type must be one of: click, multi_click, drag, multi_drag, fill, type, select, press_key, scroll, navigate, go_back, extract, ask_user, done.",
         `For action batches, set actions to an array of up to ${MAX_ACTIONS_PER_RESPONSE} action objects.`,
         "For multi_click, set elementIds to an array of the option IDs to select in the same browser action.",
         "For multi_drag, set dragPairs to an array of { elementId, targetElementId } pairs to drag in order.",
         "For drag, set elementId to the draggable source and targetElementId to the destination/drop zone.",
         "For fill and type, set elementId and text. Use fill for normal form input because it combines click/focus and typing.",
         "For press_key, set key to Tab or Shift+Tab.",
+        "For go_back, no elementId or url is needed.",
         JSON.stringify(exampleResponse(), null, 2)
       ].join("\n")
     },

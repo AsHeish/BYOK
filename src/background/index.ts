@@ -28,6 +28,7 @@ const SIDE_PANEL_PATH = "sidepanel.html";
 const MAX_ACTIONS_PER_AGENT_STEP = 10;
 const MAX_PROGRESS_LINES_FOR_PROMPT = 30;
 const MAX_ACTION_LOG_PREVIEW = 20;
+const TAB_SETTLE_TIMEOUT_MS = 5000;
 
 configureSidePanelSafely();
 
@@ -320,6 +321,18 @@ async function handleSingleAction(
     };
   }
 
+  if (action.type === "go_back") {
+    const result = await goBackInTab(tabId);
+    return {
+      ok: result.ok,
+      message: result.message,
+      shouldStop: false,
+      recoverable: result.recoverable,
+      completedActions: [],
+      lastObservation: result.observation
+    };
+  }
+
   const result = await executeAction(tabId, action);
   return {
     ok: result.ok,
@@ -353,8 +366,91 @@ async function executeAction(tabId: number, action: AgentAction): Promise<Conten
   try {
     return await sendTabMessage<ContentActionResult>(tabId, { type: "CONTENT_EXECUTE", action });
   } catch (error) {
+    if (shouldRecoverFromClosedMessageChannel(action, error)) {
+      await waitForTabToSettle(tabId);
+      const observation = await observePageSafely(tabId);
+      return {
+        ok: false,
+        recoverable: true,
+        observation,
+        message: `${formatAction(action)} likely changed the page before the content script could reply. The tab was re-observed; continue from the current page and do not repeat that action unless it is still visibly needed.`
+      };
+    }
+
     throw new Error(`Could not execute ${action.type}: ${getErrorMessage(error)}`);
   }
+}
+
+async function goBackInTab(tabId: number): Promise<ContentActionResult> {
+  const before = await getTabSafely(tabId);
+
+  try {
+    await chrome.tabs.goBack(tabId);
+  } catch (error) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: `Could not go back. This tab may not have a previous history entry. ${getErrorMessage(error)}`
+    };
+  }
+
+  await waitForTabToSettle(tabId, before?.url);
+  return {
+    ok: true,
+    message: "Went back to the previous page.",
+    observation: await observePageSafely(tabId)
+  };
+}
+
+async function observePageSafely(tabId: number): Promise<PageObservation | undefined> {
+  try {
+    return await observePage(tabId);
+  } catch (error) {
+    console.warn("[BYOK Agent] Could not observe page after browser navigation.", error);
+    return undefined;
+  }
+}
+
+async function getTabSafely(tabId: number): Promise<chrome.tabs.Tab | undefined> {
+  try {
+    return await chrome.tabs.get(tabId);
+  } catch {
+    return undefined;
+  }
+}
+
+async function waitForTabToSettle(tabId: number, previousUrl?: string): Promise<void> {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < TAB_SETTLE_TIMEOUT_MS) {
+    const tab = await getTabSafely(tabId);
+    if (!tab) {
+      return;
+    }
+
+    const urlChanged = previousUrl && tab.url && tab.url !== previousUrl;
+    if (tab.status === "complete" && (!previousUrl || urlChanged || Date.now() - startedAt > 700)) {
+      await sleep(250);
+      return;
+    }
+
+    await sleep(120);
+  }
+}
+
+function shouldRecoverFromClosedMessageChannel(action: AgentAction, error: unknown): boolean {
+  if (!canActionUnloadContentScript(action)) {
+    return false;
+  }
+
+  const message = getErrorMessage(error);
+  return /message channel closed|asynchronous response|receiving end does not exist|extension context invalidated|context invalidated/i.test(
+    message
+  );
+}
+
+function canActionUnloadContentScript(action: AgentAction): boolean {
+  return action.type === "click" || action.type === "multi_click" || action.type === "navigate" || action.type === "go_back";
 }
 
 function stopCurrentTask(reason: string): void {
@@ -472,6 +568,9 @@ function formatAction(action: AgentAction): string {
   if (action.type === "navigate") {
     return `navigate to ${action.url || "URL"}`;
   }
+  if (action.type === "go_back") {
+    return "go back";
+  }
   if (action.type === "scroll") {
     return `scroll ${action.direction || "down"}`;
   }
@@ -558,11 +657,11 @@ function hasCompletedControlValue(element: PageObservation["elements"][number]):
 }
 
 function getPostBatchDelay(actions: AgentAction[]): number {
-  return actions.some((action) => action.type === "navigate") ? 1500 : 450;
+  return actions.some((action) => action.type === "navigate" || action.type === "go_back") ? 1500 : 450;
 }
 
 function getInterActionDelay(action: AgentAction): number {
-  if (action.type === "navigate") {
+  if (action.type === "navigate" || action.type === "go_back") {
     return 1200;
   }
   if (action.type === "drag" || action.type === "multi_drag") {
@@ -572,7 +671,7 @@ function getInterActionDelay(action: AgentAction): number {
 }
 
 function shouldHaltBatchAfterAction(action: AgentAction): boolean {
-  return action.type === "navigate";
+  return action.type === "navigate" || action.type === "go_back";
 }
 
 interface DuplicateInputAction {
