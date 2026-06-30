@@ -29,6 +29,15 @@ function normalizePromptCacheMode(value: unknown): PromptCacheMode {
   return DEFAULT_SETTINGS.promptCacheMode;
 }
 
+function normalizeOptionalPrice(value: unknown): number | undefined {
+  if (value === "" || value === null || typeof value === "undefined") {
+    return undefined;
+  }
+
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue >= 0 ? numericValue : undefined;
+}
+
 function clampMaxSteps(value: unknown): number {
   const numericValue = Number(value || DEFAULT_SETTINGS.maxSteps);
   return Math.min(Math.max(numericValue, MIN_MAX_STEPS), MAX_MAX_STEPS);
@@ -64,6 +73,9 @@ export async function loadSettings(): Promise<AgentSettings> {
       MAX_REQUEST_TIMEOUT_SECONDS,
     ),
     promptCacheMode: normalizePromptCacheMode(raw?.promptCacheMode),
+    inputTokenCostPerMillion: normalizeOptionalPrice(raw?.inputTokenCostPerMillion),
+    cachedInputTokenCostPerMillion: normalizeOptionalPrice(raw?.cachedInputTokenCostPerMillion),
+    outputTokenCostPerMillion: normalizeOptionalPrice(raw?.outputTokenCostPerMillion),
     theme:
       raw?.theme === "light" || raw?.theme === "dark"
         ? raw.theme
@@ -84,6 +96,9 @@ export async function saveSettings(settings: AgentSettings): Promise<void> {
         MAX_REQUEST_TIMEOUT_SECONDS,
       ),
       promptCacheMode: normalizePromptCacheMode(settings.promptCacheMode),
+      inputTokenCostPerMillion: normalizeOptionalPrice(settings.inputTokenCostPerMillion),
+      cachedInputTokenCostPerMillion: normalizeOptionalPrice(settings.cachedInputTokenCostPerMillion),
+      outputTokenCostPerMillion: normalizeOptionalPrice(settings.outputTokenCostPerMillion),
     },
   });
 }
@@ -133,6 +148,9 @@ export async function saveConfigurationProfile(
       MAX_REQUEST_TIMEOUT_SECONDS,
     ),
     promptCacheMode: normalizePromptCacheMode(settings.promptCacheMode),
+    inputTokenCostPerMillion: normalizeOptionalPrice(settings.inputTokenCostPerMillion),
+    cachedInputTokenCostPerMillion: normalizeOptionalPrice(settings.cachedInputTokenCostPerMillion),
+    outputTokenCostPerMillion: normalizeOptionalPrice(settings.outputTokenCostPerMillion),
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   };
@@ -173,6 +191,9 @@ export function applyConfigurationProfile(
     maxSteps: profile.maxSteps,
     requestTimeoutSeconds: profile.requestTimeoutSeconds,
     promptCacheMode: profile.promptCacheMode,
+    inputTokenCostPerMillion: profile.inputTokenCostPerMillion,
+    cachedInputTokenCostPerMillion: profile.cachedInputTokenCostPerMillion,
+    outputTokenCostPerMillion: profile.outputTokenCostPerMillion,
   };
 }
 
@@ -211,6 +232,9 @@ function normalizeProfiles(value: unknown): AiConfigurationProfile[] {
           MAX_REQUEST_TIMEOUT_SECONDS,
         ),
         promptCacheMode: normalizePromptCacheMode(raw.promptCacheMode),
+        inputTokenCostPerMillion: normalizeOptionalPrice(raw.inputTokenCostPerMillion),
+        cachedInputTokenCostPerMillion: normalizeOptionalPrice(raw.cachedInputTokenCostPerMillion),
+        outputTokenCostPerMillion: normalizeOptionalPrice(raw.outputTokenCostPerMillion),
         createdAt: Number(raw.createdAt || Date.now()),
         updatedAt: Number(raw.updatedAt || Date.now()),
       };

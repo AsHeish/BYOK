@@ -282,6 +282,57 @@ export function SettingsPanel({
             <option value="off">Off</option>
           </select>
         </label>
+
+        <label>
+          Input cost / 1M
+          <input
+            value={settings.inputTokenCostPerMillion ?? ""}
+            min={0}
+            step="0.000001"
+            type="number"
+            onChange={(event) =>
+              onChange({
+                ...settings,
+                inputTokenCostPerMillion: parseOptionalNumber(event.target.value),
+              })
+            }
+            placeholder="Optional USD rate"
+          />
+        </label>
+
+        <label>
+          Cached input / 1M
+          <input
+            value={settings.cachedInputTokenCostPerMillion ?? ""}
+            min={0}
+            step="0.000001"
+            type="number"
+            onChange={(event) =>
+              onChange({
+                ...settings,
+                cachedInputTokenCostPerMillion: parseOptionalNumber(event.target.value),
+              })
+            }
+            placeholder="Defaults to input rate"
+          />
+        </label>
+
+        <label>
+          Output cost / 1M
+          <input
+            value={settings.outputTokenCostPerMillion ?? ""}
+            min={0}
+            step="0.000001"
+            type="number"
+            onChange={(event) =>
+              onChange({
+                ...settings,
+                outputTokenCostPerMillion: parseOptionalNumber(event.target.value),
+              })
+            }
+            placeholder="Optional USD rate"
+          />
+        </label>
       </div>
 
       <p className="storage-note">
@@ -293,4 +344,13 @@ export function SettingsPanel({
       </button>
     </section>
   );
+}
+
+function parseOptionalNumber(value: string): number | undefined {
+  if (!value.trim()) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }

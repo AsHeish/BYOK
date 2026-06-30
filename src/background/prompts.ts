@@ -1,10 +1,17 @@
 import type { AgentModelResponse, PageObservation } from "../shared/types";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.37";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.39";
 const MAX_ACTIONS_PER_RESPONSE = 10;
 const MAX_OBSERVATION_INPUT_TOKENS = 4000;
 const APPROX_CHARS_PER_TOKEN = 4;
 const MAX_OBSERVATION_CHARS = MAX_OBSERVATION_INPUT_TOKENS * APPROX_CHARS_PER_TOKEN;
+
+export interface PromptTabInfo {
+  alias: string;
+  title?: string;
+  url?: string;
+  active: boolean;
+}
 
 export function buildAgentMessages(args: {
   task: string;
@@ -12,6 +19,8 @@ export function buildAgentMessages(args: {
   step: number;
   maxSteps: number;
   previousResult?: string;
+  tabs?: PromptTabInfo[];
+  activeTabAlias?: string;
 }): Array<{ role: "system" | "user"; content: string }> {
   return [
     {
@@ -28,7 +37,9 @@ export function buildAgentMessages(args: {
         "- The browser executes batches in fail-safe mode: it stops the remaining batch if an action fails, goes stale, asks the user, finishes, or navigates, then sends you the latest progress and page observation.",
         "- Good batches: fill an answer then click a visible Continue button; select several visible controls; drag several visible items to visible targets.",
         "- Use go_back when you need to return to the previous browser history page.",
-        "- Do not batch actions after navigate, go_back, after a click that likely changes the page, after a final submit-like action, or when you need the next page observation to decide.",
+        "- You can manage tracked browser tabs by alias. Use open_tab with url, switch_tab with tabAlias, close_tab with tabAlias, reload with optional tabAlias, and go_forward/go_back for browser history.",
+        "- The full page observation is only for the active tab alias. To work on another tab, switch_tab first and wait for the next observation.",
+        "- Do not batch actions after navigate, go_back, go_forward, reload, open_tab, switch_tab, close_tab, after a click that likely changes the page, after a final submit-like action, or when you need the next page observation to decide.",
         "- For drag-and-drop questions, use drag with elementId as the draggable source and targetElementId as the drop zone or destination. For several visible drag/drop pairs in the same question, prefer multi_drag with dragPairs.",
         "- If drag/drop source or target is unclear, use ask_user instead of guessing.",
         "- For multiple-answer checkbox or multi-select questions where several options are correct for the same question, use one multi_click action with elementIds containing all correct option element IDs. Do not call one click at a time for those options.",
@@ -45,7 +56,7 @@ export function buildAgentMessages(args: {
         "",
         "Allowed action schema:",
         "Return either action for one action or actions for an ordered batch. Do not include both unless actions is the intended plan.",
-        "Action type must be one of: click, multi_click, drag, multi_drag, fill, type, select, press_key, scroll, navigate, go_back, extract, ask_user, done.",
+        "Action type must be one of: click, multi_click, drag, multi_drag, fill, type, select, press_key, scroll, navigate, go_back, go_forward, reload, open_tab, switch_tab, close_tab, extract, ask_user, done.",
         `For action batches, set actions to an array of up to ${MAX_ACTIONS_PER_RESPONSE} action objects.`,
         "For multi_click, set elementIds to an array of the option IDs to select in the same browser action.",
         "For multi_drag, set dragPairs to an array of { elementId, targetElementId } pairs to drag in order.",
@@ -53,6 +64,8 @@ export function buildAgentMessages(args: {
         "For fill and type, set elementId and text. Use fill for normal form input because it combines click/focus and typing.",
         "For press_key, set key to Tab or Shift+Tab.",
         "For go_back, no elementId or url is needed.",
+        "For open_tab, set url. The new tab becomes active and receives the next tab alias.",
+        "For switch_tab and close_tab, set tabAlias such as \"tab-2\". For reload, tabAlias is optional and defaults to the active tab.",
         JSON.stringify(exampleResponse(), null, 2)
       ].join("\n")
     },
@@ -64,9 +77,10 @@ export function buildAgentMessages(args: {
       role: "user",
       content: [
         `Step: ${args.step} of ${args.maxSteps}`,
+        args.tabs?.length ? `Tracked browser tabs:\n${formatTabs(args.tabs, args.activeTabAlias)}` : "",
         args.previousResult ? `Previous action result: ${args.previousResult}` : "",
         "",
-        "Current page observation:",
+        `Current page observation${args.activeTabAlias ? ` for ${args.activeTabAlias}` : ""}:`,
         formatObservation(args.observation),
         "",
         "Return the next action JSON now."
@@ -75,6 +89,15 @@ export function buildAgentMessages(args: {
         .join("\n")
     }
   ];
+}
+
+function formatTabs(tabs: PromptTabInfo[], activeTabAlias?: string): string {
+  return tabs
+    .map((tab) => {
+      const activeMarker = tab.active || tab.alias === activeTabAlias ? "active " : "";
+      return `- ${tab.alias} ${activeMarker}title=${quote(tab.title || "Untitled", 90)} url=${quote(tab.url || "", 150)}`;
+    })
+    .join("\n");
 }
 
 function exampleResponse(): AgentModelResponse {

@@ -1,4 +1,4 @@
-import { buildAgentMessages } from "./prompts";
+import { buildAgentMessages, type PromptTabInfo } from "./prompts";
 import { getActiveTab, notifySidePanel, sendTabMessage, sleep, tryInjectContentScript } from "./chromeAsync";
 import { ModelClientError, requestAgentStep } from "./modelClient";
 
@@ -9,20 +9,37 @@ import type {
   AgentAction,
   AgentLogEntry,
   AgentModelResponse,
+  AgentUsageSnapshot,
   BackgroundToSidePanelMessage,
   ContentActionResult,
+  ModelUsageEvent,
   PageObservation,
   SidePanelToBackgroundMessage
 } from "../shared/types";
 
 interface RunningSession {
   taskId: string;
-  tabId: number;
+  activeTabId: number;
+  activeTabAlias: string;
+  tabs: AgentTabState[];
+  nextTabNumber: number;
   stopped: boolean;
+}
+
+interface AgentTabState {
+  alias: string;
+  tabId: number;
+  windowId?: number;
+  title?: string;
+  url?: string;
+  active: boolean;
+  createdAt: number;
+  lastObservedAt?: number;
 }
 
 let runningSession: RunningSession | undefined;
 let logs: AgentLogEntry[] = [];
+let usageSnapshot: AgentUsageSnapshot = createEmptyUsageSnapshot();
 
 const SIDE_PANEL_PATH = "sidepanel.html";
 const MAX_ACTIONS_PER_AGENT_STEP = 10;
@@ -54,8 +71,20 @@ chrome.runtime.onMessage.addListener((message: SidePanelToBackgroundMessage, _se
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (runningSession?.tabId === tabId) {
-    stopCurrentTask("The tab was closed.");
+  if (!runningSession?.tabs.some((tab) => tab.tabId === tabId)) {
+    return;
+  }
+
+  const closedTab = runningSession.tabs.find((tab) => tab.tabId === tabId);
+  runningSession.tabs = runningSession.tabs.filter((tab) => tab.tabId !== tabId);
+  if (runningSession.activeTabId === tabId) {
+    const fallbackTab = runningSession.tabs[0];
+    if (!fallbackTab) {
+      stopCurrentTask(`Tracked tab ${closedTab?.alias || tabId} was closed.`);
+      return;
+    }
+    setActiveTrackedTab(runningSession, fallbackTab);
+    appendLog("warning", `Active tab ${closedTab?.alias || tabId} was closed. Switched tracking to ${fallbackTab.alias}.`);
   }
 });
 
@@ -104,7 +133,8 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
     case "SIDEPANEL_GET_STATE":
       return {
         running: Boolean(runningSession && !runningSession.stopped),
-        logs: logs.filter((entry) => !isHiddenActionLog(entry.message))
+        logs: logs.filter((entry) => !isHiddenActionLog(entry.message)),
+        usage: usageSnapshot
       };
 
     default:
@@ -140,9 +170,11 @@ async function startTask(task: string): Promise<void> {
       return;
     }
 
-    runningSession = { taskId, tabId: tab.id, stopped: false };
+    runningSession = createRunningSession(taskId, tab);
+    usageSnapshot = createEmptyUsageSnapshot(settings);
+    emitUsage();
     emitStatus();
-    appendLog("info", `Task started on ${new URL(tab.url).hostname}.`);
+    appendLog("info", `Task started on ${new URL(tab.url).hostname} as tab-1.`);
 
     let previousResult: string | undefined;
     const completedInputActions = new Set<string>();
@@ -151,16 +183,36 @@ async function startTask(task: string): Promise<void> {
         break;
       }
 
-      const observation = await observePage(tab.id);
-      appendLog("info", `Observed page: ${observation.title || observation.url}`);
+      const session = runningSession;
+      if (!session || session.taskId !== taskId) {
+        break;
+      }
 
-      const messages = buildAgentMessages({ task, observation, step, maxSteps: settings.maxSteps, previousResult });
+      await refreshTrackedTabs(session);
+      const observation = await observePage(session.activeTabId);
+      updateTrackedTabFromObservation(session, session.activeTabId, observation);
+      appendLog("info", `Observed ${session.activeTabAlias}: ${observation.title || observation.url}`);
+
+      const messages = buildAgentMessages({
+        task,
+        observation,
+        step,
+        maxSteps: settings.maxSteps,
+        previousResult,
+        tabs: getPromptTabs(session),
+        activeTabAlias: session.activeTabAlias
+      });
       logPromptBeforeModelCall(step, messages);
 
       let modelResponse: AgentModelResponse;
       try {
-        modelResponse = await requestAgentStep(settings, messages);
+        const modelResult = await requestAgentStep(settings, messages);
+        recordUsageEvent(modelResult.usage, settings);
+        modelResponse = modelResult.response;
       } catch (error) {
+        if (error instanceof ModelClientError && error.usage) {
+          recordUsageEvent(error.usage, settings);
+        }
         if (error instanceof ModelClientError && /JSON|schema/i.test(error.message)) {
           previousResult = buildModelErrorProgress(previousResult, error.message);
           appendLog("warning", `${error.message} Asking the model to continue with valid action JSON.`);
@@ -176,7 +228,7 @@ async function startTask(task: string): Promise<void> {
 
       // Safety checks removed — all actions proceed unconditionally.
 
-      const loopResult = await handlePlannedActions(tab.id, modelResponse, plannedActions, completedInputActions, taskId);
+      const loopResult = await handlePlannedActions(modelResponse, plannedActions, completedInputActions, taskId);
       previousResult = buildPreviousResultForModel(loopResult);
       appendLog(loopResult.ok ? "success" : loopResult.recoverable ? "warning" : "error", loopResult.message);
 
@@ -211,7 +263,6 @@ interface ActionLoopResult {
 }
 
 async function handlePlannedActions(
-  tabId: number,
   modelResponse: AgentModelResponse,
   actions: AgentAction[],
   completedInputActions: Set<string>,
@@ -233,9 +284,20 @@ async function handlePlannedActions(
     }
 
     const action = actions[index];
-    const duplicateInputAction = getDuplicateInputAction(action, completedInputActions);
+    const session = runningSession;
+    if (!session || session.taskId !== taskId) {
+      return {
+        ok: true,
+        message: messages.join(" ") || "Stopped by user.",
+        shouldStop: true,
+        completedActions,
+        lastObservation
+      };
+    }
+
+    const duplicateInputAction = getDuplicateInputAction(action, completedInputActions, session.activeTabAlias);
     if (duplicateInputAction) {
-      const duplicateResult = await handleDuplicateInputAction(tabId, action, duplicateInputAction);
+      const duplicateResult = await handleDuplicateInputAction(session.activeTabId, action, duplicateInputAction);
       messages.push(formatActionResult(index, actions.length, duplicateResult.message));
       if (duplicateResult.ok && !duplicateResult.recoverable) {
         completedActions.push(formatCompletedAction(index, action, duplicateResult.message, "skipped"));
@@ -255,14 +317,15 @@ async function handlePlannedActions(
       continue;
     }
 
-    const result = await handleSingleAction(tabId, modelResponse, action);
+    const result = await handleSingleAction(taskId, modelResponse, action);
     messages.push(formatActionResult(index, actions.length, result.message));
     if (result.lastObservation) {
       lastObservation = result.lastObservation;
     }
 
     if (result.ok) {
-      rememberCompletedInputAction(action, completedInputActions);
+      const latestSession = runningSession;
+      rememberCompletedInputAction(action, completedInputActions, latestSession?.activeTabAlias || session.activeTabAlias);
       completedActions.push(formatCompletedAction(index, action, result.message, "done"));
     }
 
@@ -299,7 +362,7 @@ async function handlePlannedActions(
 }
 
 async function handleSingleAction(
-  tabId: number,
+  taskId: string,
   modelResponse: AgentModelResponse,
   action: AgentAction
 ): Promise<ActionLoopResult> {
@@ -321,8 +384,18 @@ async function handleSingleAction(
     };
   }
 
-  if (action.type === "go_back") {
-    const result = await goBackInTab(tabId);
+  const session = runningSession;
+  if (!session || session.taskId !== taskId) {
+    return {
+      ok: true,
+      message: "Stopped by user.",
+      shouldStop: true,
+      completedActions: []
+    };
+  }
+
+  if (isTabManagementAction(action)) {
+    const result = await handleTabManagementAction(session, action);
     return {
       ok: result.ok,
       message: result.message,
@@ -333,7 +406,19 @@ async function handleSingleAction(
     };
   }
 
-  const result = await executeAction(tabId, action);
+  if (action.type === "go_back") {
+    const result = await goBackInTab(session.activeTabId);
+    return {
+      ok: result.ok,
+      message: result.message,
+      shouldStop: false,
+      recoverable: result.recoverable,
+      completedActions: [],
+      lastObservation: result.observation
+    };
+  }
+
+  const result = await executeAction(session.activeTabId, action);
   return {
     ok: result.ok,
     message: result.message,
@@ -360,6 +445,306 @@ async function observePage(tabId: number): Promise<PageObservation> {
       );
     }
   }
+}
+
+function createRunningSession(taskId: string, tab: chrome.tabs.Tab): RunningSession {
+  if (typeof tab.id !== "number") {
+    throw new Error("The active tab does not have an id.");
+  }
+
+  const initialTab: AgentTabState = {
+    alias: "tab-1",
+    tabId: tab.id,
+    windowId: tab.windowId,
+    title: tab.title,
+    url: tab.url,
+    active: true,
+    createdAt: Date.now()
+  };
+
+  return {
+    taskId,
+    activeTabId: tab.id,
+    activeTabAlias: initialTab.alias,
+    tabs: [initialTab],
+    nextTabNumber: 2,
+    stopped: false
+  };
+}
+
+async function refreshTrackedTabs(session: RunningSession): Promise<void> {
+  const refreshedTabs: AgentTabState[] = [];
+  for (const trackedTab of session.tabs) {
+    const tab = await getTabSafely(trackedTab.tabId);
+    if (!tab?.id) {
+      continue;
+    }
+
+    refreshedTabs.push({
+      ...trackedTab,
+      tabId: tab.id,
+      windowId: tab.windowId,
+      title: tab.title,
+      url: tab.url,
+      active: tab.id === session.activeTabId
+    });
+  }
+
+  session.tabs = refreshedTabs;
+  if (!session.tabs.some((tab) => tab.tabId === session.activeTabId)) {
+    const fallback = session.tabs[0];
+    if (fallback) {
+      setActiveTrackedTab(session, fallback);
+    }
+  }
+}
+
+function updateTrackedTabFromObservation(session: RunningSession, tabId: number, observation: PageObservation): void {
+  session.tabs = session.tabs.map((tab) =>
+    tab.tabId === tabId
+      ? {
+          ...tab,
+          title: observation.title || tab.title,
+          url: observation.url || tab.url,
+          active: true,
+          lastObservedAt: Date.now()
+        }
+      : { ...tab, active: false }
+  );
+}
+
+function getPromptTabs(session: RunningSession): PromptTabInfo[] {
+  return session.tabs.map((tab) => ({
+    alias: tab.alias,
+    title: tab.title,
+    url: tab.url,
+    active: tab.tabId === session.activeTabId || tab.alias === session.activeTabAlias
+  }));
+}
+
+function setActiveTrackedTab(session: RunningSession, tab: AgentTabState): void {
+  session.activeTabId = tab.tabId;
+  session.activeTabAlias = tab.alias;
+  session.tabs = session.tabs.map((trackedTab) => ({
+    ...trackedTab,
+    active: trackedTab.tabId === tab.tabId
+  }));
+}
+
+function findTrackedTab(session: RunningSession, tabAlias?: string): AgentTabState | undefined {
+  if (!tabAlias?.trim()) {
+    return session.tabs.find((tab) => tab.tabId === session.activeTabId);
+  }
+
+  const normalizedAlias = tabAlias.trim().toLowerCase();
+  return session.tabs.find((tab) => tab.alias.toLowerCase() === normalizedAlias);
+}
+
+function isTabManagementAction(action: AgentAction): boolean {
+  return action.type === "open_tab" || action.type === "switch_tab" || action.type === "close_tab" || action.type === "reload" || action.type === "go_forward";
+}
+
+async function handleTabManagementAction(session: RunningSession, action: AgentAction): Promise<ContentActionResult> {
+  if (action.type === "open_tab") {
+    return openTrackedTab(session, action.url);
+  }
+
+  if (action.type === "switch_tab") {
+    return switchTrackedTab(session, action.tabAlias);
+  }
+
+  if (action.type === "close_tab") {
+    return closeTrackedTab(session, action.tabAlias);
+  }
+
+  if (action.type === "reload") {
+    return reloadTrackedTab(session, action.tabAlias);
+  }
+
+  if (action.type === "go_forward") {
+    return goForwardInTrackedTab(session);
+  }
+
+  return {
+    ok: false,
+    message: `Unsupported tab action: ${action.type}`
+  };
+}
+
+async function openTrackedTab(session: RunningSession, url?: string): Promise<ContentActionResult> {
+  if (!url) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "open_tab requires a url."
+    };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "open_tab URL is invalid."
+    };
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "open_tab only supports http(s) URLs."
+    };
+  }
+
+  const activeTab = findTrackedTab(session);
+  const tab = await chrome.tabs.create({
+    url: parsed.toString(),
+    active: true,
+    windowId: activeTab?.windowId
+  });
+
+  if (typeof tab.id !== "number") {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "Opened a tab, but Chrome did not return a tab id."
+    };
+  }
+
+  const alias = `tab-${session.nextTabNumber}`;
+  session.nextTabNumber += 1;
+  const trackedTab: AgentTabState = {
+    alias,
+    tabId: tab.id,
+    windowId: tab.windowId,
+    title: tab.title,
+    url: tab.url || parsed.toString(),
+    active: true,
+    createdAt: Date.now()
+  };
+  session.tabs = [...session.tabs.map((existingTab) => ({ ...existingTab, active: false })), trackedTab];
+  setActiveTrackedTab(session, trackedTab);
+  await waitForTabToSettle(tab.id);
+
+  return {
+    ok: true,
+    message: `Opened ${alias}: ${parsed.toString()}.`,
+    observation: await observePageSafely(tab.id)
+  };
+}
+
+async function switchTrackedTab(session: RunningSession, tabAlias?: string): Promise<ContentActionResult> {
+  const trackedTab = findTrackedTab(session, tabAlias);
+  if (!trackedTab) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: `Could not find tracked tab alias "${tabAlias || ""}". Use one of: ${session.tabs.map((tab) => tab.alias).join(", ")}.`
+    };
+  }
+
+  await chrome.tabs.update(trackedTab.tabId, { active: true });
+  if (typeof trackedTab.windowId === "number") {
+    await chrome.windows.update(trackedTab.windowId, { focused: true });
+  }
+  setActiveTrackedTab(session, trackedTab);
+  await waitForTabToSettle(trackedTab.tabId);
+
+  return {
+    ok: true,
+    message: `Switched to ${trackedTab.alias}.`,
+    observation: await observePageSafely(trackedTab.tabId)
+  };
+}
+
+async function closeTrackedTab(session: RunningSession, tabAlias?: string): Promise<ContentActionResult> {
+  const trackedTab = findTrackedTab(session, tabAlias);
+  if (!trackedTab) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: `Could not find tracked tab alias "${tabAlias || ""}". Use one of: ${session.tabs.map((tab) => tab.alias).join(", ")}.`
+    };
+  }
+
+  const remainingTabs = session.tabs.filter((tab) => tab.tabId !== trackedTab.tabId);
+  if (remainingTabs.length === 0) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "Refusing to close the only tracked tab. Open or switch to another tracked tab first."
+    };
+  }
+
+  const fallbackTab = remainingTabs.find((tab) => tab.tabId === session.activeTabId) || remainingTabs[0];
+  session.tabs = remainingTabs;
+  setActiveTrackedTab(session, fallbackTab);
+  await chrome.tabs.remove(trackedTab.tabId);
+  await chrome.tabs.update(fallbackTab.tabId, { active: true });
+  if (typeof fallbackTab.windowId === "number") {
+    await chrome.windows.update(fallbackTab.windowId, { focused: true });
+  }
+
+  return {
+    ok: true,
+    message: `Closed ${trackedTab.alias}. Active tab is now ${fallbackTab.alias}.`,
+    observation: await observePageSafely(fallbackTab.tabId)
+  };
+}
+
+async function reloadTrackedTab(session: RunningSession, tabAlias?: string): Promise<ContentActionResult> {
+  const trackedTab = findTrackedTab(session, tabAlias);
+  if (!trackedTab) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: `Could not find tracked tab alias "${tabAlias || ""}". Use one of: ${session.tabs.map((tab) => tab.alias).join(", ")}.`
+    };
+  }
+
+  await chrome.tabs.reload(trackedTab.tabId);
+  await waitForTabToSettle(trackedTab.tabId);
+  if (trackedTab.tabId !== session.activeTabId) {
+    await switchTrackedTab(session, trackedTab.alias);
+  }
+
+  return {
+    ok: true,
+    message: `Reloaded ${trackedTab.alias}.`,
+    observation: await observePageSafely(trackedTab.tabId)
+  };
+}
+
+async function goForwardInTrackedTab(session: RunningSession): Promise<ContentActionResult> {
+  const trackedTab = findTrackedTab(session);
+  if (!trackedTab) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "No active tracked tab is available for go_forward."
+    };
+  }
+
+  const before = await getTabSafely(trackedTab.tabId);
+  try {
+    await chrome.tabs.goForward(trackedTab.tabId);
+  } catch (error) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: `Could not go forward. This tab may not have a forward history entry. ${getErrorMessage(error)}`
+    };
+  }
+
+  await waitForTabToSettle(trackedTab.tabId, before?.url);
+  return {
+    ok: true,
+    message: `Went forward in ${trackedTab.alias}.`,
+    observation: await observePageSafely(trackedTab.tabId)
+  };
 }
 
 async function executeAction(tabId: number, action: AgentAction): Promise<ContentActionResult> {
@@ -502,6 +887,98 @@ function emitStatus(): void {
   } satisfies BackgroundToSidePanelMessage);
 }
 
+function emitUsage(): void {
+  notifySidePanel({
+    type: "USAGE_UPDATE",
+    usage: usageSnapshot
+  } satisfies BackgroundToSidePanelMessage);
+}
+
+function createEmptyUsageSnapshot(settings?: { provider: AgentUsageSnapshot["provider"]; model: string }): AgentUsageSnapshot {
+  return {
+    requestCount: 0,
+    successfulRequestCount: 0,
+    cacheHitRequestCount: 0,
+    promptTokens: 0,
+    cachedPromptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    totalLatencyMs: 0,
+    costConfigured: false,
+    provider: settings?.provider,
+    model: settings?.model
+  };
+}
+
+function recordUsageEvent(event: ModelUsageEvent, settings: {
+  inputTokenCostPerMillion?: number;
+  cachedInputTokenCostPerMillion?: number;
+  outputTokenCostPerMillion?: number;
+}): void {
+  const promptTokens = event.promptTokens || 0;
+  const cachedPromptTokens = event.cachedPromptTokens || 0;
+  const completionTokens = event.completionTokens || 0;
+  const totalTokens = event.totalTokens || promptTokens + completionTokens;
+  const requestCount = usageSnapshot.requestCount + 1;
+  const totalLatencyMs = usageSnapshot.totalLatencyMs + event.elapsedMs;
+  const estimatedEventCost = estimateUsageCost(event, settings);
+  const costConfigured = usageSnapshot.costConfigured || typeof estimatedEventCost === "number";
+
+  usageSnapshot = {
+    requestCount,
+    successfulRequestCount: usageSnapshot.successfulRequestCount + (event.ok ? 1 : 0),
+    cacheHitRequestCount: usageSnapshot.cacheHitRequestCount + (cachedPromptTokens > 0 ? 1 : 0),
+    promptTokens: usageSnapshot.promptTokens + promptTokens,
+    cachedPromptTokens: usageSnapshot.cachedPromptTokens + cachedPromptTokens,
+    completionTokens: usageSnapshot.completionTokens + completionTokens,
+    totalTokens: usageSnapshot.totalTokens + totalTokens,
+    totalLatencyMs,
+    averageLatencyMs: Math.round(totalLatencyMs / requestCount),
+    lastLatencyMs: event.elapsedMs,
+    lastStatus: event.status,
+    estimatedCostUsd:
+      typeof estimatedEventCost === "number"
+        ? (usageSnapshot.estimatedCostUsd || 0) + estimatedEventCost
+        : usageSnapshot.estimatedCostUsd,
+    costConfigured,
+    provider: event.provider,
+    model: event.model,
+    updatedAt: event.timestamp
+  };
+
+  console.info("[BYOK Agent] Usage dashboard update:", usageSnapshot);
+  emitUsage();
+}
+
+function estimateUsageCost(
+  event: ModelUsageEvent,
+  settings: {
+    inputTokenCostPerMillion?: number;
+    cachedInputTokenCostPerMillion?: number;
+    outputTokenCostPerMillion?: number;
+  }
+): number | undefined {
+  const hasInputRate = typeof settings.inputTokenCostPerMillion === "number";
+  const hasCachedRate = typeof settings.cachedInputTokenCostPerMillion === "number";
+  const hasOutputRate = typeof settings.outputTokenCostPerMillion === "number";
+  if (!hasInputRate && !hasCachedRate && !hasOutputRate) {
+    return undefined;
+  }
+
+  const promptTokens = event.promptTokens || 0;
+  const cachedPromptTokens = Math.min(event.cachedPromptTokens || 0, promptTokens);
+  const uncachedPromptTokens = Math.max(0, promptTokens - cachedPromptTokens);
+  const inputRate = settings.inputTokenCostPerMillion || 0;
+  const cachedInputRate = hasCachedRate ? settings.cachedInputTokenCostPerMillion || 0 : inputRate;
+  const outputRate = settings.outputTokenCostPerMillion || 0;
+
+  return (
+    uncachedPromptTokens * inputRate +
+    cachedPromptTokens * cachedInputRate +
+    (event.completionTokens || 0) * outputRate
+  ) / 1_000_000;
+}
+
 function isStopped(taskId: string): boolean {
   return !runningSession || runningSession.taskId !== taskId || runningSession.stopped;
 }
@@ -570,6 +1047,21 @@ function formatAction(action: AgentAction): string {
   }
   if (action.type === "go_back") {
     return "go back";
+  }
+  if (action.type === "go_forward") {
+    return "go forward";
+  }
+  if (action.type === "reload") {
+    return `reload ${action.tabAlias || "active tab"}`;
+  }
+  if (action.type === "open_tab") {
+    return `open tab ${action.url || "URL"}`;
+  }
+  if (action.type === "switch_tab") {
+    return `switch to ${action.tabAlias || "tab"}`;
+  }
+  if (action.type === "close_tab") {
+    return `close ${action.tabAlias || "active tab"}`;
   }
   if (action.type === "scroll") {
     return `scroll ${action.direction || "down"}`;
@@ -657,11 +1149,11 @@ function hasCompletedControlValue(element: PageObservation["elements"][number]):
 }
 
 function getPostBatchDelay(actions: AgentAction[]): number {
-  return actions.some((action) => action.type === "navigate" || action.type === "go_back") ? 1500 : 450;
+  return actions.some(isNavigationLikeAction) ? 1500 : 450;
 }
 
 function getInterActionDelay(action: AgentAction): number {
-  if (action.type === "navigate" || action.type === "go_back") {
+  if (isNavigationLikeAction(action)) {
     return 1200;
   }
   if (action.type === "drag" || action.type === "multi_drag") {
@@ -671,7 +1163,19 @@ function getInterActionDelay(action: AgentAction): number {
 }
 
 function shouldHaltBatchAfterAction(action: AgentAction): boolean {
-  return action.type === "navigate" || action.type === "go_back";
+  return isNavigationLikeAction(action);
+}
+
+function isNavigationLikeAction(action: AgentAction): boolean {
+  return (
+    action.type === "navigate" ||
+    action.type === "go_back" ||
+    action.type === "go_forward" ||
+    action.type === "reload" ||
+    action.type === "open_tab" ||
+    action.type === "switch_tab" ||
+    action.type === "close_tab"
+  );
 }
 
 interface DuplicateInputAction {
@@ -711,8 +1215,8 @@ async function handleDuplicateInputAction(
   };
 }
 
-function getDuplicateInputAction(action: AgentAction, completedInputActions: Set<string>): DuplicateInputAction | undefined {
-  const key = getInputActionKey(action);
+function getDuplicateInputAction(action: AgentAction, completedInputActions: Set<string>, tabAlias: string): DuplicateInputAction | undefined {
+  const key = getInputActionKey(action, tabAlias);
   if (!key || !completedInputActions.has(key)) {
     return undefined;
   }
@@ -744,26 +1248,27 @@ function getDuplicateInputAction(action: AgentAction, completedInputActions: Set
   };
 }
 
-function rememberCompletedInputAction(action: AgentAction, completedInputActions: Set<string>): void {
-  const key = getInputActionKey(action);
+function rememberCompletedInputAction(action: AgentAction, completedInputActions: Set<string>, tabAlias: string): void {
+  const key = getInputActionKey(action, tabAlias);
   if (key) {
     completedInputActions.add(key);
   }
 }
 
-function getInputActionKey(action: AgentAction): string | undefined {
+function getInputActionKey(action: AgentAction, tabAlias: string): string | undefined {
+  const prefix = `${tabAlias}:`;
   if (action.type === "multi_click") {
-    return action.elementIds?.length ? `multi_click:${[...action.elementIds].sort().join(",")}` : undefined;
+    return action.elementIds?.length ? `${prefix}multi_click:${[...action.elementIds].sort().join(",")}` : undefined;
   }
 
   if (action.type === "multi_drag") {
     return action.dragPairs?.length
-      ? `multi_drag:${action.dragPairs.map((pair) => `${pair.elementId}->${pair.targetElementId}`).join("|")}`
+      ? `${prefix}multi_drag:${action.dragPairs.map((pair) => `${pair.elementId}->${pair.targetElementId}`).join("|")}`
       : undefined;
   }
 
   if (action.type === "drag") {
-    return action.elementId && action.targetElementId ? `drag:${action.elementId}->${action.targetElementId}` : undefined;
+    return action.elementId && action.targetElementId ? `${prefix}drag:${action.elementId}->${action.targetElementId}` : undefined;
   }
 
   if ((action.type !== "fill" && action.type !== "type" && action.type !== "select") || !action.elementId) {
@@ -771,14 +1276,14 @@ function getInputActionKey(action: AgentAction): string | undefined {
   }
 
   if (action.type === "fill" || action.type === "type") {
-    return `fill:${action.elementId}`;
+    return `${prefix}fill:${action.elementId}`;
   }
 
   if (typeof action.text !== "string") {
     return undefined;
   }
 
-  return `select:${action.elementId}:${normalizeActionText(action.text)}`;
+  return `${prefix}select:${action.elementId}:${normalizeActionText(action.text)}`;
 }
 
 function normalizeActionText(text: string): string {

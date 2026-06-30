@@ -1,4 +1,4 @@
-import type { AgentAction, AgentModelResponse, AgentSettings, RiskLevel } from "../shared/types";
+import type { AgentAction, AgentModelResponse, AgentSettings, ModelUsageEvent, RiskLevel } from "../shared/types";
 
 const MAX_ACTIONS_PER_MODEL_RESPONSE = 10;
 const MAX_MODEL_REQUEST_ATTEMPTS = 4;
@@ -38,7 +38,8 @@ interface ChatUsage {
 export class ModelClientError extends Error {
   constructor(
     message: string,
-    readonly status?: number
+    readonly status?: number,
+    readonly usage?: ModelUsageEvent
   ) {
     super(message);
     this.name = "ModelClientError";
@@ -48,7 +49,7 @@ export class ModelClientError extends Error {
 export async function requestAgentStep(
   settings: AgentSettings,
   messages: ChatMessage[]
-): Promise<AgentModelResponse> {
+): Promise<{ response: AgentModelResponse; usage: ModelUsageEvent }> {
   const endpoint = buildChatCompletionsUrl(settings.apiBaseUrl);
   const requestTimeoutMs = getRequestTimeoutMs(settings);
   const requestStartedAt = Date.now();
@@ -86,8 +87,11 @@ export async function requestAgentStep(
         }
 
         logAiResponseTiming(settings, requestStartedAt, attempts, "timeout", false);
+        const timeoutUsage = buildUsageEvent(settings, undefined, requestStartedAt, attempts, "timeout", false);
         throw new ModelClientError(
-          `The model request timed out after ${requestTimeoutMs / 1000} seconds and automatic retries were exhausted.`
+          `The model request timed out after ${requestTimeoutMs / 1000} seconds and automatic retries were exhausted.`,
+          undefined,
+          timeoutUsage
         );
       }
 
@@ -121,23 +125,35 @@ export async function requestAgentStep(
   const { response, responseText } = result;
   logAiResponseTiming(settings, requestStartedAt, attempts, response.status, response.ok);
   if (!response.ok) {
-    throw new ModelClientError(formatHttpError(response.status, responseText), response.status);
+    throw new ModelClientError(
+      formatHttpError(response.status, responseText),
+      response.status,
+      buildUsageEvent(settings, undefined, requestStartedAt, attempts, response.status, false)
+    );
   }
 
   let data: OpenAiChatCompletionResponse;
   try {
     data = JSON.parse(responseText) as OpenAiChatCompletionResponse;
   } catch {
-    throw new ModelClientError("The model provider returned a non-JSON HTTP response.");
+    throw new ModelClientError(
+      "The model provider returned a non-JSON HTTP response.",
+      undefined,
+      buildUsageEvent(settings, undefined, requestStartedAt, attempts, response.status, false)
+    );
   }
 
+  const usage = buildUsageEvent(settings, data.usage, requestStartedAt, attempts, response.status, true);
   const content = data.choices?.[0]?.message?.content;
   if (!content) {
-    throw new ModelClientError(data.error?.message || "The model response did not include content.");
+    throw new ModelClientError(data.error?.message || "The model response did not include content.", undefined, usage);
   }
 
   logTokenUsage(settings.provider, data.usage);
-  return parseAgentJson(content);
+  return {
+    response: parseAgentJson(content, usage),
+    usage
+  };
 }
 
 async function postChatCompletion(args: {
@@ -384,13 +400,36 @@ function formatHttpError(status: number, body: string): string {
   return `The model provider returned HTTP ${status}. ${providerMessage}`;
 }
 
-function parseAgentJson(content: string): AgentModelResponse {
+function buildUsageEvent(
+  settings: AgentSettings,
+  usage: ChatUsage | undefined,
+  startedAt: number,
+  attempts: number,
+  status: number | "timeout",
+  ok: boolean
+): ModelUsageEvent {
+  return {
+    provider: settings.provider,
+    model: settings.model,
+    promptTokens: usage?.prompt_tokens,
+    cachedPromptTokens: usage ? getCachedTokenCount(usage) : undefined,
+    completionTokens: usage?.completion_tokens,
+    totalTokens: usage?.total_tokens,
+    elapsedMs: Date.now() - startedAt,
+    attempts,
+    status,
+    ok,
+    timestamp: Date.now()
+  };
+}
+
+function parseAgentJson(content: string, usage: ModelUsageEvent): AgentModelResponse {
   const jsonText = extractJsonObject(content);
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonText);
   } catch {
-    throw new ModelClientError("The model did not return strict JSON.");
+    throw new ModelClientError("The model did not return strict JSON.", undefined, usage);
   }
 
   const normalized = normalizeAgentModelResponse(parsed);
@@ -399,7 +438,7 @@ function parseAgentJson(content: string): AgentModelResponse {
       parsed,
       rawContent: content
     });
-    throw new ModelClientError("The model JSON did not match the required action schema.");
+    throw new ModelClientError("The model JSON did not match the required action schema.", undefined, usage);
   }
 
   return normalized;
@@ -489,6 +528,7 @@ function normalizeAgentAction(value: unknown): AgentAction[] {
     text: getString(value.text) || getString(value.value) || getString(value.answer),
     key: normalizeKey(value.key) || normalizeKey(value.text),
     url: getString(value.url),
+    tabAlias: getString(value.tabAlias) || getString(value.tab_alias) || getString(value.alias) || getString(value.tab),
     direction: normalizeDirection(value.direction)
   };
 
@@ -539,6 +579,21 @@ function normalizeActionType(type: string): AgentAction["type"] | undefined {
     browser_back: "go_back",
     history_back: "go_back",
     previous_page: "go_back",
+    go_forward: "go_forward",
+    forward: "go_forward",
+    browser_forward: "go_forward",
+    history_forward: "go_forward",
+    reload: "reload",
+    refresh: "reload",
+    refresh_tab: "reload",
+    reload_tab: "reload",
+    open_tab: "open_tab",
+    new_tab: "open_tab",
+    open_new_tab: "open_tab",
+    switch_tab: "switch_tab",
+    activate_tab: "switch_tab",
+    select_tab: "switch_tab",
+    close_tab: "close_tab",
     extract: "extract",
     ask_user: "ask_user",
     ask: "ask_user",

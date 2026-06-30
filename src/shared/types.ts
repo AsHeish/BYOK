@@ -9,6 +9,9 @@ export interface AgentSettings {
   maxSteps: number;
   requestTimeoutSeconds: number;
   promptCacheMode: PromptCacheMode;
+  inputTokenCostPerMillion?: number;
+  cachedInputTokenCostPerMillion?: number;
+  outputTokenCostPerMillion?: number;
   theme: "light" | "dark";
 }
 
@@ -22,6 +25,9 @@ export interface AiConfigurationProfile {
   maxSteps: number;
   requestTimeoutSeconds: number;
   promptCacheMode: PromptCacheMode;
+  inputTokenCostPerMillion?: number;
+  cachedInputTokenCostPerMillion?: number;
+  outputTokenCostPerMillion?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -40,6 +46,11 @@ export type AgentActionType =
   | "scroll"
   | "navigate"
   | "go_back"
+  | "go_forward"
+  | "reload"
+  | "open_tab"
+  | "switch_tab"
+  | "close_tab"
   | "extract"
   | "ask_user"
   | "done";
@@ -58,6 +69,7 @@ export interface AgentAction {
   text?: string;
   key?: "Tab" | "Shift+Tab";
   url?: string;
+  tabAlias?: string;
   direction?: "up" | "down" | "left" | "right";
 }
 
@@ -66,6 +78,39 @@ export interface AgentModelResponse {
   risk_level: RiskLevel;
   action?: AgentAction;
   actions?: AgentAction[];
+}
+
+export interface ModelUsageEvent {
+  provider: Provider;
+  model: string;
+  promptTokens?: number;
+  cachedPromptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  elapsedMs: number;
+  attempts: number;
+  status: number | "timeout";
+  ok: boolean;
+  timestamp: number;
+}
+
+export interface AgentUsageSnapshot {
+  requestCount: number;
+  successfulRequestCount: number;
+  cacheHitRequestCount: number;
+  promptTokens: number;
+  cachedPromptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  totalLatencyMs: number;
+  averageLatencyMs?: number;
+  lastLatencyMs?: number;
+  lastStatus?: number | "timeout";
+  estimatedCostUsd?: number;
+  costConfigured: boolean;
+  provider?: Provider;
+  model?: string;
+  updatedAt?: number;
 }
 
 export interface DomElementInfo {
@@ -146,7 +191,8 @@ export type SidePanelToBackgroundMessage =
 
 export type BackgroundToSidePanelMessage =
   | { type: "AGENT_LOG"; entry: AgentLogEntry }
-  | { type: "AGENT_STATUS"; running: boolean; taskId?: string };
+  | { type: "AGENT_STATUS"; running: boolean; taskId?: string }
+  | { type: "USAGE_UPDATE"; usage: AgentUsageSnapshot };
 
 export type BackgroundToContentMessage =
   | { type: "CONTENT_OBSERVE" }

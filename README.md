@@ -27,7 +27,8 @@ A minimal Manifest V3 Chrome/Edge side-panel extension that runs a bring-your-ow
 |   |   |-- components
 |   |   |   |-- ActionLog.tsx
 |   |   |   |-- SettingsPanel.tsx
-|   |   |   `-- TaskRunner.tsx
+|   |   |   |-- TaskRunner.tsx
+|   |   |   `-- UsageDashboard.tsx
 |   |   |-- main.tsx
 |   |   `-- styles.css
 |   `-- shared
@@ -68,7 +69,8 @@ The side-panel settings support:
 - `maxSteps`: maximum observe/act loop iterations, default `60`.
 - `requestTimeoutSeconds`: AI request timeout per attempt, default `60`.
 - `promptCacheMode`: `auto` sends cache hints for OpenAI and custom endpoints, `on` sends them for any provider, and `off` disables explicit cache hints.
-- Named AI profiles: save the current provider/base URL/API key/model/max steps/timeout/cache mode under a name, then apply or delete profiles from Settings.
+- Optional token pricing rates: input, cached input, and output USD per 1M tokens for the dashboard cost estimate.
+- Named AI profiles: save the current provider/base URL/API key/model/max steps/timeout/cache mode/pricing under a name, then apply or delete profiles from Settings.
 
 The extension uses `fetch` against `POST {apiBaseUrl}/chat/completions` with OpenAI-compatible chat-completions JSON. No paid SDK is used.
 Each AI request uses the configured timeout and automatically retries before surfacing a timeout error.
@@ -89,6 +91,18 @@ OpenAI-compatible APIs are still stateless, so the extension must send the full 
 
 The dynamic observation also begins with a compact page-state summary: viewport progress, focused element, empty fillable controls, already filled/selected controls, and visible drag/drop candidates. That high-signal state is followed by trimmed readable text and the full interactive element list.
 
+## Token Dashboard
+
+The Console tab includes a token dashboard that updates after each model request, while the Run tab keeps the live action log next to the task runner:
+
+- prompt, cached prompt, completion, and total tokens
+- cache hit requests and cached-token percentage
+- last and average AI response latency
+- status of the last model request
+- estimated cost when pricing rates are configured in Settings
+
+Cost estimates use the configured USD per 1M token rates. If no rates are configured, token and latency metrics still update and the cost tile shows `Set rates`.
+
 ## Agent Loop
 
 The agent loop executes one action or a bounded action batch at a time:
@@ -97,7 +111,7 @@ The agent loop executes one action or a bounded action batch at a time:
 2. Background service worker asks the model for strict JSON.
 3. Background normalizes either `action` or `actions` into ordered actions.
 4. Content script executes up to 10 supported actions in order.
-5. Fail-safe mode stops the remaining batch on failure, stale elements, `ask_user`, `done`, or navigation, then sends completed-action progress into the next model prompt.
+5. Fail-safe mode stops the remaining batch on failure, stale elements, `ask_user`, `done`, navigation, or a tab-changing action, then sends completed-action progress into the next model prompt.
 
 `src/background/safety.ts` is present for reinstating policy checks, but this local test build currently bypasses background safety validation. Content execution still only supports the defined action schema.
 
@@ -125,7 +139,9 @@ The model must return strict JSON only. Use `action` for one action, or `actions
 }
 ```
 
-Supported action types are `click`, `multi_click`, `drag`, `multi_drag`, `fill`, `type`, `select`, `press_key`, `scroll`, `navigate`, `go_back`, `extract`, `ask_user`, and `done`. `go_back` returns to the previous browser history page. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For multiple drag-and-drop pairs, `multi_drag` uses `dragPairs: [{ "elementId": "source", "targetElementId": "target" }]`.
+Supported action types are `click`, `multi_click`, `drag`, `multi_drag`, `fill`, `type`, `select`, `press_key`, `scroll`, `navigate`, `go_back`, `go_forward`, `reload`, `open_tab`, `switch_tab`, `close_tab`, `extract`, `ask_user`, and `done`. `go_back` and `go_forward` use browser history. `open_tab` uses `url`, while `switch_tab`, `close_tab`, and optional `reload` targeting use `tabAlias` such as `tab-2`. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For multiple drag-and-drop pairs, `multi_drag` uses `dragPairs: [{ "elementId": "source", "targetElementId": "target" }]`.
+
+The agent tracks tabs with aliases (`tab-1`, `tab-2`, ...). The model receives a compact tracked-tab list every step, but only the active tab's DOM observation is sent. To interact with another tab, the model must switch to that alias first and wait for the next observation.
 
 Page observations are trimmed to roughly 4,000 input tokens. The readable text window is scroll-aware, so as the page scrolls down, old upper-page text drops out and lower-page text enters the model context.
 

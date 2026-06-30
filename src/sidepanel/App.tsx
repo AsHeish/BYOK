@@ -4,19 +4,22 @@ import { loadSettings, saveSettings } from "../shared/storage";
 import type {
   AgentLogEntry,
   AgentSettings,
+  AgentUsageSnapshot,
   BackgroundToSidePanelMessage,
   SidePanelToBackgroundMessage
 } from "../shared/types";
 import { ActionLog } from "./components/ActionLog";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { TaskRunner } from "./components/TaskRunner";
+import { UsageDashboard } from "./components/UsageDashboard";
 
-type View = "run" | "settings";
+type View = "run" | "console" | "settings";
 
 export function App() {
   const [view, setView] = useState<View>("run");
   const [settings, setSettings] = useState<AgentSettings>(DEFAULT_SETTINGS);
   const [logs, setLogs] = useState<AgentLogEntry[]>([]);
+  const [usage, setUsage] = useState<AgentUsageSnapshot>(createEmptyUsageSnapshot());
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState<string | undefined>();
 
@@ -26,6 +29,7 @@ export function App() {
       if (isAgentState(state)) {
         setRunning(state.running);
         setLogs(filterHiddenActionLogs(state.logs));
+        setUsage(state.usage || createEmptyUsageSnapshot());
       }
     });
 
@@ -37,6 +41,9 @@ export function App() {
       }
       if (message.type === "AGENT_STATUS") {
         setRunning(message.running);
+      }
+      if (message.type === "USAGE_UPDATE") {
+        setUsage(message.usage);
       }
     };
 
@@ -109,6 +116,9 @@ export function App() {
         <button className={view === "run" ? "active" : ""} onClick={() => setView("run")}>
           Run
         </button>
+        <button className={view === "console" ? "active" : ""} onClick={() => setView("console")}>
+          Console
+        </button>
         <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>
           Settings
         </button>
@@ -116,12 +126,14 @@ export function App() {
 
       {notice ? <div className="notice">{notice}</div> : null}
 
-      <div className={`view-scroll ${view === "run" ? "run-view" : "settings-view"}`}>
+      <div className={`view-scroll ${view === "run" ? "run-view" : view === "console" ? "console-view" : "settings-view"}`}>
         {view === "run" ? (
           <>
             <TaskRunner running={running} disabled={!hasApiKey} onRun={handleRun} onStop={handleStop} />
             <ActionLog logs={logs} />
           </>
+        ) : view === "console" ? (
+          <UsageDashboard usage={usage} />
         ) : (
           <SettingsPanel settings={settings} onChange={setSettings} onSave={handleSaveSettings} />
         )}
@@ -146,6 +158,7 @@ function sendBackgroundMessage(message: SidePanelToBackgroundMessage): Promise<u
 function isAgentState(value: unknown): value is {
   running: boolean;
   logs: AgentLogEntry[];
+  usage?: AgentUsageSnapshot;
 } {
   return value !== null && typeof value === "object" && "running" in value && "logs" in value;
 }
@@ -161,4 +174,18 @@ function isHiddenActionLog(message: string): boolean {
       message
     )
   );
+}
+
+function createEmptyUsageSnapshot(): AgentUsageSnapshot {
+  return {
+    requestCount: 0,
+    successfulRequestCount: 0,
+    cacheHitRequestCount: 0,
+    promptTokens: 0,
+    cachedPromptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    totalLatencyMs: 0,
+    costConfigured: false
+  };
 }
