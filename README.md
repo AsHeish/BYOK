@@ -16,6 +16,7 @@ A minimal Manifest V3 Chrome/Edge side-panel extension that runs a bring-your-ow
 |   |   |-- chromeAsync.ts
 |   |   |-- index.ts
 |   |   |-- modelClient.ts
+|   |   |-- pdfText.ts
 |   |   |-- prompts.ts
 |   |   `-- safety.ts
 |   |-- content
@@ -26,6 +27,7 @@ A minimal Manifest V3 Chrome/Edge side-panel extension that runs a bring-your-ow
 |   |   |-- App.tsx
 |   |   |-- components
 |   |   |   |-- ActionLog.tsx
+|   |   |   |-- FileStagingPanel.tsx
 |   |   |   |-- SettingsPanel.tsx
 |   |   |   |-- TaskRunner.tsx
 |   |   |   `-- UsageDashboard.tsx
@@ -33,6 +35,7 @@ A minimal Manifest V3 Chrome/Edge side-panel extension that runs a bring-your-ow
 |   |   `-- styles.css
 |   `-- shared
 |       |-- defaults.ts
+|       |-- fileData.ts
 |       |-- ids.ts
 |       |-- storage.ts
 |       `-- types.ts
@@ -91,6 +94,20 @@ OpenAI-compatible APIs are still stateless, so the extension must send the full 
 
 The dynamic observation also begins with a compact page-state summary: viewport progress, focused element, empty fillable controls, already filled/selected controls, and visible drag/drop candidates. That high-signal state is followed by trimmed readable text and the full interactive element list.
 
+## Uploads, Downloads, and Summaries
+
+The Run tab includes a **File Dock** where the user can stage one local file. The agent can only upload that staged file with `upload_file`; it cannot browse arbitrary local paths or silently choose files.
+
+The background worker listens for completed browser downloads and can list recent downloads with `list_downloads`. Download metadata is included in the model context so the agent can reference recent PDF downloads by `downloadId`.
+
+The agent can summarize normal web pages from the readable page observation with `summarize_page`. It can summarize PDFs from a staged PDF, a PDF URL, the current PDF tab URL, or a recent PDF download source with `summarize_pdf`. PDF text extraction uses the open-source `pdfjs-dist` package with a lightweight fallback extractor.
+
+## Iframes and Shadow DOM
+
+Page observation walks the top document, accessible same-origin iframe documents, and open shadow DOM roots. Mapped elements include optional `frame` and `root` context in the model prompt so repeated controls in embedded widgets can be distinguished.
+
+Cross-origin iframes and closed shadow roots are detected as inaccessible where possible. The agent will report them in the prompt context, but it cannot inspect or control their private DOM from the top-page content script.
+
 ## Token Dashboard
 
 The Console tab includes a token dashboard that updates after each model request, while the Run tab keeps the live action log next to the task runner:
@@ -113,7 +130,7 @@ The agent loop executes one action or a bounded action batch at a time:
 4. Content script executes up to 10 supported actions in order.
 5. Fail-safe mode stops the remaining batch on failure, stale elements, `ask_user`, `done`, navigation, or a tab-changing action, then sends completed-action progress into the next model prompt.
 
-`src/background/safety.ts` is present for reinstating policy checks, but this local test build currently bypasses background safety validation. Content execution still only supports the defined action schema.
+`src/background/safety.ts` is present for reinstating policy checks, but this local test build currently bypasses background safety validation. Content execution still only supports the defined action schema. Controlled file upload is limited to the one file explicitly staged in the side panel.
 
 API keys are profile-local extension data, not a secure vault. Use scoped, revocable keys.
 
@@ -139,7 +156,7 @@ The model must return strict JSON only. Use `action` for one action, or `actions
 }
 ```
 
-Supported action types are `click`, `multi_click`, `drag`, `multi_drag`, `fill`, `type`, `select`, `press_key`, `scroll`, `navigate`, `go_back`, `go_forward`, `reload`, `open_tab`, `switch_tab`, `close_tab`, `extract`, `ask_user`, and `done`. `go_back` and `go_forward` use browser history. `open_tab` uses `url`, while `switch_tab`, `close_tab`, and optional `reload` targeting use `tabAlias` such as `tab-2`. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For multiple drag-and-drop pairs, `multi_drag` uses `dragPairs: [{ "elementId": "source", "targetElementId": "target" }]`.
+Supported action types are `click`, `multi_click`, `drag`, `multi_drag`, `upload_file`, `fill`, `type`, `select`, `press_key`, `summarize_page`, `summarize_pdf`, `list_downloads`, `scroll`, `navigate`, `go_back`, `go_forward`, `reload`, `open_tab`, `switch_tab`, `close_tab`, `extract`, `ask_user`, and `done`. `go_back` and `go_forward` use browser history. `open_tab` uses `url`, while `switch_tab`, `close_tab`, and optional `reload` targeting use `tabAlias` such as `tab-2`. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For multiple drag-and-drop pairs, `multi_drag` uses `dragPairs: [{ "elementId": "source", "targetElementId": "target" }]`. For file uploads, `upload_file` uses a page `elementId` and optional staged `fileId`; for PDFs, `summarize_pdf` can use `url`, `fileId`, or `downloadId`.
 
 The agent tracks tabs with aliases (`tab-1`, `tab-2`, ...). The model receives a compact tracked-tab list every step, but only the active tab's DOM observation is sent. To interact with another tab, the model must switch to that alias first and wait for the next observation.
 
@@ -149,6 +166,7 @@ Page observations are trimmed to roughly 4,000 input tokens. The readable text w
 
 - Only `http` and `https` pages are supported.
 - Browser internal pages, extension store pages, some PDFs, and restricted pages cannot be controlled.
-- The DOM mapper is intentionally small and visible-element focused.
+- The DOM mapper is intentionally small and visible-element focused. Same-origin iframes and open shadow roots are supported; cross-origin iframes and closed shadow roots remain browser-restricted.
 - Drag-and-drop support uses synthetic pointer, mouse, and HTML5 drag events. Some sites only accept browser-trusted physical drag gestures, so specific quiz widgets may need targeted handling.
+- Downloaded files are detected through Chrome's downloads metadata. PDF summarization can fetch the original URL or use a staged PDF, but it cannot read arbitrary downloaded file paths directly from disk.
 - Strong API-key encryption is not implemented because no user-held secret is collected.

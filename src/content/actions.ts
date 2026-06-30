@@ -1,14 +1,28 @@
 import { extractPageData, findMappedElementReplacement, getMappedElement, observePage } from "./domMap";
+import { stagedFileToBrowserFile } from "../shared/fileData";
+import { loadStagedUploadFile } from "../shared/storage";
 import type { AgentAction, ContentActionResult } from "../shared/types";
 
 type ElementLookup = { ok: true; value: HTMLElement } | { ok: false; message: string; recoverable?: boolean };
 type TextEditableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
+type HtmlConstructorName =
+  | "HTMLElement"
+  | "HTMLInputElement"
+  | "HTMLTextAreaElement"
+  | "HTMLSelectElement"
+  | "HTMLButtonElement"
+  | "HTMLAnchorElement"
+  | "HTMLLabelElement";
+
+type QueryRoot = Document | ShadowRoot;
 
 const textEditableSelector = [
   "input:not([type='hidden']):not([type='button']):not([type='submit']):not([type='reset']):not([type='checkbox']):not([type='radio']):not([type='file'])",
   "textarea",
   "[contenteditable='true']"
 ].join(",");
+
+const fileInputSelector = "input[type='file']";
 
 const keyboardFocusableSelector = [
   textEditableSelector,
@@ -60,6 +74,9 @@ export async function executeAction(action: AgentAction): Promise<ContentActionR
 
     case "multi_drag":
       return withFreshObservation(dragMultipleElementsToTargets(action.dragPairs));
+
+    case "upload_file":
+      return withFreshObservation(uploadStagedFile(action.elementId, action.fileId));
 
     case "fill":
     case "type":
@@ -211,7 +228,7 @@ async function dragElementToTarget(
   const endPoint = getElementCenter(target);
 
   for (const point of interpolatePoints(startPoint, endPoint, 8)) {
-    const hoverTarget = getElementAtPoint(point) || target;
+    const hoverTarget = getElementAtPoint(point, source.ownerDocument) || target;
     dispatchPointerDragEvent(hoverTarget, "pointermove", point, true);
     dispatchMouseDragEvent(hoverTarget, "mousemove", point, true);
     dispatchDragEvent(hoverTarget, "dragover", dataTransfer, point);
@@ -263,6 +280,59 @@ async function dragMultipleElementsToTargets(
   };
 }
 
+async function uploadStagedFile(elementId: string | undefined, fileId: string | undefined): Promise<ContentActionResult> {
+  const stagedFile = await loadStagedUploadFile();
+  if (!stagedFile) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "No staged upload file is available. Choose a file in the side panel before using upload_file."
+    };
+  }
+
+  if (fileId && stagedFile.id !== fileId) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: `The requested staged file ${fileId} is not available. Current staged file is ${stagedFile.id} (${stagedFile.name}).`
+    };
+  }
+
+  const lookup = elementId ? requireElement(elementId) : findFirstAvailableFileInput();
+  if (!lookup.ok) {
+    return lookup;
+  }
+
+  const fileInput = findFileInputTarget(lookup.value);
+  if (!fileInput) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "Could not find a file input related to the target element. Pick a visible upload button/label or input[type=file]."
+    };
+  }
+
+  if (fileInput.disabled) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "The target file input is disabled."
+    };
+  }
+
+  const file = stagedFileToBrowserFile(stagedFile);
+  const dataTransfer = new DataTransfer();
+  dataTransfer.items.add(file);
+  fileInput.files = dataTransfer.files;
+  dispatchInputEvent(fileInput);
+  fileInput.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+
+  return {
+    ok: true,
+    message: `Uploaded staged file "${stagedFile.name}" into ${describeElement(fileInput)}.`
+  };
+}
+
 async function typeIntoElement(elementId: string | undefined, text: string): Promise<ContentActionResult> {
   const lookup = requireElement(elementId);
   if (!lookup.ok) {
@@ -283,7 +353,7 @@ async function typeIntoElement(elementId: string | undefined, text: string): Pro
 
   prepareElement(editable);
 
-  if (editable instanceof HTMLInputElement) {
+  if (isInputElement(editable)) {
     if (hasExistingEditableValue(editable)) {
       return skipAlreadyFilledField(editable);
     }
@@ -295,7 +365,7 @@ async function typeIntoElement(elementId: string | undefined, text: string): Pro
     };
   }
 
-  if (editable instanceof HTMLTextAreaElement) {
+  if (isTextAreaElement(editable)) {
     if (hasExistingEditableValue(editable)) {
       return skipAlreadyFilledField(editable);
     }
@@ -328,7 +398,7 @@ async function typeIntoElement(elementId: string | undefined, text: string): Pro
 }
 
 async function resolveTextEditableTarget(element: HTMLElement): Promise<TextEditableElement | undefined> {
-  const activeBefore = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  const activeBefore = getDeepActiveElement(element.ownerDocument);
   const initialTarget =
     getTextEditableElement(element) ||
     getAssociatedTextEditable(element) ||
@@ -353,7 +423,7 @@ async function resolveTextEditableTarget(element: HTMLElement): Promise<TextEdit
     }
   }
 
-  const activeEditable = getActiveTextEditable();
+  const activeEditable = getActiveTextEditable(element.ownerDocument);
   if (activeEditable && isLikelyEditableForTarget(element, activeEditable, activeBefore, initialTarget)) {
     return activeEditable;
   }
@@ -366,11 +436,11 @@ function getTextEditableElement(element: HTMLElement): TextEditableElement | und
     return undefined;
   }
 
-  if (element instanceof HTMLInputElement && isTextEntryInput(element)) {
+  if (isInputElement(element) && isTextEntryInput(element)) {
     return element;
   }
 
-  if (element instanceof HTMLTextAreaElement && !element.readOnly) {
+  if (isTextAreaElement(element) && !element.readOnly) {
     return element;
   }
 
@@ -387,7 +457,7 @@ function hasExistingEditableValue(element: TextEditableElement): boolean {
 }
 
 function getEditableValue(element: TextEditableElement): string {
-  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+  if (isInputElement(element) || isTextAreaElement(element)) {
     return element.value;
   }
 
@@ -399,7 +469,7 @@ function normalizeTypedValue(value: string): string {
 }
 
 function skipAlreadyFilledField(editable: TextEditableElement): ContentActionResult {
-  const nextElement = focusAdjacentElement(false);
+  const nextElement = focusAdjacentElement(false, editable.ownerDocument);
   const advanceMessage = nextElement ? ` Focused next field ${describeElement(nextElement)}.` : "";
 
   return {
@@ -409,7 +479,7 @@ function skipAlreadyFilledField(editable: TextEditableElement): ContentActionRes
 }
 
 function findNestedTextEditable(element: HTMLElement): TextEditableElement | undefined {
-  const nestedElements = Array.from(element.querySelectorAll<HTMLElement>(textEditableSelector));
+  const nestedElements = queryDescendants(element, textEditableSelector);
   for (const nested of nestedElements) {
     const editable = getTextEditableElement(nested);
     if (editable) {
@@ -418,6 +488,73 @@ function findNestedTextEditable(element: HTMLElement): TextEditableElement | und
   }
 
   return undefined;
+}
+
+function findFileInputTarget(element: HTMLElement, visited = new Set<HTMLElement>()): HTMLInputElement | undefined {
+  if (visited.has(element)) {
+    return undefined;
+  }
+  visited.add(element);
+
+  if (isInputElement(element) && element.type === "file") {
+    return element;
+  }
+
+  const labelControl = isLabelElement(element) ? element.control : undefined;
+  if (labelControl && isInputElement(labelControl) && labelControl.type === "file") {
+    return labelControl;
+  }
+
+  const closestLabel = element.closest("label");
+  const closestLabelControl = closestLabel && isLabelElement(closestLabel) ? closestLabel.control : undefined;
+  if (closestLabelControl && isInputElement(closestLabelControl) && closestLabelControl.type === "file") {
+    return closestLabelControl;
+  }
+
+  const nestedFileInput = queryDescendants(element, fileInputSelector).find(isInputElement);
+  if (nestedFileInput) {
+    return nestedFileInput;
+  }
+
+  for (const associatedElement of getAssociatedElements(element)) {
+    const associatedFileInput = findFileInputTarget(associatedElement, visited);
+    if (associatedFileInput) {
+      return associatedFileInput;
+    }
+  }
+
+  const nearbyFileInput = findNearbyFileInput(element);
+  return nearbyFileInput;
+}
+
+function findNearbyFileInput(element: HTMLElement): HTMLInputElement | undefined {
+  let bestMatch: { input: HTMLInputElement; score: number } | undefined;
+  for (const input of getAvailableFileInputs(element.ownerDocument)) {
+    const score = scoreNearbyEditable(element, input);
+    if (!bestMatch || score > bestMatch.score) {
+      bestMatch = { input, score };
+    }
+  }
+  return bestMatch && bestMatch.score >= 25 ? bestMatch.input : undefined;
+}
+
+function findFirstAvailableFileInput(): ElementLookup {
+  const inputs = getAvailableFileInputs();
+  if (inputs.length === 1) {
+    return { ok: true, value: inputs[0] };
+  }
+
+  return {
+    ok: false,
+    recoverable: true,
+    message: inputs.length === 0 ? "No file input was found on the page." : "Multiple file inputs were found. Provide the target elementId."
+  };
+}
+
+function getAvailableFileInputs(ownerDocument = document): HTMLInputElement[] {
+  return queryRootDeep(ownerDocument, fileInputSelector)
+    .filter(isInputElement)
+    .filter((input) => !input.disabled);
 }
 
 function getAssociatedTextEditable(element: HTMLElement): TextEditableElement | undefined {
@@ -434,13 +571,13 @@ function getAssociatedTextEditable(element: HTMLElement): TextEditableElement | 
 
 function getAssociatedElements(element: HTMLElement): HTMLElement[] {
   const elements: HTMLElement[] = [];
-  const labelControl = element instanceof HTMLLabelElement ? element.control : undefined;
-  if (labelControl instanceof HTMLElement) {
+  const labelControl = isLabelElement(element) ? element.control : undefined;
+  if (isHtmlElement(labelControl)) {
     elements.push(labelControl);
   }
 
   const closestLabel = element.closest("label");
-  if (closestLabel?.control instanceof HTMLElement) {
+  if (closestLabel && isLabelElement(closestLabel) && isHtmlElement(closestLabel.control)) {
     elements.push(closestLabel.control);
   }
 
@@ -454,8 +591,8 @@ function getAssociatedElements(element: HTMLElement): HTMLElement[] {
     .flatMap((value) => value.split(/\s+/));
 
   for (const id of idReferences) {
-    const referencedElement = document.getElementById(id);
-    if (referencedElement instanceof HTMLElement) {
+    const referencedElement = getElementByIdNear(element, id);
+    if (referencedElement) {
       elements.push(referencedElement);
     }
   }
@@ -468,8 +605,8 @@ function getEditableActivationTargets(
   editable?: TextEditableElement
 ): HTMLElement[] {
   const targets: HTMLElement[] = [];
-  const labelControl = originalElement instanceof HTMLLabelElement ? originalElement.control : undefined;
-  if (labelControl instanceof HTMLElement) {
+  const labelControl = isLabelElement(originalElement) ? originalElement.control : undefined;
+  if (isHtmlElement(labelControl)) {
     targets.push(originalElement);
   }
 
@@ -479,7 +616,7 @@ function getEditableActivationTargets(
   }
 
   const nearestContext = originalElement.closest(editableContextSelector);
-  if (nearestContext instanceof HTMLElement && isLikelyEditableWrapper(nearestContext)) {
+  if (isHtmlElement(nearestContext) && isLikelyEditableWrapper(nearestContext)) {
     targets.push(nearestContext);
   }
 
@@ -496,7 +633,8 @@ function findLikelyEditableWrapper(editable: HTMLElement, boundary: HTMLElement)
   let current = editable.parentElement;
   let depth = 0;
 
-  while (current && current !== document.body && depth < 5) {
+  const rootBoundary = getRootBoundaryElement(editable);
+  while (current && current !== rootBoundary && depth < 5) {
     if (current === boundary || current.contains(boundary) || boundary.contains(current)) {
       if (isLikelyEditableWrapper(current)) {
         return current;
@@ -513,7 +651,7 @@ function isLikelyEditableWrapper(element: HTMLElement): boolean {
   const className = String(element.getAttribute("class") || "");
   const role = element.getAttribute("role") || "";
   return (
-    element instanceof HTMLLabelElement ||
+    isLabelElement(element) ||
     role === "textbox" ||
     role === "combobox" ||
     element.tabIndex >= 0 ||
@@ -531,7 +669,7 @@ async function waitForActiveTextEditable(
   const startedAt = Date.now();
 
   while (Date.now() - startedAt <= timeoutMs) {
-    const activeEditable = getActiveTextEditable();
+    const activeEditable = getActiveTextEditable(originalElement.ownerDocument);
     if (activeEditable && isLikelyEditableForTarget(originalElement, activeEditable, activeBefore, initialTarget)) {
       return activeEditable;
     }
@@ -542,8 +680,8 @@ async function waitForActiveTextEditable(
   return undefined;
 }
 
-function getActiveTextEditable(): TextEditableElement | undefined {
-  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+function getActiveTextEditable(ownerDocument = document): TextEditableElement | undefined {
+  const activeElement = getDeepActiveElement(ownerDocument);
   if (!activeElement) {
     return undefined;
   }
@@ -572,7 +710,7 @@ function isLikelyEditableForTarget(
 function findNearbyTextEditable(element: HTMLElement): TextEditableElement | undefined {
   let bestMatch: { editable: TextEditableElement; score: number } | undefined;
 
-  for (const candidate of getVisibleTextEditableCandidates()) {
+  for (const candidate of getVisibleTextEditableCandidates(element)) {
     const score = scoreNearbyEditable(element, candidate);
     if (!bestMatch || score > bestMatch.score) {
       bestMatch = { editable: candidate, score };
@@ -582,8 +720,9 @@ function findNearbyTextEditable(element: HTMLElement): TextEditableElement | und
   return bestMatch && bestMatch.score >= 35 ? bestMatch.editable : undefined;
 }
 
-function getVisibleTextEditableCandidates(): TextEditableElement[] {
-  const candidates = Array.from(document.querySelectorAll<HTMLElement>(textEditableSelector))
+function getVisibleTextEditableCandidates(source?: HTMLElement): TextEditableElement[] {
+  const root = getSearchRoot(source);
+  const candidates = queryRootDeep(root, textEditableSelector)
     .map(getTextEditableElement)
     .filter((element): element is TextEditableElement => Boolean(element));
 
@@ -634,7 +773,7 @@ function areElementsInSameEditableContext(a: HTMLElement, b: HTMLElement): boole
 
 function getEditableContext(element: HTMLElement): HTMLElement | undefined {
   const context = element.closest(editableContextSelector);
-  return context instanceof HTMLElement ? context : undefined;
+  return isHtmlElement(context) ? context : undefined;
 }
 
 function getElementDistance(a: HTMLElement, b: HTMLElement): number {
@@ -686,10 +825,10 @@ async function pressKey(key: string, startingElementId?: string): Promise<Conten
     return startingElementResult;
   }
 
-  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : document.body;
+  const activeElement = getDeepActiveElement() || document.body;
   dispatchKeyboardEvent(activeElement, "keydown", normalizedKey);
 
-  const target = focusAdjacentElement(normalizedKey === "Shift+Tab");
+  const target = focusAdjacentElement(normalizedKey === "Shift+Tab", activeElement.ownerDocument);
   if (!target) {
     dispatchKeyboardEvent(activeElement, "keyup", normalizedKey);
     return {
@@ -737,13 +876,13 @@ function normalizeSupportedKey(key: string): "Tab" | "Shift+Tab" | undefined {
   return undefined;
 }
 
-function focusAdjacentElement(reverse: boolean): HTMLElement | undefined {
-  const focusableElements = getKeyboardFocusableElements();
+function focusAdjacentElement(reverse: boolean, ownerDocument = document): HTMLElement | undefined {
+  const focusableElements = getKeyboardFocusableElements(ownerDocument);
   if (focusableElements.length === 0) {
     return undefined;
   }
 
-  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  const activeElement = getDeepActiveElement(ownerDocument);
   const currentIndex = activeElement
     ? focusableElements.findIndex(
         (element) => element === activeElement || element.contains(activeElement) || activeElement.contains(element)
@@ -761,11 +900,11 @@ function focusAdjacentElement(reverse: boolean): HTMLElement | undefined {
   return nextElement;
 }
 
-function getKeyboardFocusableElements(): HTMLElement[] {
+function getKeyboardFocusableElements(ownerDocument = document): HTMLElement[] {
   const seen = new Set<HTMLElement>();
   const focusableElements: HTMLElement[] = [];
 
-  for (const element of Array.from(document.querySelectorAll<HTMLElement>(keyboardFocusableSelector))) {
+  for (const element of queryRootDeep(ownerDocument, keyboardFocusableSelector)) {
     const focusTarget = getKeyboardFocusTarget(element);
     if (!focusTarget || seen.has(focusTarget) || isDisabled(focusTarget) || !isVisibleElement(focusTarget)) {
       continue;
@@ -783,7 +922,7 @@ function getKeyboardFocusTarget(element: HTMLElement): HTMLElement | undefined {
     return textEditable;
   }
 
-  if (element instanceof HTMLSelectElement || element instanceof HTMLButtonElement || element instanceof HTMLAnchorElement) {
+  if (isSelectElement(element) || isButtonElement(element) || isAnchorElement(element)) {
     return element;
   }
 
@@ -818,7 +957,7 @@ function selectOption(elementId: string | undefined, text: string): ContentActio
 
   const element = lookup.value;
 
-  if (!(element instanceof HTMLSelectElement)) {
+  if (!isSelectElement(element)) {
     return {
       ok: false,
       message: "The target element is not a select control."
@@ -880,9 +1019,9 @@ function interpolatePoints(
   });
 }
 
-function getElementAtPoint(point: { clientX: number; clientY: number }): HTMLElement | undefined {
-  const element = document.elementFromPoint(point.clientX, point.clientY);
-  return element instanceof HTMLElement ? element : undefined;
+function getElementAtPoint(point: { clientX: number; clientY: number }, ownerDocument = document): HTMLElement | undefined {
+  const element = ownerDocument.elementFromPoint(point.clientX, point.clientY);
+  return isHtmlElement(element) ? element : undefined;
 }
 
 function dispatchDragEvent(
@@ -1003,8 +1142,8 @@ function requireElement(elementId?: string): ElementLookup {
   }
 
   const element = getMappedElement(elementId);
-  const currentElement = element && document.documentElement.contains(element) ? element : findMappedElementReplacement(elementId);
-  if (!currentElement || !document.documentElement.contains(currentElement)) {
+  const currentElement = element?.isConnected ? element : findMappedElementReplacement(elementId);
+  if (!currentElement?.isConnected) {
     return {
       ok: false,
       recoverable: true,
@@ -1024,10 +1163,10 @@ function requireElement(elementId?: string): ElementLookup {
 
 function isDisabled(element: HTMLElement): boolean {
   if (
-    element instanceof HTMLButtonElement ||
-    element instanceof HTMLInputElement ||
-    element instanceof HTMLTextAreaElement ||
-    element instanceof HTMLSelectElement
+    isButtonElement(element) ||
+    isInputElement(element) ||
+    isTextAreaElement(element) ||
+    isSelectElement(element)
   ) {
     return element.disabled;
   }
@@ -1036,7 +1175,7 @@ function isDisabled(element: HTMLElement): boolean {
 }
 
 function isVisibleElement(element: HTMLElement): boolean {
-  const style = getComputedStyle(element);
+  const style = (element.ownerDocument.defaultView || window).getComputedStyle(element);
   if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
     return false;
   }
@@ -1058,7 +1197,7 @@ function activateElement(element: HTMLElement): void {
   const target = getBestActivationTarget(element);
   prepareElement(target);
 
-  if (target instanceof HTMLInputElement && (target.type === "checkbox" || target.type === "radio")) {
+  if (isInputElement(target) && (target.type === "checkbox" || target.type === "radio")) {
     dispatchPointerSequence(target);
     target.click();
     setNativeChecked(target, true);
@@ -1071,11 +1210,11 @@ function activateElement(element: HTMLElement): void {
 }
 
 function isAlreadySelectedChoice(element: HTMLElement): boolean {
-  if (element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")) {
+  if (isInputElement(element) && (element.type === "checkbox" || element.type === "radio")) {
     return element.checked;
   }
 
-  const nestedChoice = element.querySelector<HTMLInputElement>("input[type='checkbox'],input[type='radio']");
+  const nestedChoice = queryDescendants(element, "input[type='checkbox'],input[type='radio']").find(isInputElement);
   if (nestedChoice) {
     return nestedChoice.checked;
   }
@@ -1084,7 +1223,7 @@ function isAlreadySelectedChoice(element: HTMLElement): boolean {
 }
 
 function getBestActivationTarget(element: HTMLElement): HTMLElement {
-  if (element instanceof HTMLLabelElement && element.control instanceof HTMLElement) {
+  if (isLabelElement(element) && isHtmlElement(element.control)) {
     return element.control;
   }
 
@@ -1092,7 +1231,7 @@ function getBestActivationTarget(element: HTMLElement): HTMLElement {
     return element;
   }
 
-  const labelledControl = element.querySelector<HTMLElement>("input,button,select,textarea,[role='radio'],[role='checkbox']");
+  const labelledControl = queryDescendants(element, "input,button,select,textarea,[role='radio'],[role='checkbox']")[0];
   if (labelledControl) {
     return labelledControl;
   }
@@ -1136,19 +1275,189 @@ function dispatchInputEvent(element: HTMLElement): void {
 }
 
 function setNativeValue(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string): void {
+  const ownerWindow = element.ownerDocument.defaultView || window;
   const prototype =
-    element instanceof HTMLTextAreaElement
-      ? HTMLTextAreaElement.prototype
-      : element instanceof HTMLSelectElement
-        ? HTMLSelectElement.prototype
-        : HTMLInputElement.prototype;
+    isTextAreaElement(element)
+      ? ownerWindow.HTMLTextAreaElement.prototype
+      : isSelectElement(element)
+        ? ownerWindow.HTMLSelectElement.prototype
+        : ownerWindow.HTMLInputElement.prototype;
   const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
   descriptor?.set?.call(element, value);
 }
 
 function setNativeChecked(element: HTMLInputElement, checked: boolean): void {
-  const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked");
+  const ownerWindow = element.ownerDocument.defaultView || window;
+  const descriptor = Object.getOwnPropertyDescriptor(ownerWindow.HTMLInputElement.prototype, "checked");
   descriptor?.set?.call(element, checked);
+}
+
+function queryDescendants(element: HTMLElement, selector: string): HTMLElement[] {
+  const results: HTMLElement[] = [];
+
+  try {
+    results.push(...Array.from(element.querySelectorAll(selector)).filter(isHtmlElement));
+  } catch {
+    return results;
+  }
+
+  collectShadowDescendants(element, selector, results, 0);
+  return uniqueElements(results);
+}
+
+function queryRootDeep(root: QueryRoot, selector: string): HTMLElement[] {
+  const elements = queryRoot(root, selector);
+  for (const host of queryRoot(root, "*")) {
+    collectShadowDescendants(host, selector, elements, 0);
+  }
+  return uniqueElements(elements);
+}
+
+function queryRoot(root: QueryRoot, selector: string): HTMLElement[] {
+  try {
+    return Array.from(root.querySelectorAll(selector)).filter(isHtmlElement);
+  } catch {
+    return [];
+  }
+}
+
+function collectShadowDescendants(
+  rootElement: HTMLElement,
+  selector: string,
+  results: HTMLElement[],
+  depth: number
+): void {
+  if (depth >= 4) {
+    return;
+  }
+
+  const shadowRoots: ShadowRoot[] = [];
+  if (rootElement.shadowRoot) {
+    shadowRoots.push(rootElement.shadowRoot);
+  }
+
+  for (const descendant of Array.from(rootElement.querySelectorAll("*")).filter(isHtmlElement)) {
+    if (descendant.shadowRoot) {
+      shadowRoots.push(descendant.shadowRoot);
+    }
+  }
+
+  for (const shadowRoot of shadowRoots) {
+    results.push(...queryRoot(shadowRoot, selector));
+    for (const nestedHost of queryRoot(shadowRoot, "*")) {
+      collectShadowDescendants(nestedHost, selector, results, depth + 1);
+    }
+  }
+}
+
+function getSearchRoot(source?: HTMLElement): QueryRoot {
+  const root = source?.getRootNode();
+  if (root && isShadowRoot(root)) {
+    return root;
+  }
+  if (root && isDocumentRoot(root)) {
+    return root;
+  }
+  return source?.ownerDocument || document;
+}
+
+function getElementByIdNear(element: HTMLElement, id: string): HTMLElement | undefined {
+  const root = element.getRootNode();
+  const found =
+    isDocumentRoot(root) ? root.getElementById(id) : isShadowRoot(root) ? root.getElementById(id) : element.ownerDocument.getElementById(id);
+  return isHtmlElement(found) ? found : undefined;
+}
+
+function getRootBoundaryElement(element: HTMLElement): HTMLElement | undefined {
+  const root = element.getRootNode();
+  if (isDocumentRoot(root)) {
+    return root.body || root.documentElement;
+  }
+  if (isShadowRoot(root) && isHtmlElement(root.host)) {
+    return root.host;
+  }
+  return undefined;
+}
+
+function getDeepActiveElement(ownerDocument = document): HTMLElement | undefined {
+  const activeElement = ownerDocument.activeElement;
+  if (!isHtmlElement(activeElement)) {
+    return undefined;
+  }
+
+  const shadowActive = getDeepShadowActiveElement(activeElement);
+  if (shadowActive) {
+    return shadowActive;
+  }
+
+  if (isIframeElement(activeElement)) {
+    try {
+      return activeElement.contentDocument ? getDeepActiveElement(activeElement.contentDocument) || activeElement : activeElement;
+    } catch {
+      return activeElement;
+    }
+  }
+
+  return activeElement;
+}
+
+function getDeepShadowActiveElement(element: HTMLElement): HTMLElement | undefined {
+  const activeElement = element.shadowRoot?.activeElement;
+  if (!isHtmlElement(activeElement)) {
+    return undefined;
+  }
+
+  return getDeepShadowActiveElement(activeElement) || activeElement;
+}
+
+function isDocumentRoot(root: Node): root is Document {
+  return root.nodeType === 9;
+}
+
+function isShadowRoot(root: Node): root is ShadowRoot {
+  return root.nodeType === 11 && "host" in root;
+}
+
+function isIframeElement(element: HTMLElement): element is HTMLIFrameElement {
+  return element.tagName.toLowerCase() === "iframe";
+}
+
+function isHtmlElement(element: Element | null | undefined): element is HTMLElement {
+  if (!element) {
+    return false;
+  }
+
+  const ctor = element.ownerDocument.defaultView?.HTMLElement;
+  return typeof ctor === "function" ? element instanceof ctor : element.nodeType === 1;
+}
+
+function isElementInstance<T extends HTMLElement>(element: Element, constructorName: HtmlConstructorName): element is T {
+  const ctor = element.ownerDocument.defaultView?.[constructorName];
+  return typeof ctor === "function" && element instanceof ctor;
+}
+
+function isInputElement(element: Element): element is HTMLInputElement {
+  return isElementInstance<HTMLInputElement>(element, "HTMLInputElement");
+}
+
+function isTextAreaElement(element: Element): element is HTMLTextAreaElement {
+  return isElementInstance<HTMLTextAreaElement>(element, "HTMLTextAreaElement");
+}
+
+function isSelectElement(element: Element): element is HTMLSelectElement {
+  return isElementInstance<HTMLSelectElement>(element, "HTMLSelectElement");
+}
+
+function isButtonElement(element: Element): element is HTMLButtonElement {
+  return isElementInstance<HTMLButtonElement>(element, "HTMLButtonElement");
+}
+
+function isAnchorElement(element: Element): element is HTMLAnchorElement {
+  return isElementInstance<HTMLAnchorElement>(element, "HTMLAnchorElement");
+}
+
+function isLabelElement(element: Element): element is HTMLLabelElement {
+  return isElementInstance<HTMLLabelElement>(element, "HTMLLabelElement");
 }
 
 async function sleep(ms: number): Promise<void> {

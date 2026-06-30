@@ -22,7 +22,7 @@ export function sendTabMessage<T extends PageObservation | ContentActionResult>(
   message: BackgroundToContentMessage
 ): Promise<T> {
   return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, message, (response: T | undefined) => {
+    chrome.tabs.sendMessage(tabId, message, { frameId: 0 }, (response: T | undefined) => {
       const error = chrome.runtime.lastError;
       if (error) {
         reject(new Error(error.message));
@@ -39,7 +39,7 @@ export function sendTabMessage<T extends PageObservation | ContentActionResult>(
 
 export async function tryInjectContentScript(tabId: number): Promise<void> {
   await chrome.scripting.executeScript({
-    target: { tabId },
+    target: { tabId, frameIds: [0] },
     files: ["content.js"]
   });
 }

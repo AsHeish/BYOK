@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { loadTaskDraft, saveTaskDraft } from "../../shared/storage";
+import { FileStagingPanel } from "./FileStagingPanel";
 
 interface TaskRunnerProps {
   running: boolean;
@@ -63,6 +64,7 @@ export function TaskRunner({ running, disabled, onRun, onStop }: TaskRunnerProps
         <button className="primary-button" disabled={disabled || running || busy || !task.trim()} onClick={submitTask}>
           {running ? "Running" : "Run"}
         </button>
+        <FileStagingPanel />
         <button className="danger-button" disabled={!running} onClick={onStop}>
           Stop
         </button>

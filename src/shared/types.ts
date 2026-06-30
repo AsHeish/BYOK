@@ -39,10 +39,14 @@ export type AgentActionType =
   | "multi_click"
   | "drag"
   | "multi_drag"
+  | "upload_file"
   | "fill"
   | "type"
   | "select"
   | "press_key"
+  | "summarize_page"
+  | "summarize_pdf"
+  | "list_downloads"
   | "scroll"
   | "navigate"
   | "go_back"
@@ -66,6 +70,9 @@ export interface AgentAction {
   elementIds?: string[];
   targetElementId?: string;
   dragPairs?: AgentDragPair[];
+  fileId?: string;
+  downloadId?: number;
+  maxItems?: number;
   text?: string;
   key?: "Tab" | "Shift+Tab";
   url?: string;
@@ -116,12 +123,15 @@ export interface AgentUsageSnapshot {
 export interface DomElementInfo {
   id: string;
   tag: string;
+  frameContext?: string;
+  rootContext?: string;
   role?: string;
   type?: string;
   text?: string;
   label?: string;
   name?: string;
   placeholder?: string;
+  accept?: string;
   context?: string;
   questionNumber?: string;
   value?: string;
@@ -141,6 +151,7 @@ export interface PageObservation {
   text: string;
   elements: DomElementInfo[];
   viewport?: PageViewportInfo;
+  frames?: PageFrameInfo[];
 }
 
 export interface PageViewportInfo {
@@ -151,6 +162,23 @@ export interface PageViewportInfo {
   pageWidth: number;
   pageHeight: number;
   progressPercent: number;
+}
+
+export interface PageFrameInfo {
+  id: string;
+  title?: string;
+  url?: string;
+  accessible: boolean;
+  reason?: string;
+}
+
+export interface StagedUploadFile {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  dataUrl: string;
+  createdAt: number;
 }
 
 export interface ContentActionResult {

@@ -1,8 +1,11 @@
-import type { DomElementInfo, ExtractedPageData, PageObservation } from "../shared/types";
+import type { DomElementInfo, ExtractedPageData, PageFrameInfo, PageObservation } from "../shared/types";
 
 const MAX_DOM_ELEMENTS = 80;
 const MAX_PAGE_TEXT_CHARS = 10000;
 const MAX_ELEMENT_CONTEXT_CHARS = 900;
+const MAX_DOM_ROOTS = 30;
+const MAX_FRAME_DEPTH = 2;
+const MAX_SHADOW_DEPTH = 4;
 const READABLE_TEXT_SELECTOR = [
   "main",
   "article",
@@ -82,16 +85,44 @@ const interactiveSelector = [
 ].join(",");
 
 const weakIds = new WeakMap<Element, string>();
+const frameIds = new WeakMap<Element, string>();
+const elementContexts = new WeakMap<Element, Pick<DomElementInfo, "frameContext" | "rootContext">>();
 const currentElements = new Map<string, HTMLElement>();
 const currentElementInfo = new Map<string, DomElementInfo>();
 const historicalElementInfo = new Map<string, DomElementInfo>();
 let nextElementId = 1;
+let nextFrameId = 1;
+
+type QueryRoot = Document | ShadowRoot;
+
+interface DomRootContext {
+  root: QueryRoot;
+  frameContext?: string;
+  rootContext: string;
+  frameDepth: number;
+  shadowDepth: number;
+}
+
+interface DomContextCollection {
+  roots: DomRootContext[];
+  frames: PageFrameInfo[];
+}
+
+type HtmlConstructorName =
+  | "HTMLElement"
+  | "HTMLInputElement"
+  | "HTMLTextAreaElement"
+  | "HTMLSelectElement"
+  | "HTMLButtonElement"
+  | "HTMLAnchorElement"
+  | "HTMLLabelElement";
 
 export function observePage(): PageObservation {
   currentElements.clear();
   currentElementInfo.clear();
 
-  const elements = getCandidateInteractiveElements()
+  const contexts = collectDomContexts();
+  const elements = getCandidateInteractiveElements(contexts)
     .filter(isVisibleElement)
     .sort(compareElementsForCurrentViewport)
     .slice(0, MAX_DOM_ELEMENTS)
@@ -100,9 +131,10 @@ export function observePage(): PageObservation {
   return {
     url: location.href,
     title: document.title,
-    text: getReadableText(),
+    text: getReadableText(contexts),
     elements,
-    viewport: getViewportInfo()
+    viewport: getViewportInfo(),
+    frames: contexts.frames
   };
 }
 
@@ -132,14 +164,179 @@ function getViewportInfo(): PageObservation["viewport"] {
   };
 }
 
-function getCandidateInteractiveElements(): HTMLElement[] {
+function collectDomContexts(): DomContextCollection {
+  const contexts: DomRootContext[] = [];
+  const frames: PageFrameInfo[] = [];
+  const seenRoots = new WeakSet<QueryRoot>();
+
+  const addRoot = (context: DomRootContext): void => {
+    if (contexts.length >= MAX_DOM_ROOTS || seenRoots.has(context.root)) {
+      return;
+    }
+
+    seenRoots.add(context.root);
+    contexts.push(context);
+    collectNestedDomRoots(context);
+  };
+
+  const collectNestedDomRoots = (context: DomRootContext): void => {
+    if (contexts.length >= MAX_DOM_ROOTS) {
+      return;
+    }
+
+    for (const element of queryRoot(context.root, "*")) {
+      const shadowRoot = element.shadowRoot;
+      if (shadowRoot && context.shadowDepth < MAX_SHADOW_DEPTH) {
+        addRoot({
+          root: shadowRoot,
+          frameContext: context.frameContext,
+          rootContext: `${context.rootContext} > shadow:${describeRootHost(element)}`,
+          frameDepth: context.frameDepth,
+          shadowDepth: context.shadowDepth + 1
+        });
+      }
+
+      if (isIframeElement(element) && context.frameDepth < MAX_FRAME_DEPTH) {
+        const frameId = getOrCreateFrameId(element);
+        const frameSrc = getFrameSource(element);
+        try {
+          const frameDocument = element.contentDocument;
+          if (!frameDocument) {
+            throw new Error("No accessible frame document.");
+          }
+
+          const frameUrl = getFrameDocumentUrl(frameDocument) || frameSrc;
+          const frameLabel = `${frameId}${frameUrl ? ` ${frameUrl}` : ""}`;
+          frames.push({
+            id: frameId,
+            title: frameDocument.title || undefined,
+            url: frameUrl || undefined,
+            accessible: true
+          });
+
+          addRoot({
+            root: frameDocument,
+            frameContext: frameLabel,
+            rootContext: `iframe:${frameId}`,
+            frameDepth: context.frameDepth + 1,
+            shadowDepth: 0
+          });
+        } catch {
+          frames.push({
+            id: frameId,
+            url: frameSrc || undefined,
+            accessible: false,
+            reason: "cross-origin or inaccessible iframe"
+          });
+        }
+      }
+    }
+  };
+
+  addRoot({
+    root: document,
+    rootContext: "document",
+    frameDepth: 0,
+    shadowDepth: 0
+  });
+
+  return { roots: contexts, frames };
+}
+
+function queryAllInContexts(contexts: DomContextCollection, selector: string): HTMLElement[] {
+  const elements: HTMLElement[] = [];
+  for (const context of contexts.roots) {
+    for (const element of queryRoot(context.root, selector)) {
+      rememberElementContext(element, context);
+      elements.push(element);
+    }
+  }
+  return elements;
+}
+
+function queryRoot(root: QueryRoot, selector: string): HTMLElement[] {
+  try {
+    return Array.from(root.querySelectorAll(selector)).filter(isHtmlElement);
+  } catch {
+    return [];
+  }
+}
+
+function rememberElementContext(element: HTMLElement, context: DomRootContext): void {
+  elementContexts.set(element, {
+    frameContext: context.frameContext,
+    rootContext: context.rootContext
+  });
+}
+
+function getElementContext(element: HTMLElement): Pick<DomElementInfo, "frameContext" | "rootContext"> {
+  return elementContexts.get(element) || {
+    frameContext: getFrameContextFromOwnerDocument(element),
+    rootContext: getRootContextFromElement(element)
+  };
+}
+
+function describeRootHost(element: HTMLElement): string {
+  const tag = element.tagName.toLowerCase();
+  const id = element.id ? `#${element.id}` : "";
+  const role = element.getAttribute("role");
+  const roleLabel = role ? `[role=${role}]` : "";
+  return `${tag}${id}${roleLabel}`;
+}
+
+function getFrameContextFromOwnerDocument(element: HTMLElement): string | undefined {
+  const ownerWindow = element.ownerDocument.defaultView;
+  if (!ownerWindow || ownerWindow === window) {
+    return undefined;
+  }
+
+  try {
+    return getFrameDocumentUrl(element.ownerDocument) || "nested frame";
+  } catch {
+    return "nested frame";
+  }
+}
+
+function getRootContextFromElement(element: HTMLElement): string {
+  const root = element.getRootNode();
+  if (isShadowRoot(root)) {
+    return `shadow:${describeRootHost(root.host as HTMLElement)}`;
+  }
+  return getFrameContextFromOwnerDocument(element) ? "iframe document" : "document";
+}
+
+function getOrCreateFrameId(element: Element): string {
+  const existing = frameIds.get(element);
+  if (existing) {
+    return existing;
+  }
+
+  const id = `frame-${nextFrameId}`;
+  nextFrameId += 1;
+  frameIds.set(element, id);
+  return id;
+}
+
+function getFrameSource(element: HTMLIFrameElement): string {
+  return element.src || element.getAttribute("src") || "";
+}
+
+function getFrameDocumentUrl(frameDocument: Document): string {
+  try {
+    return frameDocument.location.href;
+  } catch {
+    return "";
+  }
+}
+
+function getCandidateInteractiveElements(contexts = collectDomContexts()): HTMLElement[] {
   const candidates = new Set<HTMLElement>();
 
-  for (const element of Array.from(document.querySelectorAll<HTMLElement>(interactiveSelector))) {
+  for (const element of queryAllInContexts(contexts, interactiveSelector)) {
     candidates.add(element);
   }
 
-  for (const editable of Array.from(document.querySelectorAll<HTMLElement>(textEditableSelector))) {
+  for (const editable of queryAllInContexts(contexts, textEditableSelector)) {
     if (!isVisibleElement(editable)) {
       continue;
     }
@@ -152,7 +349,7 @@ function getCandidateInteractiveElements(): HTMLElement[] {
     }
   }
 
-  for (const dragOrDropElement of Array.from(document.querySelectorAll<HTMLElement>(dragDropSelector))) {
+  for (const dragOrDropElement of queryAllInContexts(contexts, dragDropSelector)) {
     if (isVisibleElement(dragOrDropElement)) {
       candidates.add(dragOrDropElement);
     }
@@ -174,12 +371,13 @@ export function findMappedElementReplacement(elementId: string): HTMLElement | u
   observePage();
 
   const refreshedElement = currentElements.get(elementId);
-  if (refreshedElement && document.documentElement.contains(refreshedElement)) {
+  if (refreshedElement?.isConnected) {
     return refreshedElement;
   }
 
+  const contexts = collectDomContexts();
   let bestMatch: { element: HTMLElement; score: number; tiedMatches: number } | undefined;
-  for (const candidate of getCandidateInteractiveElements().filter(isVisibleElement)) {
+  for (const candidate of getCandidateInteractiveElements(contexts).filter(isVisibleElement)) {
     if (isDisabled(candidate)) {
       continue;
     }
@@ -197,24 +395,25 @@ export function findMappedElementReplacement(elementId: string): HTMLElement | u
 }
 
 export function extractPageData(): ExtractedPageData {
+  const contexts = collectDomContexts();
   return {
     url: location.href,
     title: document.title,
-    headings: Array.from(document.querySelectorAll("h1,h2,h3"))
+    headings: queryAllInContexts(contexts, "h1,h2,h3")
       .map((heading) => normalizeText(heading.textContent || ""))
       .filter(Boolean)
       .slice(0, 40),
-    links: Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
+    links: queryAllInContexts(contexts, "a[href]")
       .filter(isVisibleElement)
       .map((link) => ({
-        text: normalizeText(link.innerText || link.textContent || link.href),
-        href: link.href
+        text: normalizeText(link.innerText || link.textContent || getElementHref(link) || ""),
+        href: getElementHref(link) || ""
       }))
       .filter((link) => link.text || link.href)
       .slice(0, 80),
-    tables: extractTables(),
-    forms: extractForms(),
-    text: getReadableText()
+    tables: extractTables(contexts),
+    forms: extractForms(contexts),
+    text: getReadableText(contexts)
   };
 }
 
@@ -223,8 +422,9 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
   currentElements.set(id, element);
 
   const tag = element.tagName.toLowerCase();
-  const input = element instanceof HTMLInputElement ? element : undefined;
-  const select = element instanceof HTMLSelectElement ? element : undefined;
+  const elementContext = getElementContext(element);
+  const input = isInputElement(element) ? element : undefined;
+  const select = isSelectElement(element) ? element : undefined;
   const nestedInput = input || getPrimaryTextEditableDescendant(element);
   const nestedSelect = select || getPrimarySelectDescendant(element);
   const questionContext = getElementQuestionContext(element);
@@ -234,17 +434,20 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
   const info: DomElementInfo = {
     id,
     tag,
+    frameContext: elementContext.frameContext,
+    rootContext: elementContext.rootContext === "document" ? undefined : elementContext.rootContext,
     role: element.getAttribute("role") || implicitRole(element),
     type: input?.type,
     text: getElementText(element),
     label: getElementLabel(element),
     name: getFormName(element),
     placeholder: getPlaceholder(element),
+    accept: getFileAccept(element),
     context: questionContext?.text,
     questionNumber: questionContext?.questionNumber,
     value: getSafeValue(element),
     checkedState: getCheckedState(element),
-    href: element instanceof HTMLAnchorElement ? element.href : undefined,
+    href: isAnchorElement(element) ? element.href : undefined,
     options: nestedSelect ? Array.from(nestedSelect.options).map((option) => option.text || option.value).slice(0, 30) : undefined,
     isDraggable: isDraggable || undefined,
     isDropTarget: isDropTarget || undefined,
@@ -290,6 +493,12 @@ function scoreElementMatch(snapshot: DomElementInfo, candidate: DomElementInfo):
   }
   if (snapshot.questionNumber && snapshot.questionNumber === candidate.questionNumber) {
     score += 8;
+  }
+  if (snapshot.frameContext && snapshot.frameContext === candidate.frameContext) {
+    score += 4;
+  }
+  if (snapshot.rootContext && snapshot.rootContext === candidate.rootContext) {
+    score += 3;
   }
 
   score += scoreTextField(snapshot.label, candidate.label, 8, 4);
@@ -340,18 +549,23 @@ function getOrCreateElementId(element: Element): string {
   return id;
 }
 
-function getReadableText(): string {
-  const viewportText = getScrollAwareReadableText();
+function getReadableText(contexts = collectDomContexts()): string {
+  const viewportText = getScrollAwareReadableText(contexts);
   if (viewportText) {
     return viewportText;
   }
 
-  const text = normalizeText(document.body?.innerText || document.documentElement.textContent || "");
+  const text = normalizeText(
+    contexts.roots
+      .map((context) => getRootReadableText(context.root))
+      .filter(Boolean)
+      .join("\n")
+  );
   return text.slice(0, MAX_PAGE_TEXT_CHARS);
 }
 
-function getScrollAwareReadableText(): string {
-  const textBlocks = Array.from(document.querySelectorAll<HTMLElement>(READABLE_TEXT_SELECTOR))
+function getScrollAwareReadableText(contexts: DomContextCollection): string {
+  const textBlocks = queryAllInContexts(contexts, READABLE_TEXT_SELECTOR)
     .filter(isVisibleElement)
     .map((element) => ({ element, rect: element.getBoundingClientRect(), text: getDirectReadableBlockText(element) }))
     .filter((block) => block.text.length > 0)
@@ -383,6 +597,14 @@ function getScrollAwareReadableText(): string {
       .map((block) => block.text)
       .join("\n")
   ).slice(0, MAX_PAGE_TEXT_CHARS);
+}
+
+function getRootReadableText(root: QueryRoot): string {
+  if (isDocumentRoot(root)) {
+    return root.body?.innerText || root.documentElement?.textContent || "";
+  }
+
+  return root.textContent || "";
 }
 
 function getDirectReadableBlockText(element: HTMLElement): string {
@@ -442,7 +664,7 @@ function scoreElementForCurrentViewport(element: HTMLElement): number {
 }
 
 function getElementText(element: HTMLElement): string | undefined {
-  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+  if (isInputElement(element) || isTextAreaElement(element) || isSelectElement(element)) {
     return undefined;
   }
 
@@ -460,7 +682,7 @@ function getElementLabel(element: HTMLElement): string | undefined {
   if (labelledBy) {
     const label = labelledBy
       .split(/\s+/)
-      .map((id) => document.getElementById(id)?.textContent || "")
+      .map((id) => getElementByIdNear(element, id)?.textContent || "")
       .map(normalizeText)
       .filter(Boolean)
       .join(" ");
@@ -488,9 +710,9 @@ function getElementLabel(element: HTMLElement): string | undefined {
 
 function getControlLabels(element: HTMLElement): string | undefined {
   if (
-    element instanceof HTMLInputElement ||
-    element instanceof HTMLTextAreaElement ||
-    element instanceof HTMLSelectElement
+    isInputElement(element) ||
+    isTextAreaElement(element) ||
+    isSelectElement(element)
   ) {
     const labels = Array.from(element.labels || [])
       .map((label) => normalizeText(label.textContent || ""))
@@ -508,19 +730,20 @@ function getControlLabels(element: HTMLElement): string | undefined {
 
 function getFormName(element: HTMLElement): string | undefined {
   if (
-    element instanceof HTMLInputElement ||
-    element instanceof HTMLTextAreaElement ||
-    element instanceof HTMLSelectElement ||
-    element instanceof HTMLButtonElement
+    isInputElement(element) ||
+    isTextAreaElement(element) ||
+    isSelectElement(element) ||
+    isButtonElement(element)
   ) {
     return element.name || undefined;
   }
 
   const nestedEditable = getPrimaryTextEditableDescendant(element);
   if (
-    nestedEditable instanceof HTMLInputElement ||
-    nestedEditable instanceof HTMLTextAreaElement ||
-    nestedEditable instanceof HTMLSelectElement
+    nestedEditable &&
+    (isInputElement(nestedEditable) ||
+      isTextAreaElement(nestedEditable) ||
+      isSelectElement(nestedEditable))
   ) {
     return nestedEditable.name || undefined;
   }
@@ -529,30 +752,36 @@ function getFormName(element: HTMLElement): string | undefined {
 }
 
 function getPlaceholder(element: HTMLElement): string | undefined {
-  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+  if (isInputElement(element) || isTextAreaElement(element)) {
     return element.placeholder || undefined;
   }
 
   const nestedEditable = getPrimaryTextEditableDescendant(element);
-  if (nestedEditable instanceof HTMLInputElement || nestedEditable instanceof HTMLTextAreaElement) {
+  if (nestedEditable && (isInputElement(nestedEditable) || isTextAreaElement(nestedEditable))) {
     return nestedEditable.placeholder || undefined;
   }
 
   return undefined;
 }
 
+function getFileAccept(element: HTMLElement): string | undefined {
+  const fileInput = isInputElement(element) && element.type === "file" ? element : queryDescendants(element, "input[type='file']").find(isInputElement);
+  const accept = fileInput?.accept || fileInput?.getAttribute("accept") || "";
+  return accept ? accept.slice(0, 160) : undefined;
+}
+
 function getSafeValue(element: HTMLElement): string | undefined {
 
-  if (element instanceof HTMLSelectElement) {
+  if (isSelectElement(element)) {
     return element.selectedOptions[0]?.text || element.value || undefined;
   }
 
-  if (element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")) {
+  if (isInputElement(element) && (element.type === "checkbox" || element.type === "radio")) {
     const state = element.checked ? "checked" : "unchecked";
     return element.value ? `${element.value} (${state})` : state;
   }
 
-  if (element instanceof HTMLInputElement && element.value && !["password", "file"].includes(element.type)) {
+  if (isInputElement(element) && element.value && !["password", "file"].includes(element.type)) {
     return element.value.slice(0, 160);
   }
 
@@ -565,11 +794,11 @@ function getSafeValue(element: HTMLElement): string | undefined {
 }
 
 function getCheckedState(element: HTMLElement): "checked" | "unchecked" | "mixed" | undefined {
-  if (element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")) {
+  if (isInputElement(element) && (element.type === "checkbox" || element.type === "radio")) {
     return element.checked ? "checked" : "unchecked";
   }
 
-  const nestedChoice = element.querySelector<HTMLInputElement>("input[type='checkbox'],input[type='radio']");
+  const nestedChoice = queryDescendants(element, "input[type='checkbox'],input[type='radio']").find(isInputElement);
   if (nestedChoice) {
     return nestedChoice.checked ? "checked" : "unchecked";
   }
@@ -592,7 +821,7 @@ function getElementQuestionContext(element: HTMLElement): { text: string; questi
     return undefined;
   }
 
-  const boundary = findQuestionContextBoundary(element) || document.body;
+  const boundary = findQuestionContextBoundary(element) || getRootTextBoundary(element);
   const beforeText = getTextBeforeElement(boundary, element);
   const questionText = extractNearestQuestionText(beforeText);
 
@@ -614,10 +843,10 @@ function shouldIncludeElementContext(element: HTMLElement): boolean {
   const role = element.getAttribute("role") || implicitRole(element) || "";
 
   return (
-    element instanceof HTMLInputElement ||
-    element instanceof HTMLTextAreaElement ||
-    element instanceof HTMLSelectElement ||
-    element instanceof HTMLLabelElement ||
+    isInputElement(element) ||
+    isTextAreaElement(element) ||
+    isSelectElement(element) ||
+    isLabelElement(element) ||
     isDraggableElement(element) ||
     isDropTargetElement(element) ||
     role === "textbox" ||
@@ -656,8 +885,9 @@ function isDropTargetElement(element: HTMLElement): boolean {
 function findQuestionContextBoundary(element: HTMLElement): HTMLElement | undefined {
   let current = element.parentElement;
   let depth = 0;
+  const rootBoundary = getRootBoundaryElement(element);
 
-  while (current && current !== document.body && depth < 10) {
+  while (current && current !== rootBoundary && depth < 10) {
     const text = normalizeText(current.innerText || current.textContent || "");
     if (/Problem Statement\s+\d+/i.test(text)) {
       return current;
@@ -670,16 +900,16 @@ function findQuestionContextBoundary(element: HTMLElement): HTMLElement | undefi
   return undefined;
 }
 
-function getTextBeforeElement(boundary: HTMLElement, element: HTMLElement): string {
+function getTextBeforeElement(boundary: HTMLElement | ShadowRoot, element: HTMLElement): string {
   try {
-    const range = document.createRange();
+    const range = element.ownerDocument.createRange();
     range.selectNodeContents(boundary);
     range.setEndBefore(element);
     const text = normalizeText(range.toString());
     range.detach();
     return text;
   } catch {
-    return normalizeText(boundary.innerText || boundary.textContent || "");
+    return normalizeText("innerText" in boundary ? boundary.innerText || "" : boundary.textContent || "");
   }
 }
 
@@ -694,22 +924,22 @@ function extractNearestQuestionText(beforeText: string): string | undefined {
 }
 
 function implicitRole(element: HTMLElement): string | undefined {
-  if (element instanceof HTMLButtonElement) {
+  if (isButtonElement(element)) {
     return "button";
   }
-  if (element instanceof HTMLAnchorElement) {
+  if (isAnchorElement(element)) {
     return "link";
   }
-  if (element instanceof HTMLLabelElement) {
+  if (isLabelElement(element)) {
     return "label";
   }
-  if (element instanceof HTMLSelectElement) {
+  if (isSelectElement(element)) {
     return "combobox";
   }
-  if (element instanceof HTMLTextAreaElement) {
+  if (isTextAreaElement(element)) {
     return "textbox";
   }
-  if (element instanceof HTMLInputElement) {
+  if (isInputElement(element)) {
     if (element.type === "checkbox") {
       return "checkbox";
     }
@@ -729,19 +959,20 @@ function implicitRole(element: HTMLElement): string | undefined {
 
 function isDisabled(element: HTMLElement): boolean {
   if (
-    element instanceof HTMLButtonElement ||
-    element instanceof HTMLInputElement ||
-    element instanceof HTMLTextAreaElement ||
-    element instanceof HTMLSelectElement
+    isButtonElement(element) ||
+    isInputElement(element) ||
+    isTextAreaElement(element) ||
+    isSelectElement(element)
   ) {
     return element.disabled;
   }
 
   const nestedEditable = getPrimaryTextEditableDescendant(element);
   if (
-    nestedEditable instanceof HTMLInputElement ||
-    nestedEditable instanceof HTMLTextAreaElement ||
-    nestedEditable instanceof HTMLSelectElement
+    nestedEditable &&
+    (isInputElement(nestedEditable) ||
+      isTextAreaElement(nestedEditable) ||
+      isSelectElement(nestedEditable))
   ) {
     return nestedEditable.disabled;
   }
@@ -754,12 +985,12 @@ export function isSensitiveElement(_element: HTMLElement): boolean {
 }
 
 function getPrimaryTextEditableDescendant(element: HTMLElement): HTMLElement | undefined {
-  const editable = element.querySelector<HTMLElement>(textEditableSelector);
+  const editable = queryDescendants(element, textEditableSelector)[0];
   return editable && isVisibleElement(editable) ? editable : undefined;
 }
 
 function getPrimarySelectDescendant(element: HTMLElement): HTMLSelectElement | undefined {
-  const select = element.querySelector<HTMLSelectElement>("select");
+  const select = queryDescendants(element, "select").find(isSelectElement);
   return select && isVisibleElement(select) ? select : undefined;
 }
 
@@ -767,7 +998,8 @@ function findLikelyEditableWrapper(editable: HTMLElement): HTMLElement | undefin
   let current = editable.parentElement;
   let depth = 0;
 
-  while (current && current !== document.body && depth < 5) {
+  const rootBoundary = getRootBoundaryElement(editable);
+  while (current && current !== rootBoundary && depth < 5) {
     if (isVisibleElement(current) && isLikelyEditableWrapper(current)) {
       return current;
     }
@@ -782,7 +1014,7 @@ function isLikelyEditableWrapper(element: HTMLElement): boolean {
   const className = String(element.getAttribute("class") || "");
   const role = element.getAttribute("role") || "";
   return (
-    element instanceof HTMLLabelElement ||
+    isLabelElement(element) ||
     role === "textbox" ||
     role === "combobox" ||
     element.tabIndex >= 0 ||
@@ -792,16 +1024,16 @@ function isLikelyEditableWrapper(element: HTMLElement): boolean {
 }
 
 function isElementFocused(element: HTMLElement): boolean {
-  const activeElement = document.activeElement;
+  const activeElement = element.ownerDocument.activeElement;
   return activeElement === element || Boolean(activeElement && element.contains(activeElement));
 }
 
 function isVisibleElement(element: Element): element is HTMLElement {
-  if (!(element instanceof HTMLElement)) {
+  if (!isHtmlElement(element)) {
     return false;
   }
 
-  const style = getComputedStyle(element);
+  const style = (element.ownerDocument.defaultView || window).getComputedStyle(element);
   if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
     return false;
   }
@@ -810,8 +1042,8 @@ function isVisibleElement(element: Element): element is HTMLElement {
   return rect.width > 0 && rect.height > 0;
 }
 
-function extractTables(): ExtractedPageData["tables"] {
-  return Array.from(document.querySelectorAll("table"))
+function extractTables(contexts = collectDomContexts()): ExtractedPageData["tables"] {
+  return queryAllInContexts(contexts, "table")
     .filter(isVisibleElement)
     .slice(0, 10)
     .map((table) => {
@@ -836,18 +1068,143 @@ function extractTables(): ExtractedPageData["tables"] {
     });
 }
 
-function extractForms(): ExtractedPageData["forms"] {
-  return Array.from(document.querySelectorAll("form"))
+function extractForms(contexts = collectDomContexts()): ExtractedPageData["forms"] {
+  return queryAllInContexts(contexts, "form")
     .filter(isVisibleElement)
     .slice(0, 10)
     .map((form) => {
-      const controls = Array.from(form.querySelectorAll<HTMLElement>(interactiveSelector))
+      const controls = queryDescendants(form, interactiveSelector)
         .filter(isVisibleElement)
         .slice(0, 40)
         .map(toElementInfo);
       const labels = controls.map((control) => control.label || control.text || control.placeholder || "").filter(Boolean);
       return { labels, controls };
     });
+}
+
+function queryDescendants(element: HTMLElement, selector: string): HTMLElement[] {
+  const results: HTMLElement[] = [];
+
+  try {
+    results.push(...Array.from(element.querySelectorAll(selector)).filter(isHtmlElement));
+  } catch {
+    return results;
+  }
+
+  collectShadowDescendants(element, selector, results, 0);
+  return results;
+}
+
+function collectShadowDescendants(
+  rootElement: HTMLElement,
+  selector: string,
+  results: HTMLElement[],
+  depth: number
+): void {
+  if (depth >= MAX_SHADOW_DEPTH) {
+    return;
+  }
+
+  const shadowRoots: ShadowRoot[] = [];
+  if (rootElement.shadowRoot) {
+    shadowRoots.push(rootElement.shadowRoot);
+  }
+
+  for (const descendant of Array.from(rootElement.querySelectorAll("*")).filter(isHtmlElement)) {
+    if (descendant.shadowRoot) {
+      shadowRoots.push(descendant.shadowRoot);
+    }
+  }
+
+  for (const shadowRoot of shadowRoots) {
+    results.push(...queryRoot(shadowRoot, selector));
+    for (const nestedHost of queryRoot(shadowRoot, "*")) {
+      collectShadowDescendants(nestedHost, selector, results, depth + 1);
+    }
+  }
+}
+
+function getElementByIdNear(element: HTMLElement, id: string): HTMLElement | undefined {
+  const root = element.getRootNode();
+  const found =
+    isDocumentRoot(root) ? root.getElementById(id) : isShadowRoot(root) ? root.getElementById(id) : element.ownerDocument.getElementById(id);
+  return found && isHtmlElement(found) ? found : undefined;
+}
+
+function getElementHref(element: HTMLElement): string | undefined {
+  return isAnchorElement(element) ? element.href : element.getAttribute("href") || undefined;
+}
+
+function getRootTextBoundary(element: HTMLElement): HTMLElement | ShadowRoot {
+  const root = element.getRootNode();
+  if (isShadowRoot(root)) {
+    return root;
+  }
+  if (isDocumentRoot(root)) {
+    return root.body || root.documentElement;
+  }
+  return document.body || document.documentElement;
+}
+
+function getRootBoundaryElement(element: HTMLElement): HTMLElement | undefined {
+  const root = element.getRootNode();
+  if (isDocumentRoot(root)) {
+    return root.body || root.documentElement;
+  }
+  if (isShadowRoot(root) && isHtmlElement(root.host)) {
+    return root.host;
+  }
+  return undefined;
+}
+
+function isDocumentRoot(root: Node): root is Document {
+  return root.nodeType === 9;
+}
+
+function isShadowRoot(root: Node): root is ShadowRoot {
+  return root.nodeType === 11 && "host" in root;
+}
+
+function isIframeElement(element: HTMLElement): element is HTMLIFrameElement {
+  return element.tagName.toLowerCase() === "iframe";
+}
+
+function isHtmlElement(element: Element | null | undefined): element is HTMLElement {
+  if (!element) {
+    return false;
+  }
+
+  const ctor = element.ownerDocument.defaultView?.HTMLElement;
+  return typeof ctor === "function" ? element instanceof ctor : element.nodeType === 1;
+}
+
+function isElementInstance<T extends HTMLElement>(element: Element, constructorName: HtmlConstructorName): element is T {
+  const ctor = element.ownerDocument.defaultView?.[constructorName];
+  return typeof ctor === "function" && element instanceof ctor;
+}
+
+function isInputElement(element: Element): element is HTMLInputElement {
+  return isElementInstance<HTMLInputElement>(element, "HTMLInputElement");
+}
+
+function isTextAreaElement(element: Element): element is HTMLTextAreaElement {
+  return isElementInstance<HTMLTextAreaElement>(element, "HTMLTextAreaElement");
+}
+
+function isSelectElement(element: Element): element is HTMLSelectElement {
+  return isElementInstance<HTMLSelectElement>(element, "HTMLSelectElement");
+}
+
+function isButtonElement(element: Element): element is HTMLButtonElement {
+  return isElementInstance<HTMLButtonElement>(element, "HTMLButtonElement");
+}
+
+function isAnchorElement(element: Element): element is HTMLAnchorElement {
+  return isElementInstance<HTMLAnchorElement>(element, "HTMLAnchorElement");
+}
+
+function isLabelElement(element: Element): element is HTMLLabelElement {
+  return isElementInstance<HTMLLabelElement>(element, "HTMLLabelElement");
 }
 
 function normalizeText(value: string): string {

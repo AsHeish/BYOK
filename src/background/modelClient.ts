@@ -525,6 +525,9 @@ function normalizeAgentAction(value: unknown): AgentAction[] {
     elementIds: getStringArray(value.elementIds) || getStringArray(value.element_ids),
     targetElementId,
     dragPairs: normalizeDragPairs(value.dragPairs) || normalizeDragPairs(value.drag_pairs) || normalizeDragPairs(value.pairs),
+    fileId: getString(value.fileId) || getString(value.file_id) || getString(value.stagedFileId) || getString(value.staged_file_id),
+    downloadId: getNumber(value.downloadId) || getNumber(value.download_id),
+    maxItems: getNumber(value.maxItems) || getNumber(value.max_items) || getNumber(value.limit),
     text: getString(value.text) || getString(value.value) || getString(value.answer),
     key: normalizeKey(value.key) || normalizeKey(value.text),
     url: getString(value.url),
@@ -566,11 +569,24 @@ function normalizeActionType(type: string): AgentAction["type"] | undefined {
     multi_drag: "multi_drag",
     multidrag: "multi_drag",
     drag_many: "multi_drag",
+    upload_file: "upload_file",
+    upload: "upload_file",
+    file_upload: "upload_file",
+    attach_file: "upload_file",
     fill: "fill",
     type: "type",
     select: "select",
     press_key: "press_key",
     key: "press_key",
+    summarize_page: "summarize_page",
+    page_summary: "summarize_page",
+    summarize_webpage: "summarize_page",
+    summarize_web_page: "summarize_page",
+    summarize_pdf: "summarize_pdf",
+    pdf_summary: "summarize_pdf",
+    list_downloads: "list_downloads",
+    downloads: "list_downloads",
+    recent_downloads: "list_downloads",
     scroll: "scroll",
     navigate: "navigate",
     open_url: "navigate",
@@ -662,6 +678,11 @@ function getStringArray(value: unknown): string[] | undefined {
     .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     .map((item) => item.trim());
   return values.length ? values : undefined;
+}
+
+function getNumber(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : undefined;
+  return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

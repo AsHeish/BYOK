@@ -1,9 +1,10 @@
 import { DEFAULT_SETTINGS } from "./defaults";
-import type { AgentSettings, AiConfigurationProfile, PromptCacheMode, Provider } from "./types";
+import type { AgentSettings, AiConfigurationProfile, PromptCacheMode, Provider, StagedUploadFile } from "./types";
 
 const SETTINGS_KEY = "byokAgentSettings";
 const TASK_DRAFT_KEY = "byokAgentTaskDraft";
 const CONFIG_PROFILES_KEY = "byokAgentConfigProfiles";
+const STAGED_UPLOAD_FILE_KEY = "byokAgentStagedUploadFile";
 const MIN_MAX_STEPS = 1;
 const MAX_MAX_STEPS = 60;
 const LEGACY_DEFAULT_MAX_STEPS = new Set([12, 30]);
@@ -112,6 +113,21 @@ export async function saveTaskDraft(task: string): Promise<void> {
   await chrome.storage.local.set({
     [TASK_DRAFT_KEY]: task,
   });
+}
+
+export async function loadStagedUploadFile(): Promise<StagedUploadFile | undefined> {
+  const stored = await chrome.storage.local.get(STAGED_UPLOAD_FILE_KEY);
+  return normalizeStagedUploadFile(stored[STAGED_UPLOAD_FILE_KEY]);
+}
+
+export async function saveStagedUploadFile(file: StagedUploadFile): Promise<void> {
+  await chrome.storage.local.set({
+    [STAGED_UPLOAD_FILE_KEY]: file,
+  });
+}
+
+export async function clearStagedUploadFile(): Promise<void> {
+  await chrome.storage.local.remove(STAGED_UPLOAD_FILE_KEY);
 }
 
 export async function loadConfigurationProfiles(): Promise<
@@ -241,6 +257,30 @@ function normalizeProfiles(value: unknown): AiConfigurationProfile[] {
     })
     .filter((profile): profile is AiConfigurationProfile => Boolean(profile))
     .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function normalizeStagedUploadFile(value: unknown): StagedUploadFile | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const raw = value as Partial<StagedUploadFile>;
+  const id = String(raw.id || "").trim();
+  const name = String(raw.name || "").trim();
+  const dataUrl = String(raw.dataUrl || "");
+  const size = Number(raw.size || 0);
+  if (!id || !name || !dataUrl.startsWith("data:") || !Number.isFinite(size) || size <= 0) {
+    return undefined;
+  }
+
+  return {
+    id,
+    name,
+    type: String(raw.type || "application/octet-stream"),
+    size,
+    dataUrl,
+    createdAt: Number(raw.createdAt || Date.now()),
+  };
 }
 
 function createProfileId(): string {

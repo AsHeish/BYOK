@@ -1,10 +1,12 @@
 import { buildAgentMessages, type PromptTabInfo } from "./prompts";
 import { getActiveTab, notifySidePanel, sendTabMessage, sleep, tryInjectContentScript } from "./chromeAsync";
 import { ModelClientError, requestAgentStep } from "./modelClient";
+import { extractPdfText } from "./pdfText";
 
+import { dataUrlToUint8Array, formatFileSize } from "../shared/fileData";
 import { MAX_LOG_ENTRIES } from "../shared/defaults";
 import { createId } from "../shared/ids";
-import { loadSettings } from "../shared/storage";
+import { loadSettings, loadStagedUploadFile } from "../shared/storage";
 import type {
   AgentAction,
   AgentLogEntry,
@@ -14,7 +16,8 @@ import type {
   ContentActionResult,
   ModelUsageEvent,
   PageObservation,
-  SidePanelToBackgroundMessage
+  SidePanelToBackgroundMessage,
+  StagedUploadFile
 } from "../shared/types";
 
 interface RunningSession {
@@ -46,6 +49,8 @@ const MAX_ACTIONS_PER_AGENT_STEP = 10;
 const MAX_PROGRESS_LINES_FOR_PROMPT = 30;
 const MAX_ACTION_LOG_PREVIEW = 20;
 const TAB_SETTLE_TIMEOUT_MS = 5000;
+const MAX_SUMMARY_INPUT_CHARS = 30000;
+const MAX_DOWNLOADS_FOR_PROMPT = 5;
 
 configureSidePanelSafely();
 
@@ -87,6 +92,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     appendLog("warning", `Active tab ${closedTab?.alias || tabId} was closed. Switched tracking to ${fallbackTab.alias}.`);
   }
 });
+
+if (chrome.downloads?.onChanged) {
+  chrome.downloads.onChanged.addListener((delta) => {
+    if (delta.state?.current === "complete") {
+      void logCompletedDownload(delta.id);
+    }
+  });
+}
 
 function configureSidePanelSafely(): void {
   void configureSidePanel().catch((error: unknown) => {
@@ -192,6 +205,8 @@ async function startTask(task: string): Promise<void> {
       const observation = await observePage(session.activeTabId);
       updateTrackedTabFromObservation(session, session.activeTabId, observation);
       appendLog("info", `Observed ${session.activeTabAlias}: ${observation.title || observation.url}`);
+      const stagedFile = await loadStagedUploadFile();
+      const recentDownloads = await getRecentDownloadsForPrompt(MAX_DOWNLOADS_FOR_PROMPT);
 
       const messages = buildAgentMessages({
         task,
@@ -200,7 +215,9 @@ async function startTask(task: string): Promise<void> {
         maxSteps: settings.maxSteps,
         previousResult,
         tabs: getPromptTabs(session),
-        activeTabAlias: session.activeTabAlias
+        activeTabAlias: session.activeTabAlias,
+        stagedFile: stagedFile ? toPromptStagedFile(stagedFile) : undefined,
+        downloads: recentDownloads
       });
       logPromptBeforeModelCall(step, messages);
 
@@ -391,6 +408,41 @@ async function handleSingleAction(
       message: "Stopped by user.",
       shouldStop: true,
       completedActions: []
+    };
+  }
+
+  if (action.type === "list_downloads") {
+    const result = await listDownloads(action.maxItems);
+    return {
+      ok: result.ok,
+      message: result.message,
+      shouldStop: false,
+      recoverable: result.recoverable,
+      completedActions: []
+    };
+  }
+
+  if (action.type === "summarize_page") {
+    const result = await summarizeCurrentPage(session, action.text);
+    return {
+      ok: result.ok,
+      message: result.message,
+      shouldStop: result.ok,
+      recoverable: result.recoverable,
+      completedActions: [],
+      lastObservation: result.observation
+    };
+  }
+
+  if (action.type === "summarize_pdf") {
+    const result = await summarizePdf(session, action);
+    return {
+      ok: result.ok,
+      message: result.message,
+      shouldStop: result.ok,
+      recoverable: result.recoverable,
+      completedActions: [],
+      lastObservation: result.observation
     };
   }
 
@@ -787,6 +839,284 @@ async function goBackInTab(tabId: number): Promise<ContentActionResult> {
   };
 }
 
+async function summarizeCurrentPage(session: RunningSession, instruction?: string): Promise<ContentActionResult> {
+  const observation = await observePage(session.activeTabId);
+  const pageText = truncateForSummary(observation.text);
+  if (!pageText.trim()) {
+    return {
+      ok: false,
+      recoverable: true,
+      observation,
+      message: "No readable page text was available to summarize."
+    };
+  }
+
+  const summary = await summarizeTextWithModel({
+    title: observation.title || observation.url,
+    sourceLabel: observation.url,
+    text: pageText,
+    instruction: instruction || "Summarize this web page clearly and concisely."
+  });
+
+  return {
+    ok: true,
+    observation,
+    message: `Page summary:\n${summary}`
+  };
+}
+
+async function summarizePdf(session: RunningSession, action: AgentAction): Promise<ContentActionResult> {
+  const source = await resolvePdfSource(session, action);
+  if (!source.ok) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: source.message
+    };
+  }
+
+  const extraction = await extractPdfText(source.bytes);
+  if (!extraction.text.trim()) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: `Could not extract readable text from ${source.label}.`
+    };
+  }
+
+  const sourceDetails = [
+    source.label,
+    extraction.pageCount ? `${extraction.pageCount} pages` : "",
+    extraction.extractedPages ? `${extraction.extractedPages} pages read` : "",
+    extraction.engine === "fallback" ? "fallback extractor" : ""
+  ].filter(Boolean).join(", ");
+
+  const summary = await summarizeTextWithModel({
+    title: source.label,
+    sourceLabel: sourceDetails,
+    text: truncateForSummary(extraction.text),
+    instruction: action.text || "Summarize this PDF. Include key points, important facts, and any action items."
+  });
+
+  return {
+    ok: true,
+    message: `PDF summary (${sourceDetails}):\n${summary}`
+  };
+}
+
+async function summarizeTextWithModel(args: {
+  title: string;
+  sourceLabel: string;
+  text: string;
+  instruction: string;
+}): Promise<string> {
+  const settings = await loadSettings();
+  const messages: Array<{ role: "system" | "user"; content: string }> = [
+    {
+      role: "system",
+      content: [
+        "You summarize web pages and PDFs for a browser extension.",
+        "Return strict JSON only.",
+        "Use this schema: {\"thought_summary\":\"summary ready\",\"risk_level\":\"low\",\"action\":{\"type\":\"done\",\"text\":\"the user-facing summary\"}}.",
+        "Keep the summary useful, structured, and faithful to the supplied text. If the text is sparse, say what is missing."
+      ].join("\n")
+    },
+    {
+      role: "user",
+      content: [
+        `Instruction: ${args.instruction}`,
+        `Title: ${args.title}`,
+        `Source: ${args.sourceLabel}`,
+        "",
+        "Text to summarize:",
+        args.text
+      ].join("\n")
+    }
+  ];
+
+  const result = await requestAgentStep(settings, messages);
+  recordUsageEvent(result.usage, settings);
+  const doneAction = result.response.actions?.find((action) => action.type === "done");
+  return doneAction?.text || result.response.thought_summary || "The model did not return a summary.";
+}
+
+async function resolvePdfSource(
+  session: RunningSession,
+  action: AgentAction
+): Promise<{ ok: true; bytes: Uint8Array; label: string } | { ok: false; message: string }> {
+  if (action.fileId) {
+    const stagedFile = await loadStagedUploadFile();
+    if (!stagedFile || stagedFile.id !== action.fileId) {
+      return { ok: false, message: `Staged PDF file ${action.fileId} is not available.` };
+    }
+    return {
+      ok: true,
+      bytes: dataUrlToUint8Array(stagedFile.dataUrl),
+      label: `${stagedFile.name} (${formatFileSize(stagedFile.size)})`
+    };
+  }
+
+  if (action.downloadId) {
+    const download = await getDownloadById(action.downloadId);
+    const url = download?.finalUrl || download?.url;
+    if (!url) {
+      return { ok: false, message: `Download ${action.downloadId} does not have a source URL that can be fetched.` };
+    }
+    return fetchPdfBytes(url, download.filename || url);
+  }
+
+  if (action.url) {
+    return fetchPdfBytes(action.url, action.url);
+  }
+
+  const activeTab = await getTabSafely(session.activeTabId);
+  if (activeTab?.url && isLikelyPdfUrl(activeTab.url)) {
+    return fetchPdfBytes(activeTab.url, activeTab.title || activeTab.url);
+  }
+
+  const stagedFile = await loadStagedUploadFile();
+  if (stagedFile && isLikelyPdfFile(stagedFile)) {
+    return {
+      ok: true,
+      bytes: dataUrlToUint8Array(stagedFile.dataUrl),
+      label: `${stagedFile.name} (${formatFileSize(stagedFile.size)})`
+    };
+  }
+
+  const latestPdfDownload = (await getRecentDownloads(10)).find((download) => isDownloadLikelyPdf(download));
+  const downloadUrl = latestPdfDownload?.finalUrl || latestPdfDownload?.url;
+  if (downloadUrl) {
+    return fetchPdfBytes(downloadUrl, latestPdfDownload.filename || downloadUrl);
+  }
+
+  return {
+    ok: false,
+    message: "No PDF source was found. Provide a PDF url, downloadId, or stage a PDF file in the side panel."
+  };
+}
+
+async function fetchPdfBytes(url: string, label: string): Promise<{ ok: true; bytes: Uint8Array; label: string } | { ok: false; message: string }> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ok: false, message: "PDF URL is invalid." };
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { ok: false, message: "PDF summarization can fetch http(s) URLs or use a staged local PDF." };
+  }
+
+  try {
+    const response = await fetch(parsed.toString(), { credentials: "include" });
+    if (!response.ok) {
+      return { ok: false, message: `Could not fetch PDF (${response.status}) from ${parsed.toString()}.` };
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return { ok: true, bytes, label };
+  } catch (error) {
+    return { ok: false, message: `Could not fetch PDF from ${parsed.toString()}. ${getErrorMessage(error)}` };
+  }
+}
+
+async function listDownloads(maxItems?: number): Promise<{ ok: boolean; message: string; recoverable?: boolean }> {
+  const downloads = await getRecentDownloads(Math.min(Math.max(Number(maxItems || 8), 1), 20));
+  if (downloads.length === 0) {
+    return {
+      ok: true,
+      message: "No recent downloads were found."
+    };
+  }
+
+  return {
+    ok: true,
+    message: `Recent downloads:\n${downloads.map(formatDownloadForLog).join("\n")}`
+  };
+}
+
+async function logCompletedDownload(downloadId: number): Promise<void> {
+  const download = await getDownloadById(downloadId);
+  if (!download) {
+    return;
+  }
+
+  appendLog("success", `Download complete: ${formatDownloadForLog(download)}`);
+}
+
+async function getDownloadById(downloadId: number): Promise<chrome.downloads.DownloadItem | undefined> {
+  const downloads = await chrome.downloads.search({ id: downloadId });
+  return downloads[0];
+}
+
+async function getRecentDownloads(limit: number): Promise<chrome.downloads.DownloadItem[]> {
+  if (!chrome.downloads?.search) {
+    return [];
+  }
+
+  return chrome.downloads.search({
+    limit,
+    orderBy: ["-startTime"]
+  });
+}
+
+async function getRecentDownloadsForPrompt(limit: number): Promise<Array<{
+  id: number;
+  filename?: string;
+  url?: string;
+  mime?: string;
+  state?: string;
+  totalBytes?: number;
+  exists?: boolean;
+}> > {
+  return (await getRecentDownloads(limit)).map((download) => ({
+    id: download.id,
+    filename: download.filename,
+    url: download.finalUrl || download.url,
+    mime: download.mime,
+    state: download.state,
+    totalBytes: download.totalBytes,
+    exists: download.exists
+  }));
+}
+
+function formatDownloadForLog(download: chrome.downloads.DownloadItem): string {
+  const filename = download.filename ? download.filename.split(/[\\/]/).pop() || download.filename : "download";
+  const size = download.totalBytes && download.totalBytes > 0 ? ` ${formatFileSize(download.totalBytes)}` : "";
+  const mime = download.mime ? ` ${download.mime}` : "";
+  const url = download.finalUrl || download.url || "";
+  return `#${download.id} ${filename}${size}${mime}${url ? ` <${url}>` : ""}`;
+}
+
+function toPromptStagedFile(file: StagedUploadFile): {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+} {
+  return {
+    id: file.id,
+    name: file.name,
+    type: file.type,
+    size: file.size
+  };
+}
+
+function isLikelyPdfFile(file: StagedUploadFile): boolean {
+  return file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+}
+
+function isDownloadLikelyPdf(download: chrome.downloads.DownloadItem): boolean {
+  return download.mime === "application/pdf" || isLikelyPdfUrl(download.filename) || isLikelyPdfUrl(download.finalUrl || download.url);
+}
+
+function isLikelyPdfUrl(url?: string): boolean {
+  return Boolean(url && (/\.pdf(?:[?#].*)?$/i.test(url) || /application\/pdf/i.test(url)));
+}
+
+function truncateForSummary(text: string): string {
+  return text.length <= MAX_SUMMARY_INPUT_CHARS ? text : `${text.slice(0, MAX_SUMMARY_INPUT_CHARS - 32)}\n[truncated for summary]`;
+}
+
 async function observePageSafely(tabId: number): Promise<PageObservation | undefined> {
   try {
     return await observePage(tabId);
@@ -1024,6 +1354,18 @@ function formatAction(action: AgentAction): string {
   if (action.type === "multi_drag") {
     return `drag ${action.dragPairs?.length || 0} pairs`;
   }
+  if (action.type === "upload_file") {
+    return `upload file to ${action.elementId || "file input"}`;
+  }
+  if (action.type === "summarize_page") {
+    return "summarize page";
+  }
+  if (action.type === "summarize_pdf") {
+    return action.downloadId ? `summarize PDF download #${action.downloadId}` : `summarize PDF ${action.url || action.fileId || ""}`.trim();
+  }
+  if (action.type === "list_downloads") {
+    return "list downloads";
+  }
   if (action.type === "drag") {
     return `drag ${action.elementId || "source"} to ${action.targetElementId || "target"}`;
   }
@@ -1235,6 +1577,13 @@ function getDuplicateInputAction(action: AgentAction, completedInputActions: Set
     };
   }
 
+  if (action.type === "upload_file") {
+    return {
+      message: `Skipped repeated upload_file on ${action.elementId}; that file input was already handled.`,
+      shouldAdvanceFocus: false
+    };
+  }
+
   if (action.type === "drag") {
     return {
       message: `Skipped repeated drag from ${action.elementId} to ${action.targetElementId}; that drag/drop action was already handled.`,
@@ -1269,6 +1618,10 @@ function getInputActionKey(action: AgentAction, tabAlias: string): string | unde
 
   if (action.type === "drag") {
     return action.elementId && action.targetElementId ? `${prefix}drag:${action.elementId}->${action.targetElementId}` : undefined;
+  }
+
+  if (action.type === "upload_file") {
+    return action.elementId ? `${prefix}upload_file:${action.elementId}:${action.fileId || "staged"}` : undefined;
   }
 
   if ((action.type !== "fill" && action.type !== "type" && action.type !== "select") || !action.elementId) {
