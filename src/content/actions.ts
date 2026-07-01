@@ -1,10 +1,17 @@
 import { extractPageData, findMappedElementReplacement, getMappedElement, observePage } from "./domMap";
-import { stagedFileToBrowserFile } from "../shared/fileData";
-import { loadStagedUploadFile } from "../shared/storage";
 import type { AgentAction, ContentActionResult } from "../shared/types";
 
 type ElementLookup = { ok: true; value: HTMLElement } | { ok: false; message: string; recoverable?: boolean };
 type TextEditableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
+interface StagedUploadFile {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  dataUrl: string;
+  createdAt: number;
+}
+
 type HtmlConstructorName =
   | "HTMLElement"
   | "HTMLInputElement"
@@ -15,6 +22,7 @@ type HtmlConstructorName =
   | "HTMLLabelElement";
 
 type QueryRoot = Document | ShadowRoot;
+const STAGED_UPLOAD_FILE_KEY = "byokAgentStagedUploadFile";
 
 const textEditableSelector = [
   "input:not([type='hidden']):not([type='button']):not([type='submit']):not([type='reset']):not([type='checkbox']):not([type='radio']):not([type='file'])",
@@ -1458,6 +1466,49 @@ function isAnchorElement(element: Element): element is HTMLAnchorElement {
 
 function isLabelElement(element: Element): element is HTMLLabelElement {
   return isElementInstance<HTMLLabelElement>(element, "HTMLLabelElement");
+}
+
+async function loadStagedUploadFile(): Promise<StagedUploadFile | undefined> {
+  const stored = await chrome.storage.local.get(STAGED_UPLOAD_FILE_KEY);
+  const raw = stored[STAGED_UPLOAD_FILE_KEY] as Partial<StagedUploadFile> | undefined;
+  if (!raw || !raw.id || !raw.name || !raw.dataUrl?.startsWith("data:")) {
+    return undefined;
+  }
+
+  return {
+    id: String(raw.id),
+    name: String(raw.name),
+    type: String(raw.type || "application/octet-stream"),
+    size: Number(raw.size || 0),
+    dataUrl: String(raw.dataUrl),
+    createdAt: Number(raw.createdAt || Date.now())
+  };
+}
+
+function stagedFileToBrowserFile(stagedFile: StagedUploadFile): File {
+  const bytes = dataUrlToUint8Array(stagedFile.dataUrl);
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return new File([buffer], stagedFile.name, {
+    type: stagedFile.type || "application/octet-stream",
+    lastModified: stagedFile.createdAt
+  });
+}
+
+function dataUrlToUint8Array(dataUrl: string): Uint8Array {
+  const commaIndex = dataUrl.indexOf(",");
+  if (commaIndex < 0) {
+    throw new Error("Stored file data is not a valid data URL.");
+  }
+
+  const metadata = dataUrl.slice(0, commaIndex);
+  const payload = dataUrl.slice(commaIndex + 1);
+  const binary = metadata.includes(";base64") ? atob(payload) : decodeURIComponent(payload);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 async function sleep(ms: number): Promise<void> {
