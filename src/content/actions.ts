@@ -348,6 +348,11 @@ async function typeIntoElement(elementId: string | undefined, text: string): Pro
   }
 
   const element = lookup.value;
+  const select = findSelectTarget(element);
+  if (select) {
+    return selectOptionFromElement(select, text);
+  }
+
   const editable = await resolveTextEditableTarget(element);
 
   if (!editable) {
@@ -963,36 +968,83 @@ function selectOption(elementId: string | undefined, text: string): ContentActio
     return lookup;
   }
 
-  const element = lookup.value;
-
-  if (!isSelectElement(element)) {
+  const select = findSelectTarget(lookup.value);
+  if (!select) {
     return {
       ok: false,
-      message: "The target element is not a select control."
+      recoverable: true,
+      message: "The target element is not a select control and does not contain an associated select."
     };
   }
 
-  const option = Array.from(element.options).find(
-    (candidate) =>
-      candidate.value === text ||
-      candidate.text.trim() === text ||
-      candidate.label.trim() === text ||
-      candidate.text.trim().toLowerCase() === text.toLowerCase()
-  );
+  return selectOptionFromElement(select, text);
+}
+
+function selectOptionFromElement(element: HTMLSelectElement, text: string): ContentActionResult {
+  const options = Array.from(element.options).filter((candidate) => !candidate.disabled);
+  const normalizedText = normalizeSelectOptionText(text);
+  const option =
+    options.find(
+      (candidate) =>
+        candidate.value === text ||
+        normalizeSelectOptionText(candidate.text) === normalizedText ||
+        normalizeSelectOptionText(candidate.label) === normalizedText
+    ) || findNumberedSelectOption(options, text);
 
   if (!option) {
     return {
       ok: false,
-      message: `Could not find select option "${text}".`
+      recoverable: true,
+      message: `Could not find select option "${text}". Available options: ${options
+        .map((candidate) => candidate.text.trim() || candidate.value)
+        .filter(Boolean)
+        .join(" | ")}.`
     };
   }
 
+  prepareElement(element);
   setNativeValue(element, option.value);
   dispatchFormEvents(element);
   return {
     ok: true,
     message: `Selected ${option.text || option.value}.`
   };
+}
+
+function findSelectTarget(element: HTMLElement): HTMLSelectElement | undefined {
+  if (isSelectElement(element)) {
+    return element;
+  }
+
+  if (isLabelElement(element) && element.control && isSelectElement(element.control)) {
+    return element.control;
+  }
+
+  return queryDescendants(element, "select").find(isSelectElement);
+}
+
+function findNumberedSelectOption(options: HTMLOptionElement[], text: string): HTMLOptionElement | undefined {
+  const requestedNumber = getLeadingOptionNumber(text);
+  if (!requestedNumber) {
+    return undefined;
+  }
+
+  const matches = options.filter((candidate) => {
+    const candidateNumbers = [candidate.value, candidate.text, candidate.label]
+      .map(getLeadingOptionNumber)
+      .filter(Boolean);
+    return candidateNumbers.includes(requestedNumber);
+  });
+
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function getLeadingOptionNumber(value: string): string | undefined {
+  return value.trim().match(/^(?:option\s*)?(\d+)(?:\s*[.):\-]|\s|$)/i)?.[1];
+}
+
+function normalizeSelectOptionText(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 function createDragDataTransfer(source: HTMLElement): DataTransfer {

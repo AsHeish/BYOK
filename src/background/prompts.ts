@@ -1,6 +1,6 @@
 import type { AgentModelResponse, PageObservation } from "../shared/types";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.42";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.44";
 const MAX_ACTIONS_PER_RESPONSE = 10;
 const MAX_OBSERVATION_INPUT_TOKENS = 4000;
 const APPROX_CHARS_PER_TOKEN = 4;
@@ -90,6 +90,7 @@ export function buildAgentMessages(args: {
         "For summarize_pdf, set url, fileId, or downloadId when known; otherwise it will try the current PDF tab, staged PDF, or latest PDF download.",
         "For list_downloads, optional maxItems controls the number of recent downloads to list.",
         "For fill and type, set elementId and text. Use fill for normal form input because it combines click/focus and typing.",
+        "For a select/combobox with options, use select with elementId and text set to the exact visible option text. A leading option number such as 1 or 2 is also accepted when the options are numbered.",
         "For press_key, set key to Tab or Shift+Tab.",
         "For go_back, no elementId or url is needed.",
         "For open_tab, set url. The new tab becomes active and receives the next tab alias.",

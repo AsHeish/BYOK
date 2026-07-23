@@ -264,8 +264,8 @@ function shouldUsePromptCacheFields(settings: AgentSettings): boolean {
 }
 
 function buildPromptCacheKey(settings: AgentSettings, messages: ChatMessage[]): string {
-  const stablePrefix = getStablePromptPrefix(messages);
-  const keyMaterial = [settings.apiBaseUrl, settings.model, stablePrefix].join("\n");
+  const staticInstructions = getStaticInstructionPrefix(messages);
+  const keyMaterial = [settings.apiBaseUrl, settings.model, staticInstructions].join("\n");
   return `byok-agent-${shortHash(keyMaterial)}`;
 }
 
@@ -275,16 +275,24 @@ function buildPromptCacheDebugInfo(
   promptCacheMode: AgentSettings["promptCacheMode"]
 ): Record<string, unknown> {
   const stablePrefix = getStablePromptPrefix(messages);
+  const staticInstructions = getStaticInstructionPrefix(messages);
   return {
     mode: promptCacheMode,
     active: typeof promptCacheKey === "string",
     providerCacheKey: typeof promptCacheKey === "string" ? promptCacheKey : undefined,
+    staticInstructionCharacters: staticInstructions.length,
+    estimatedStaticInstructionTokens: Math.ceil(staticInstructions.length / 4),
     stablePrefixMessages: Math.min(messages.length, 2),
     stablePrefixCharacters: stablePrefix.length,
     estimatedStablePrefixTokens: Math.ceil(stablePrefix.length / 4),
     note:
-      "Static instructions and task are kept before changing page observations so provider-side prefix caches can be reused. Auto mode sends explicit cache hints for OpenAI and custom endpoints."
+      "The cache key is shared across tasks with identical system instructions. Static instructions and task remain before changing page observations so provider-side prefix caches can reuse the longest exact match."
   };
+}
+
+function getStaticInstructionPrefix(messages: ChatMessage[]): string {
+  const systemMessage = messages.find((message) => message.role === "system");
+  return systemMessage ? `${systemMessage.role}:\n${systemMessage.content}` : "";
 }
 
 function getStablePromptPrefix(messages: ChatMessage[]): string {
