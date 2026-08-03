@@ -150,6 +150,7 @@ export interface PageObservation {
   title: string;
   text: string;
   elements: DomElementInfo[];
+  interactiveElementCount?: number;
   viewport?: PageViewportInfo;
   frames?: PageFrameInfo[];
 }

@@ -122,9 +122,10 @@ export function observePage(): PageObservation {
   currentElementInfo.clear();
 
   const contexts = collectDomContexts();
-  const elements = getCandidateInteractiveElements(contexts)
+  const interactiveElements = getCandidateInteractiveElements(contexts)
     .filter(isVisibleElement)
-    .sort(compareElementsForCurrentViewport)
+    .sort(compareElementsForCurrentViewport);
+  const elements = interactiveElements
     .slice(0, MAX_DOM_ELEMENTS)
     .map(toElementInfo);
 
@@ -133,6 +134,7 @@ export function observePage(): PageObservation {
     title: document.title,
     text: getReadableText(contexts),
     elements,
+    interactiveElementCount: interactiveElements.length,
     viewport: getViewportInfo(),
     frames: contexts.frames
   };

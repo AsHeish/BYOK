@@ -1,6 +1,6 @@
 import type { AgentModelResponse, PageObservation } from "../shared/types";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.44";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.45";
 const MAX_ACTIONS_PER_RESPONSE = 10;
 const MAX_OBSERVATION_INPUT_TOKENS = 4000;
 const APPROX_CHARS_PER_TOKEN = 4;
@@ -69,6 +69,9 @@ export function buildAgentMessages(args: {
         "- If drag/drop source or target is unclear, use ask_user instead of guessing.",
         "- For multiple-answer checkbox or multi-select questions where several options are correct for the same question, use one multi_click action with elementIds containing all correct option element IDs. Do not call one click at a time for those options.",
         "- Use multi_click only for options that can be selected together. For single-answer radio questions, use one click for the single correct option.",
+        "- On long forms, answer the choice questions nearest the current viewport first. Batch independent visible radio clicks and checkbox multi_click actions when their question text and options are fully present.",
+        "- After handling the current choice questions, scroll down when pageProgress is below 100% or the observation says additional interactive controls were omitted. Do not return done until you have inspected the bottom of the form and no unanswered question remains.",
+        "- If a radio question already has one checked option, treat that single-choice question as answered and do not replace it. For checkboxes, preserve already checked correct options and click only additional required options.",
         "- When multiple fields have the same label, use each element's problem and context fields to decide which question it belongs to. Do not rely only on repeated labels like \"Your Submission\".",
         "- Do not copy the same option number into multiple questions unless each field's own context independently supports that answer.",
         "- Do not fill any field that already has a non-empty value in the observation, even if the value differs from the answer you planned. Move to the next empty field or finish.",
@@ -171,7 +174,7 @@ function exampleResponse(): AgentModelResponse {
 }
 
 function formatObservation(observation: PageObservation): string {
-  const elementLines = observation.elements.map(formatElementLine);
+  const elementLines = orderElementsForPrompt(observation.elements).map(formatElementLine);
   const stateSummary = formatObservationState(observation);
   const header = [`URL: ${observation.url}`, `Title: ${observation.title}`, stateSummary, "", "Readable text:"]
     .filter(Boolean)
@@ -188,6 +191,8 @@ function formatObservation(observation: PageObservation): string {
 
 function formatObservationState(observation: PageObservation): string {
   const focusedElement = observation.elements.find((element) => element.isFocused);
+  const observedElementCount = observation.elements.length;
+  const interactiveElementCount = observation.interactiveElementCount ?? observedElementCount;
   const emptyFillableElements = observation.elements
     .filter((element) => isLikelyFillableElement(element) && !hasCompletedControlValue(element) && !element.isDisabled)
     .slice(0, 14);
@@ -205,6 +210,9 @@ function formatObservationState(observation: PageObservation): string {
     "Page state summary:",
     formatViewportState(observation),
     formatFrameState(observation),
+    interactiveElementCount > observedElementCount
+      ? `Interactive controls: showing the ${observedElementCount} nearest of ${interactiveElementCount}; scroll to inspect omitted controls.`
+      : `Interactive controls: showing all ${observedElementCount} detected controls.`,
     "Element IDs are current only for this observation. Use the IDs below, not stale IDs from earlier steps.",
     focusedElement ? `Focused element: ${formatCompactElementRef(focusedElement)}` : "",
     emptyFillableElements.length
@@ -222,6 +230,16 @@ function formatObservationState(observation: PageObservation): string {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function orderElementsForPrompt(elements: PageObservation["elements"]): PageObservation["elements"] {
+  const choiceControls = elements.filter(isDirectChoiceControl);
+  const otherControls = elements.filter((element) => !isDirectChoiceControl(element));
+  return [...choiceControls, ...otherControls];
+}
+
+function isDirectChoiceControl(element: PageObservation["elements"][number]): boolean {
+  return element.type === "radio" || element.type === "checkbox" || element.role === "radio" || element.role === "checkbox";
 }
 
 function formatViewportState(observation: PageObservation): string {
