@@ -4,6 +4,9 @@ const MAX_ACTIONS_PER_MODEL_RESPONSE = 10;
 const MAX_MODEL_REQUEST_ATTEMPTS = 4;
 const MIN_REQUEST_TIMEOUT_SECONDS = 10;
 const MAX_REQUEST_TIMEOUT_SECONDS = 300;
+const AUTOMATIC_PREFIX_CACHE_MODELS = new Set(["qwen-3.6-27b", "gemma-4-31b"]);
+
+type PromptCacheStrategy = "none" | "openai" | "automatic-prefix";
 
 interface ChatMessage {
   role: "system" | "user";
@@ -26,8 +29,13 @@ interface ChatUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  cached_tokens?: number;
+  cached_prompt_tokens?: number;
+  num_cached_tokens?: number;
   prompt_tokens_details?: {
     cached_tokens?: number;
+    cache_read_tokens?: number;
+    prefix_cached_tokens?: number;
   };
   input_tokens_details?: {
     cached_tokens?: number;
@@ -56,7 +64,7 @@ export async function requestAgentStep(
   let attempts = 0;
 
   let includeResponseFormat = true;
-  let includePromptCacheFields = shouldUsePromptCacheFields(settings);
+  let promptCacheStrategy = getPromptCacheStrategy(settings);
   let result: { response: Response; responseText: string } | undefined;
 
   for (let attempt = 0; attempt < MAX_MODEL_REQUEST_ATTEMPTS; attempt += 1) {
@@ -71,7 +79,7 @@ export async function requestAgentStep(
         messages,
         signal: controller.signal,
         includeResponseFormat,
-        includePromptCacheFields
+        promptCacheStrategy
       });
     } catch (error) {
       if (isAbortError(error)) {
@@ -104,8 +112,8 @@ export async function requestAgentStep(
       break;
     }
 
-    if (includePromptCacheFields && shouldRetryWithoutPromptCacheFields(result.response.status, result.responseText)) {
-      includePromptCacheFields = false;
+    if (promptCacheStrategy !== "none" && shouldRetryWithoutPromptCacheFields(result.response.status, result.responseText)) {
+      promptCacheStrategy = "none";
       console.warn("[BYOK Agent] Provider rejected prompt cache fields; retrying without them.");
       continue;
     }
@@ -149,7 +157,7 @@ export async function requestAgentStep(
     throw new ModelClientError(data.error?.message || "The model response did not include content.", undefined, usage);
   }
 
-  logTokenUsage(settings.provider, data.usage);
+  logTokenUsage(settings, data.usage, promptCacheStrategy);
   return {
     response: parseAgentJson(content, usage),
     usage
@@ -162,7 +170,7 @@ async function postChatCompletion(args: {
   messages: ChatMessage[];
   signal: AbortSignal;
   includeResponseFormat: boolean;
-  includePromptCacheFields: boolean;
+  promptCacheStrategy: PromptCacheStrategy;
 }): Promise<{ response: Response; responseText: string }> {
   const body: Record<string, unknown> = {
     model: args.settings.model,
@@ -170,9 +178,11 @@ async function postChatCompletion(args: {
     temperature: 0.2
   };
 
-  if (args.includePromptCacheFields) {
+  if (args.promptCacheStrategy === "openai") {
     body.prompt_cache_key = buildPromptCacheKey(args.settings, args.messages);
     body.prompt_cache_retention = "in_memory";
+  } else if (args.promptCacheStrategy === "automatic-prefix") {
+    body.cache_salt = buildPromptCacheKey(args.settings, args.messages);
   }
 
   if (args.includeResponseFormat) {
@@ -185,7 +195,7 @@ async function postChatCompletion(args: {
     promptCacheMode: args.settings.promptCacheMode || "auto",
     body,
     messages: args.messages,
-    includePromptCacheFields: args.includePromptCacheFields,
+    promptCacheStrategy: args.promptCacheStrategy,
     includeResponseFormat: args.includeResponseFormat
   });
 
@@ -211,7 +221,7 @@ function logAiRequestPayload(args: {
   promptCacheMode: AgentSettings["promptCacheMode"];
   body: Record<string, unknown>;
   messages: ChatMessage[];
-  includePromptCacheFields: boolean;
+  promptCacheStrategy: PromptCacheStrategy;
   includeResponseFormat: boolean;
 }): void {
   const payload = {
@@ -228,9 +238,17 @@ function logAiRequestPayload(args: {
   console.groupCollapsed(
     `[BYOK Agent] Full AI request payload (${args.provider}, response_format=${
       args.includeResponseFormat ? "on" : "off"
-    }, prompt_cache=${args.includePromptCacheFields ? "on" : "off"}, cache_mode=${args.promptCacheMode})`
+    }, prompt_cache=${args.promptCacheStrategy}, cache_mode=${args.promptCacheMode})`
   );
-  console.info("Prompt cache plan:", buildPromptCacheDebugInfo(args.messages, args.body.prompt_cache_key, args.promptCacheMode));
+  console.info(
+    "Prompt cache plan:",
+    buildPromptCacheDebugInfo(
+      args.messages,
+      args.body.prompt_cache_key || args.body.cache_salt,
+      args.promptCacheMode,
+      args.promptCacheStrategy
+    )
+  );
   console.info(payload);
   console.info("Request body JSON:", JSON.stringify(args.body, null, 2));
   console.groupEnd();
@@ -241,7 +259,7 @@ function shouldRetryWithoutResponseFormat(status: number, body: string): boolean
 }
 
 function shouldRetryWithoutPromptCacheFields(status: number, body: string): boolean {
-  return (status === 400 || status === 422) && /prompt_cache_key|prompt_cache_retention|prompt cache|prompt caching/i.test(body);
+  return (status === 400 || status === 422) && /prompt_cache_key|prompt_cache_retention|cache_salt|prompt cache|prompt caching|prefix cach/i.test(body);
 }
 
 function getRequestTimeoutMs(settings: AgentSettings): number {
@@ -252,15 +270,22 @@ function getRequestTimeoutMs(settings: AgentSettings): number {
   return seconds * 1000;
 }
 
-function shouldUsePromptCacheFields(settings: AgentSettings): boolean {
+function getPromptCacheStrategy(settings: AgentSettings): PromptCacheStrategy {
   const mode = settings.promptCacheMode || "auto";
   if (mode === "off") {
-    return false;
+    return "none";
+  }
+  if (isAutomaticPrefixCacheModel(settings.model)) {
+    return "automatic-prefix";
   }
   if (mode === "on") {
-    return true;
+    return "openai";
   }
-  return settings.provider === "openai" || settings.provider === "custom";
+  return settings.provider === "openai" || settings.provider === "custom" ? "openai" : "none";
+}
+
+function isAutomaticPrefixCacheModel(model: string): boolean {
+  return AUTOMATIC_PREFIX_CACHE_MODELS.has(model.trim().toLowerCase());
 }
 
 function buildPromptCacheKey(settings: AgentSettings, messages: ChatMessage[]): string {
@@ -272,13 +297,15 @@ function buildPromptCacheKey(settings: AgentSettings, messages: ChatMessage[]): 
 function buildPromptCacheDebugInfo(
   messages: ChatMessage[],
   promptCacheKey: unknown,
-  promptCacheMode: AgentSettings["promptCacheMode"]
+  promptCacheMode: AgentSettings["promptCacheMode"],
+  strategy: PromptCacheStrategy
 ): Record<string, unknown> {
   const stablePrefix = getStablePromptPrefix(messages);
   const staticInstructions = getStaticInstructionPrefix(messages);
   return {
     mode: promptCacheMode,
-    active: typeof promptCacheKey === "string",
+    strategy,
+    active: strategy !== "none",
     providerCacheKey: typeof promptCacheKey === "string" ? promptCacheKey : undefined,
     staticInstructionCharacters: staticInstructions.length,
     estimatedStaticInstructionTokens: Math.ceil(staticInstructions.length / 4),
@@ -286,7 +313,9 @@ function buildPromptCacheDebugInfo(
     stablePrefixCharacters: stablePrefix.length,
     estimatedStablePrefixTokens: Math.ceil(stablePrefix.length / 4),
     note:
-      "The cache key is shared across tasks with identical system instructions. Static instructions and task remain before changing page observations so provider-side prefix caches can reuse the longest exact match."
+      strategy === "automatic-prefix"
+        ? "This model uses server-side automatic KV prefix caching. cache_salt keeps requests on the same cache partition, but the inference server must enable prefix caching."
+        : "The cache key is shared across tasks with identical system instructions. Static instructions and task remain before changing page observations so provider-side prefix caches can reuse the longest exact match."
   };
 }
 
@@ -311,7 +340,11 @@ function shortHash(value: string): string {
   return (hash >>> 0).toString(36);
 }
 
-function logTokenUsage(provider: AgentSettings["provider"], usage: ChatUsage | undefined): void {
+function logTokenUsage(
+  settings: AgentSettings,
+  usage: ChatUsage | undefined,
+  promptCacheStrategy: PromptCacheStrategy
+): void {
   if (!usage) {
     return;
   }
@@ -323,13 +356,22 @@ function logTokenUsage(provider: AgentSettings["provider"], usage: ChatUsage | u
       : undefined;
 
   console.info("[BYOK Agent] AI token usage:", {
-    provider,
+    provider: settings.provider,
+    model: settings.model,
+    promptCacheStrategy,
+    cacheTelemetryAvailable: typeof cachedTokens === "number",
     promptTokens: usage.prompt_tokens,
     cachedPromptTokens: cachedTokens,
     promptCacheHitRate: cacheRate,
     completionTokens: usage.completion_tokens,
     totalTokens: usage.total_tokens
   });
+
+  if (promptCacheStrategy === "automatic-prefix" && typeof cachedTokens !== "number") {
+    console.info(
+      "[BYOK Agent] The gateway did not return cached-token telemetry. Verify automatic prefix cache hits in the inference-server metrics or time-to-first-token logs."
+    );
+  }
 }
 
 function logAiResponseTiming(
@@ -359,8 +401,13 @@ function isAbortError(error: unknown): boolean {
 function getCachedTokenCount(usage: ChatUsage): number | undefined {
   const candidates = [
     usage.prompt_tokens_details?.cached_tokens,
+    usage.prompt_tokens_details?.cache_read_tokens,
+    usage.prompt_tokens_details?.prefix_cached_tokens,
     usage.input_tokens_details?.cached_tokens,
-    usage.input_tokens_details?.cache_read
+    usage.input_tokens_details?.cache_read,
+    usage.cached_tokens,
+    usage.cached_prompt_tokens,
+    usage.num_cached_tokens
   ];
 
   return candidates.find((value): value is number => typeof value === "number");

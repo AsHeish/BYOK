@@ -71,7 +71,7 @@ The side-panel settings support:
 - `model`: any model name accepted by the configured compatible endpoint.
 - `maxSteps`: maximum observe/act loop iterations, default `60`.
 - `requestTimeoutSeconds`: AI request timeout per attempt, default `60`.
-- `promptCacheMode`: `auto` sends cache hints for OpenAI and custom endpoints, `on` sends them for any provider, and `off` disables explicit cache hints.
+- `promptCacheMode`: `auto` selects cache hints by provider and model, `on` forces cache hints, and `off` disables them.
 - Optional token pricing rates: input, cached input, and output USD per 1M tokens for the dashboard cost estimate.
 - Named AI profiles: save the current provider/base URL/API key/model/max steps/timeout/cache mode/pricing under a name, then apply or delete profiles from Settings.
 
@@ -86,9 +86,12 @@ The agent structures model requests for provider-side prefix caching:
 - The user's task is sent as a stable message that remains unchanged during a run.
 - Changing step data, previous results, and page observations are sent last.
 - OpenAI and custom provider requests include `prompt_cache_key` and `prompt_cache_retention: "in_memory"` when prompt cache mode is `auto`.
+- `qwen-3.6-27b` and `gemma-4-31b` use the automatic-prefix strategy and send a stable vLLM-compatible `cache_salt` instead of OpenAI retention fields.
 - Prompt cache mode `on` forces those cache hints for any provider; `off` omits them.
-- If a compatible endpoint rejects OpenAI cache fields, the request is retried without them.
-- The background console logs `cachedPromptTokens` and `promptCacheHitRate` when the provider returns cache usage.
+- If a compatible endpoint rejects cache fields, the request is retried without them.
+- The background console logs `cachedPromptTokens` and `promptCacheHitRate` when the provider returns OpenAI, vLLM, or compatible cache usage fields.
+
+Automatic prefix caching for Qwen and Gemma must also be enabled on the inference server. For vLLM, start the model server with `--enable-prefix-caching`. The gateway must route repeated requests to a worker that shares the same KV cache; a client request field cannot enable or share GPU KV storage by itself. If the server omits cached-token telemetry, compare time-to-first-token or inspect server prefix-cache metrics to verify hits.
 
 OpenAI-compatible APIs are still stateless, so the extension must send the full current prompt on every step. The cache benefit comes from the model provider reusing repeated prefix tokens internally.
 

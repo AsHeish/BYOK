@@ -277,7 +277,7 @@ export function SettingsPanel({
               })
             }
           >
-            <option value="auto">Auto: OpenAI + custom</option>
+            <option value="auto">Auto: provider/model aware</option>
             <option value="on">On: send cache hints</option>
             <option value="off">Off</option>
           </select>
