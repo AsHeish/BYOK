@@ -9,6 +9,7 @@ import {
   ModelClientError,
   requestAgentStep,
   sanitizeMessagesForLogging,
+  type ChatMessage,
   type ModelRequestNotice,
 } from "./modelClient";
 import { extractPdfText } from "./pdfText";
@@ -19,18 +20,29 @@ import {
   updateRequirements as updateRunRequirements,
 } from "./runLedger";
 import { advanceDomStability } from "./wait";
+import { getTabIdsForGrouping } from "./tabGrouping";
+import {
+  buildContextualChatInstruction,
+  buildContinuationInstruction,
+  getConsolePlanSummary,
+} from "./chatRouting";
 
 import { dataUrlToUint8Array, formatFileSize } from "../shared/fileData";
-import { MAX_LOG_ENTRIES, MAX_TRACKED_TABS } from "../shared/defaults";
+import { MAX_CHAT_MESSAGES, MAX_LOG_ENTRIES, MAX_TRACKED_TABS } from "../shared/defaults";
 import { createId } from "../shared/ids";
 import {
+  clearChatMessages,
+  loadChatMessages,
   loadSettings,
   loadStagedUploadFile,
   markInterruptedRunReports,
+  saveChatMessages,
   saveRunReport,
 } from "../shared/storage";
 import type {
   AgentAction,
+  AgentChatMessage,
+  AgentSettings,
   AgentLogEntry,
   AgentModelResponse,
   AgentRequirementProposal,
@@ -53,10 +65,12 @@ import type {
 
 interface RunningSession {
   taskId: string;
+  instruction: string;
   activeTabId: number;
   activeTabAlias: string;
   windowId?: number;
   tabGroupId?: number;
+  tabGroupQueue: Promise<void>;
   tabs: AgentTabState[];
   run: RunReport;
   pendingDocument?: FullPageDocument;
@@ -81,10 +95,21 @@ interface AgentTabState {
 }
 
 let runningSession: RunningSession | undefined;
+let directChatTaskId: string | undefined;
+let pendingChatContinuation: { instruction: string; question: string } | undefined;
 let logs: AgentLogEntry[] = [];
+let chatMessages: AgentChatMessage[] = [];
 let usageSnapshot: AgentUsageSnapshot = createEmptyUsageSnapshot();
 let runReportWriteQueue: Promise<void> = Promise.resolve();
+let chatMessageWriteQueue: Promise<void> = Promise.resolve();
 const historyDisabledRunIds = new Set<string>();
+const chatMessagesReady = loadChatMessages()
+  .then((messages) => {
+    chatMessages = messages;
+  })
+  .catch((error: unknown) => {
+    console.warn("Could not load chat messages.", error);
+  });
 
 const SIDE_PANEL_PATH = "sidepanel.html";
 const MAX_ACTIONS_PER_AGENT_STEP = 10;
@@ -207,19 +232,32 @@ async function openSidePanelInLastFocusedWindow(): Promise<void> {
 }
 
 async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Promise<unknown> {
+  await chatMessagesReady;
   switch (message.type) {
+    case "SIDEPANEL_SEND_CHAT":
+      void startTask(message.message, "chat");
+      return { ok: true };
+
     case "SIDEPANEL_RUN_TASK":
-      void startTask(message.task);
+      void startTask(message.task, "run");
       return { ok: true };
 
     case "SIDEPANEL_STOP_TASK":
       stopCurrentTask("Stopped by user.", "stopped");
       return { ok: true };
 
+    case "SIDEPANEL_CLEAR_CHAT":
+      chatMessages = [];
+      pendingChatContinuation = undefined;
+      await enqueueChatMessagesClear();
+      notifySidePanel({ type: "AGENT_CHAT_CLEARED" } satisfies BackgroundToSidePanelMessage);
+      return { ok: true };
+
     case "SIDEPANEL_GET_STATE":
       return {
-        running: Boolean(runningSession && !runningSession.stopped),
+        running: Boolean((runningSession && !runningSession.stopped) || directChatTaskId),
         logs: logs.filter((entry) => !isHiddenActionLog(entry.message)),
+        chatMessages,
         usage: usageSnapshot
       };
 
@@ -228,25 +266,37 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
   }
 }
 
-async function startTask(task: string): Promise<void> {
-  if (!task.trim()) {
+async function startTask(task: string, source: "chat" | "run"): Promise<void> {
+  const submittedTask = task.trim();
+  if (!submittedTask) {
     appendLog("warning", "Enter a task first.");
     return;
   }
 
-  if (runningSession) {
+  if (runningSession || directChatTaskId) {
     stopCurrentTask("Starting a new task.");
   }
 
   const taskId = createId("task");
+  const priorChatMessages = chatMessages.slice(-10);
+  const continuation = source === "chat" ? pendingChatContinuation : undefined;
+  const agentInstruction = continuation
+    ? buildContinuationInstruction(continuation, submittedTask)
+    : source === "chat"
+      ? buildContextualChatInstruction(priorChatMessages, submittedTask)
+      : submittedTask;
+  if (source === "chat") {
+    pendingChatContinuation = undefined;
+  }
+  appendChatMessage("user", submittedTask, "message", taskId);
   try {
     const settings = await loadSettings();
     if (!settings.apiKey.trim()) {
-      appendLog("error", "Add an API key in Settings before running a task.");
+      reportTaskError(taskId, "Add an API key in Settings before running a task.");
       return;
     }
     if (!settings.model.trim()) {
-      appendLog("error", "Add a model name in Settings before running a task.");
+      reportTaskError(taskId, "Add a model name in Settings before running a task.");
       return;
     }
     if (settings.saveRunHistory) {
@@ -257,17 +307,20 @@ async function startTask(task: string): Promise<void> {
 
     const tab = await getActiveTab();
     if (!tab?.id || !isSupportedTabUrl(tab.url)) {
-      appendLog("error", "Open an http(s) webpage before running the agent. Browser internal pages are blocked.");
+      if (source === "chat" && !continuation) {
+        await answerDirectChat(submittedTask, priorChatMessages, taskId, settings);
+        return;
+      }
+      reportTaskError(taskId, "Open an http(s) webpage before running the agent. Browser internal pages are blocked.");
       return;
     }
 
     usageSnapshot = createEmptyUsageSnapshot(settings);
-    runningSession = createRunningSession(taskId, task, tab, usageSnapshot);
-    await ensureSessionTabGroup(runningSession, [tab.id]);
+    runningSession = createRunningSession(taskId, submittedTask, agentInstruction, tab, usageSnapshot);
     await persistRunReport(runningSession.run);
     emitUsage();
     emitStatus();
-    appendLog("info", `Task started on ${new URL(tab.url).hostname} as tab-1 in the "${AGENT_TAB_GROUP_TITLE}" tab group.`);
+    appendLog("info", `Task started on ${new URL(tab.url).hostname} as tab-1.`);
 
     let previousResult: string | undefined;
     const completedInputActions = new Set<string>();
@@ -296,7 +349,7 @@ async function startTask(task: string): Promise<void> {
       const screenshotContext = session.visionDisabled ? undefined : session.pendingScreenshot;
 
       const promptArgs = {
-        task,
+        task: agentInstruction,
         observation,
         step,
         maxSteps: settings.maxSteps,
@@ -356,11 +409,11 @@ async function startTask(task: string): Promise<void> {
         throw error;
       }
 
-      initializeRequirements(session, task, modelResponse.requirements);
+      initializeRequirements(session, agentInstruction, modelResponse.requirements);
       applyRequirementUpdates(session, modelResponse.requirementUpdates);
       const plannedActions = getPlannedActions(modelResponse);
 
-      appendLog("info", `${modelResponse.thought_summary} Next: ${formatActions(plannedActions)}.`);
+      appendLog("info", `${getConsolePlanSummary(modelResponse, plannedActions)} Next: ${formatActions(plannedActions)}.`);
 
       // Safety checks removed — all actions proceed unconditionally.
 
@@ -377,7 +430,9 @@ async function startTask(task: string): Promise<void> {
     }
 
     if (!isStopped(taskId) && runningSession?.taskId === taskId && runningSession.run.status === "running") {
-      finishRun(runningSession, "step_limit", "The task reached the configured maximum number of steps.");
+      const message = "The task reached the configured maximum number of steps before it could finish.";
+      finishRun(runningSession, "step_limit", message);
+      appendChatMessage("assistant", message, "error", taskId);
       appendLog("info", "Task loop finished.");
     }
   } catch (error) {
@@ -385,7 +440,7 @@ async function startTask(task: string): Promise<void> {
     if (runningSession?.taskId === taskId && runningSession.run.status === "running") {
       finishRun(runningSession, "failed", message);
     }
-    appendLog("error", message);
+    reportTaskError(taskId, message);
   } finally {
     if (runningSession?.taskId === taskId) {
       await persistRunReport(runningSession.run);
@@ -565,9 +620,10 @@ async function handleSingleAction(
     }
 
     finishRun(session, action.outcome === "partial" ? "partial" : "completed", undefined, finalReport);
+    appendChatMessage("assistant", finalReport, "answer", session.taskId);
     return {
       ok: true,
-      message: finalReport,
+      message: "Task completed. The final response is available in Chat.",
       shouldStop: true,
       completedActions: [],
       lastObservation: observation,
@@ -577,9 +633,11 @@ async function handleSingleAction(
   if (action.type === "ask_user") {
     const message = action.text || modelResponse.thought_summary || "The agent needs input from you.";
     finishRun(session, "blocked", message, message);
+    pendingChatContinuation = { instruction: session.instruction, question: message };
+    appendChatMessage("assistant", message, "question", session.taskId);
     return {
       ok: true,
-      message,
+      message: "The agent is waiting for a response in Chat.",
       shouldStop: true,
       completedActions: []
     };
@@ -871,6 +929,7 @@ function sendWaitCheck(
 function createRunningSession(
   taskId: string,
   task: string,
+  instruction: string,
   tab: chrome.tabs.Tab,
   usage: AgentUsageSnapshot,
 ): RunningSession {
@@ -892,9 +951,11 @@ function createRunningSession(
 
   return {
     taskId,
+    instruction,
     activeTabId: tab.id,
     activeTabAlias: initialTab.alias,
     windowId: tab.windowId,
+    tabGroupQueue: Promise.resolve(),
     tabs: [initialTab],
     run: {
       id: taskId,
@@ -967,7 +1028,21 @@ function addTrackedTab(session: RunningSession, tab: chrome.tabs.Tab, origin: Ag
   return trackedTab;
 }
 
-async function ensureSessionTabGroup(session: RunningSession, tabIds: number[]): Promise<boolean> {
+function ensureSessionTabGroup(session: RunningSession, requestedTabIds: number[]): Promise<boolean> {
+  const operation = session.tabGroupQueue.then(() => addTabsToSessionGroup(session, requestedTabIds));
+  session.tabGroupQueue = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
+}
+
+async function addTabsToSessionGroup(session: RunningSession, requestedTabIds: number[]): Promise<boolean> {
+  const tabIds = getTabIdsForGrouping(
+    session.tabs.map((tab) => tab.tabId),
+    requestedTabIds,
+    session.tabGroupId,
+  );
   if (!chrome.tabs.group || tabIds.length === 0) {
     return false;
   }
@@ -980,7 +1055,11 @@ async function ensureSessionTabGroup(session: RunningSession, tabIds: number[]):
 
     if (session.tabGroupId === undefined) {
       session.tabGroupId = groupId;
-      await chrome.tabGroups?.update(groupId, { title: AGENT_TAB_GROUP_TITLE, color: AGENT_TAB_GROUP_COLOR });
+      try {
+        await chrome.tabGroups?.update(groupId, { title: AGENT_TAB_GROUP_TITLE, color: AGENT_TAB_GROUP_COLOR });
+      } catch (error) {
+        console.warn("[BYOK Agent] Could not label the agent tab group.", error);
+      }
     }
 
     return true;
@@ -1013,7 +1092,7 @@ async function moveTabIntoSessionWindow(
 
 function assertOwnedTabId(session: RunningSession, tabId: number): void {
   if (!session.tabs.some((tab) => tab.tabId === tabId)) {
-    throw new Error(`Tab ${tabId} is not in the agent tab group. The agent may only use tabs it opened.`);
+    throw new Error(`Tab ${tabId} is not owned by the current agent run. The agent may only use tabs it opened.`);
   }
 }
 
@@ -1188,7 +1267,19 @@ async function openTrackedTab(session: RunningSession, url?: string): Promise<Co
   }
 
   const trackedTab = addTrackedTab(session, { ...tab, url: tab.url || parsed.toString() }, "agent");
-  await ensureSessionTabGroup(session, [trackedTab.tabId]);
+  if (!(await ensureSessionTabGroup(session, [trackedTab.tabId]))) {
+    session.tabs = session.tabs.filter((existingTab) => existingTab.tabId !== trackedTab.tabId);
+    try {
+      await chrome.tabs.remove(trackedTab.tabId);
+    } catch {
+      // The new tab may already have been closed by the browser or user.
+    }
+    return {
+      ok: false,
+      recoverable: true,
+      message: "Could not create the agent tab group, so the new tab was closed.",
+    };
+  }
   setActiveTrackedTab(session, trackedTab);
   await waitForTabToSettle(trackedTab.tabId);
 
@@ -1382,7 +1473,7 @@ async function summarizeCurrentPage(session: RunningSession, instruction?: strin
   return {
     ok: true,
     observation,
-    message: `Page summary:\n${summary}`
+    message: `Prepared a summary of ${document.title || observation.title || observation.url} for the final response.`
   };
 }
 
@@ -1429,7 +1520,7 @@ async function summarizePdf(session: RunningSession, action: AgentAction): Promi
 
   return {
     ok: true,
-    message: `PDF summary (${sourceDetails}):\n${summary}`
+    message: `Prepared a PDF summary (${sourceDetails}) for the final response.`
   };
 }
 
@@ -1940,6 +2031,11 @@ function stopCurrentTask(reason: string, status: Exclude<RunStatus, "running"> =
     appendLog("warning", reason);
   }
 
+  if (directChatTaskId) {
+    directChatTaskId = undefined;
+    appendLog("warning", reason);
+  }
+
   emitStatus();
 }
 
@@ -1957,6 +2053,103 @@ function appendLog(level: AgentLogEntry["level"], message: string): void {
 
   logs = [...logs, entry].slice(-MAX_LOG_ENTRIES);
   notifySidePanel({ type: "AGENT_LOG", entry } satisfies BackgroundToSidePanelMessage);
+}
+
+function appendChatMessage(
+  role: AgentChatMessage["role"],
+  content: string,
+  kind: AgentChatMessage["kind"],
+  runId?: string,
+): void {
+  const message: AgentChatMessage = {
+    id: createId("chat"),
+    role,
+    content,
+    kind,
+    timestamp: Date.now(),
+    runId,
+  };
+
+  chatMessages = [...chatMessages, message].slice(-MAX_CHAT_MESSAGES);
+  void enqueueChatMessagesSave(chatMessages).catch((error: unknown) => {
+    console.warn("Could not persist chat messages.", error);
+  });
+  notifySidePanel({ type: "AGENT_CHAT_MESSAGE", message } satisfies BackgroundToSidePanelMessage);
+}
+
+function enqueueChatMessagesSave(messages: AgentChatMessage[]): Promise<void> {
+  const snapshot = messages.map((message) => ({ ...message }));
+  chatMessageWriteQueue = chatMessageWriteQueue
+    .catch(() => undefined)
+    .then(() => saveChatMessages(snapshot));
+  return chatMessageWriteQueue;
+}
+
+function enqueueChatMessagesClear(): Promise<void> {
+  chatMessageWriteQueue = chatMessageWriteQueue
+    .catch(() => undefined)
+    .then(() => clearChatMessages());
+  return chatMessageWriteQueue;
+}
+
+function reportTaskError(taskId: string, message: string): void {
+  appendLog("error", message);
+  appendChatMessage("assistant", message, "error", taskId);
+}
+
+async function answerDirectChat(
+  instruction: string,
+  priorMessages: AgentChatMessage[],
+  taskId: string,
+  settings: AgentSettings,
+): Promise<void> {
+  directChatTaskId = taskId;
+  usageSnapshot = createEmptyUsageSnapshot(settings);
+  emitUsage();
+  emitStatus();
+  appendLog("info", "Answering a conversational request without browser access.");
+
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content: [
+        "You are the conversational mode of a BYOK browser agent.",
+        "Answer the user directly without claiming to inspect or control a webpage.",
+        "Return strict JSON only using this schema:",
+        '{"thought_summary":"short summary","risk_level":"low","action":{"type":"done","outcome":"completed","text":"the complete user-facing answer"}}',
+        "The action text may contain Markdown.",
+      ].join("\n"),
+    },
+    ...priorMessages.map((message): ChatMessage => ({
+      role: message.role,
+      content: message.content,
+    })),
+    { role: "user", content: instruction },
+  ];
+
+  try {
+    const result = await requestAgentStep(settings, messages, reportModelNotice);
+    recordUsageEvent(result.usage, settings);
+    if (directChatTaskId !== taskId) {
+      return;
+    }
+    const doneAction = getPlannedActions(result.response).find((action) => action.type === "done");
+    const answer = doneAction?.text || result.response.thought_summary;
+    appendChatMessage("assistant", answer || "I could not produce an answer.", "answer", taskId);
+    appendLog("success", "Conversational response sent to Chat.");
+  } catch (error) {
+    if (error instanceof ModelClientError && error.usage) {
+      recordUsageEvent(error.usage, settings);
+    }
+    if (directChatTaskId === taskId) {
+      reportTaskError(taskId, getErrorMessage(error));
+    }
+  } finally {
+    if (directChatTaskId === taskId) {
+      directChatTaskId = undefined;
+      emitStatus();
+    }
+  }
 }
 
 function logPromptBeforeModelCall(step: number, messages: ReturnType<typeof buildAgentMessages>): void {
@@ -1983,8 +2176,8 @@ function isHiddenActionLog(message: string): boolean {
 function emitStatus(): void {
   notifySidePanel({
     type: "AGENT_STATUS",
-    running: Boolean(runningSession && !runningSession.stopped),
-    taskId: runningSession?.taskId
+    running: Boolean((runningSession && !runningSession.stopped) || directChatTaskId),
+    taskId: runningSession?.taskId || directChatTaskId
   } satisfies BackgroundToSidePanelMessage);
 }
 

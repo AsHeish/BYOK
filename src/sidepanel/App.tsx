@@ -1,4 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  MessageCircle,
+  History as HistoryIcon,
+  Moon,
+  Play,
+  Settings2,
+  ShieldCheck,
+  SquareTerminal,
+  Sun
+} from "lucide-react";
 import { DEFAULT_SETTINGS } from "../shared/defaults";
 import {
   RUN_REPORTS_KEY,
@@ -9,6 +19,7 @@ import {
   saveSettings,
 } from "../shared/storage";
 import type {
+  AgentChatMessage,
   AgentLogEntry,
   AgentSettings,
   AgentUsageSnapshot,
@@ -17,17 +28,19 @@ import type {
   SidePanelToBackgroundMessage
 } from "../shared/types";
 import { ActionLog } from "./components/ActionLog";
+import { ChatPanel } from "./components/ChatPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { TaskRunner } from "./components/TaskRunner";
 import { UsageDashboard } from "./components/UsageDashboard";
 import { RunHistory } from "./components/RunHistory";
 
-type View = "run" | "history" | "console" | "settings";
+type View = "chat" | "run" | "history" | "console" | "settings";
 
 export function App() {
-  const [view, setView] = useState<View>("run");
+  const [view, setView] = useState<View>("chat");
   const [settings, setSettings] = useState<AgentSettings>(DEFAULT_SETTINGS);
   const [logs, setLogs] = useState<AgentLogEntry[]>([]);
+  const [chatMessages, setChatMessages] = useState<AgentChatMessage[]>([]);
   const [usage, setUsage] = useState<AgentUsageSnapshot>(createEmptyUsageSnapshot());
   const [reports, setReports] = useState<RunReport[]>([]);
   const [running, setRunning] = useState(false);
@@ -40,6 +53,7 @@ export function App() {
       if (isAgentState(state)) {
         setRunning(state.running);
         setLogs(filterHiddenActionLogs(state.logs));
+        setChatMessages(state.chatMessages || []);
         setUsage(state.usage || createEmptyUsageSnapshot());
       }
     });
@@ -49,6 +63,15 @@ export function App() {
         if (!isHiddenActionLog(message.entry.message)) {
           setLogs((current) => [...current, message.entry].slice(-80));
         }
+      }
+      if (message.type === "AGENT_CHAT_MESSAGE") {
+        setChatMessages((current) => [...current, message.message].slice(-100));
+        if (message.message.role === "assistant") {
+          setView((current) => current === "run" ? "chat" : current);
+        }
+      }
+      if (message.type === "AGENT_CHAT_CLEARED") {
+        setChatMessages([]);
       }
       if (message.type === "AGENT_STATUS") {
         setRunning(message.running);
@@ -98,8 +121,18 @@ export function App() {
     await sendBackgroundMessage({ type: "SIDEPANEL_RUN_TASK", task });
   }
 
+  async function handleChat(message: string) {
+    setNotice(undefined);
+    await sendBackgroundMessage({ type: "SIDEPANEL_SEND_CHAT", message });
+  }
+
   async function handleStop() {
     await sendBackgroundMessage({ type: "SIDEPANEL_STOP_TASK" });
+  }
+
+  async function handleClearChat() {
+    await sendBackgroundMessage({ type: "SIDEPANEL_CLEAR_CHAT" });
+    setChatMessages([]);
   }
 
   async function handleRerun(task: string) {
@@ -131,44 +164,58 @@ export function App() {
             {running ? "Running" : hasApiKey ? "Ready" : "Needs settings"}
           </p>
         </div>
-        <div className="top-actions">
-          <button
-            className="theme-toggle"
-            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-            onClick={() => void handleToggleTheme()}
-          >
-            <span className="theme-toggle-track">
-              <span className="theme-toggle-thumb" />
-            </span>
-            <span>{theme === "dark" ? "Dark" : "Light"}</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          className="theme-toggle"
+          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+          title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+          onClick={() => void handleToggleTheme()}
+        >
+          <span className="theme-toggle-track" aria-hidden="true">
+            <span className="theme-toggle-thumb" />
+          </span>
+          {theme === "dark" ? <Moon size={15} /> : <Sun size={15} />}
+          <span>{theme === "dark" ? "Dark" : "Light"}</span>
+        </button>
       </header>
 
       <nav className="tabs" aria-label="Side panel views">
-        <button className={view === "run" ? "active" : ""} onClick={() => setView("run")}>
-          Run
+        <button type="button" className={view === "chat" ? "active" : ""} onClick={() => setView("chat")}>
+          <MessageCircle aria-hidden="true" />
+          <span>Chat</span>
         </button>
-        <button className={view === "history" ? "active" : ""} onClick={() => setView("history")}>
-          History
+        <button type="button" className={view === "run" ? "active" : ""} onClick={() => setView("run")}>
+          <Play aria-hidden="true" />
+          <span>Run</span>
         </button>
-        <button className={view === "console" ? "active" : ""} onClick={() => setView("console")}>
-          Console
+        <button type="button" className={view === "history" ? "active" : ""} onClick={() => setView("history")}>
+          <HistoryIcon aria-hidden="true" />
+          <span>History</span>
         </button>
-        <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>
-          Settings
+        <button type="button" className={view === "console" ? "active" : ""} onClick={() => setView("console")}>
+          <SquareTerminal aria-hidden="true" />
+          <span>Console</span>
+        </button>
+        <button type="button" className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>
+          <Settings2 aria-hidden="true" />
+          <span>Settings</span>
         </button>
       </nav>
 
       {notice ? <div className="notice">{notice}</div> : null}
 
-      <div className={`view-scroll ${view === "run" ? "run-view" : view === "history" ? "history-view" : view === "console" ? "console-view" : "settings-view"}`}>
-        {view === "run" ? (
-          <>
-            <TaskRunner running={running} disabled={!hasApiKey} onRun={handleRun} onStop={handleStop} />
-            <ActionLog logs={logs} />
-          </>
+      <div className={`view-scroll ${view}-view`}>
+        {view === "chat" ? (
+          <ChatPanel
+            messages={chatMessages}
+            running={running}
+            disabled={!hasApiKey}
+            onSend={handleChat}
+            onStop={handleStop}
+            onClear={handleClearChat}
+          />
+        ) : view === "run" ? (
+          <TaskRunner running={running} disabled={!hasApiKey} onRun={handleRun} onStop={handleStop} />
         ) : view === "history" ? (
           <RunHistory
             reports={reports}
@@ -178,11 +225,30 @@ export function App() {
             onClear={handleClearRuns}
           />
         ) : view === "console" ? (
-          <UsageDashboard usage={usage} />
+          <>
+            <UsageDashboard usage={usage} />
+            <ActionLog logs={logs} />
+          </>
         ) : (
           <SettingsPanel settings={settings} onChange={setSettings} onSave={handleSaveSettings} />
         )}
       </div>
+
+      <footer className="privacy-bar">
+        <div className="privacy-status">
+          <span className="privacy-icon" aria-hidden="true">
+            <ShieldCheck />
+          </span>
+          <span className="privacy-copy">
+            <strong>Local BYOK</strong>
+            <span>{hasApiKey ? `${settings.provider} / ${settings.model}` : "API key required"}</span>
+          </span>
+        </div>
+        <button type="button" className="footer-settings" onClick={() => setView("settings")}>
+          <Settings2 aria-hidden="true" />
+          <span>Settings</span>
+        </button>
+      </footer>
     </main>
   );
 }
@@ -203,6 +269,7 @@ function sendBackgroundMessage(message: SidePanelToBackgroundMessage): Promise<u
 function isAgentState(value: unknown): value is {
   running: boolean;
   logs: AgentLogEntry[];
+  chatMessages?: AgentChatMessage[];
   usage?: AgentUsageSnapshot;
 } {
   return value !== null && typeof value === "object" && "running" in value && "logs" in value;

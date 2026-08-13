@@ -1,5 +1,11 @@
-import { DEFAULT_SETTINGS } from "./defaults";
+import {
+  DEFAULT_CHAT_SUGGESTIONS,
+  DEFAULT_SETTINGS,
+  MAX_CHAT_MESSAGES,
+  MAX_CHAT_SUGGESTIONS,
+} from "./defaults";
 import type {
+  AgentChatMessage,
   AgentSettings,
   AgentUsageSnapshot,
   AiConfigurationProfile,
@@ -17,6 +23,8 @@ import type {
 
 const SETTINGS_KEY = "byokAgentSettings";
 const TASK_DRAFT_KEY = "byokAgentTaskDraft";
+const CHAT_MESSAGES_KEY = "byokAgentChatMessages";
+const CHAT_SUGGESTIONS_KEY = "byokAgentChatSuggestions";
 const CONFIG_PROFILES_KEY = "byokAgentConfigProfiles";
 const STAGED_UPLOAD_FILE_KEY = "byokAgentStagedUploadFile";
 export const RUN_REPORTS_KEY = "byokAgentRunReports";
@@ -33,6 +41,8 @@ const MAX_FINDINGS_PER_RUN = 200;
 const MAX_FINAL_REPORT_CHARS = 60_000;
 const MAX_FINDING_TEXT_CHARS = 8_000;
 const MAX_EVIDENCE_SUMMARY_CHARS = 1_000;
+const MAX_CHAT_MESSAGE_CHARS = 60_000;
+const MAX_CHAT_SUGGESTION_CHARS = 240;
 
 function normalizeProvider(value: unknown): Provider {
   if (
@@ -137,6 +147,40 @@ export async function saveTaskDraft(task: string): Promise<void> {
   await chrome.storage.local.set({
     [TASK_DRAFT_KEY]: task,
   });
+}
+
+export async function loadChatMessages(): Promise<AgentChatMessage[]> {
+  const stored = await chrome.storage.local.get(CHAT_MESSAGES_KEY);
+  return normalizeChatMessages(stored[CHAT_MESSAGES_KEY]);
+}
+
+export async function saveChatMessages(messages: AgentChatMessage[]): Promise<void> {
+  await chrome.storage.local.set({
+    [CHAT_MESSAGES_KEY]: normalizeChatMessages(messages),
+  });
+}
+
+export async function clearChatMessages(): Promise<void> {
+  await chrome.storage.local.remove(CHAT_MESSAGES_KEY);
+}
+
+export async function loadChatSuggestions(): Promise<string[]> {
+  const stored = await chrome.storage.local.get(CHAT_SUGGESTIONS_KEY);
+  if (stored[CHAT_SUGGESTIONS_KEY] === undefined) {
+    return [...DEFAULT_CHAT_SUGGESTIONS];
+  }
+  return normalizeChatSuggestions(stored[CHAT_SUGGESTIONS_KEY]);
+}
+
+export async function saveChatSuggestions(suggestions: string[]): Promise<string[]> {
+  const normalized = normalizeChatSuggestions(suggestions);
+  await chrome.storage.local.set({ [CHAT_SUGGESTIONS_KEY]: normalized });
+  return normalized;
+}
+
+export async function resetChatSuggestions(): Promise<string[]> {
+  await chrome.storage.local.remove(CHAT_SUGGESTIONS_KEY);
+  return [...DEFAULT_CHAT_SUGGESTIONS];
 }
 
 export async function loadStagedUploadFile(): Promise<StagedUploadFile | undefined> {
@@ -355,6 +399,61 @@ function normalizeStagedUploadFile(value: unknown): StagedUploadFile | undefined
     dataUrl,
     createdAt: Number(raw.createdAt || Date.now()),
   };
+}
+
+function normalizeChatMessages(value: unknown): AgentChatMessage[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((message): AgentChatMessage | undefined => {
+      if (!message || typeof message !== "object") {
+        return undefined;
+      }
+      const raw = message as Partial<AgentChatMessage>;
+      const id = String(raw.id || "").trim();
+      const content = String(raw.content || "").trim();
+      const role = raw.role;
+      const kind = raw.kind;
+      if (
+        !id ||
+        !content ||
+        (role !== "user" && role !== "assistant") ||
+        (kind !== "message" && kind !== "answer" && kind !== "question" && kind !== "error")
+      ) {
+        return undefined;
+      }
+      return {
+        id: id.slice(0, 120),
+        role,
+        content: content.slice(0, MAX_CHAT_MESSAGE_CHARS),
+        kind,
+        timestamp: finiteNumber(raw.timestamp, Date.now()),
+        runId: optionalString(raw.runId)?.slice(0, 120),
+      };
+    })
+    .filter((message): message is AgentChatMessage => Boolean(message))
+    .slice(-MAX_CHAT_MESSAGES);
+}
+
+function normalizeChatSuggestions(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  return value
+    .map((suggestion) => String(suggestion || "").replace(/\s+/g, " ").trim().slice(0, MAX_CHAT_SUGGESTION_CHARS))
+    .filter((suggestion) => {
+      const normalized = suggestion.toLocaleLowerCase();
+      if (!normalized || seen.has(normalized)) {
+        return false;
+      }
+      seen.add(normalized);
+      return true;
+    })
+    .slice(0, MAX_CHAT_SUGGESTIONS);
 }
 
 function normalizeRunReports(value: unknown): RunReport[] {

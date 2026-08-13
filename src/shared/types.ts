@@ -343,6 +343,15 @@ export interface AgentLogEntry {
   timestamp: number;
 }
 
+export interface AgentChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  kind: "message" | "answer" | "question" | "error";
+  timestamp: number;
+  runId?: string;
+}
+
 export interface SafetyDecision {
   allowed: boolean;
   riskLevel: RiskLevel;
@@ -350,12 +359,16 @@ export interface SafetyDecision {
 }
 
 export type SidePanelToBackgroundMessage =
+  | { type: "SIDEPANEL_SEND_CHAT"; message: string }
   | { type: "SIDEPANEL_RUN_TASK"; task: string }
   | { type: "SIDEPANEL_STOP_TASK" }
+  | { type: "SIDEPANEL_CLEAR_CHAT" }
   | { type: "SIDEPANEL_GET_STATE" };
 
 export type BackgroundToSidePanelMessage =
   | { type: "AGENT_LOG"; entry: AgentLogEntry }
+  | { type: "AGENT_CHAT_MESSAGE"; message: AgentChatMessage }
+  | { type: "AGENT_CHAT_CLEARED" }
   | { type: "AGENT_STATUS"; running: boolean; taskId?: string }
   | { type: "USAGE_UPDATE"; usage: AgentUsageSnapshot };
 

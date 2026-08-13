@@ -117,11 +117,17 @@ Every run has a requirement ledger. The model proposes requirements, but the ext
 
 `wait_for` polls a condition without blocking the Stop button. Supported conditions are `document_ready`, `dom_stable`, `url_changed`, `text_present`, `text_absent`, `element_hidden`, and `element_enabled`. Waits are capped at 15 seconds and return a fresh observation.
 
-`inspect_screenshot` is an explicit fallback for charts, canvas, diagrams, layout, and icon-only controls. It captures only the visible active tab when that tab belongs to the current agent-owned tab group. The image is resized, sent to the model once, redacted from debug logs, and never persisted. If the provider rejects visual input, the step is retried text-only and vision is disabled for that run.
+`inspect_screenshot` is an explicit fallback for charts, canvas, diagrams, layout, and icon-only controls. It captures only the visible active tab when that tab belongs to the current agent run. The image is resized, sent to the model once, redacted from debug logs, and never persisted. If the provider rejects visual input, the step is retried text-only and vision is disabled for that run.
 
 ## Run History
 
 The History view stores up to 50 sanitized reports with task status, requirement progress, findings, final Markdown output, and usage. Reports can be copied, rerun on the current page, deleted individually, or cleared. Runs left active by a service-worker restart are marked `interrupted`.
+
+## Chat
+
+The Chat view shows user requests, final Markdown answers, page and PDF summaries, and questions that need user input. Replies to those questions retain the paused task context. Up to 100 chat messages are stored locally and can be cleared from the Chat header. The empty-chat suggestions can be edited, added, deleted, or reset and are stored locally in the browser profile. Conversational requests can be answered without webpage access; browser actions still require an active HTTP(S) page.
+
+Operational observations and action results stay in Console instead of appearing as chat messages. A task launched from Run switches to Chat when its final answer is ready.
 
 ## Iframes and Shadow DOM
 
@@ -131,7 +137,7 @@ Cross-origin iframes and closed shadow roots are detected as inaccessible where 
 
 ## Token Dashboard
 
-The Console tab includes a token dashboard that updates after each model request, while the Run tab keeps the live action log next to the task runner:
+The Console tab includes the operational action log and a token dashboard that updates after each model request:
 
 - prompt, cached prompt, completion, and total tokens
 - cache hit requests and cached-token percentage
@@ -179,7 +185,7 @@ The model must return strict JSON only. Use `action` for one action, or `actions
 
 Supported action types are `click`, `multi_click`, `drag`, `multi_drag`, `upload_file`, `fill`, `type`, `select`, `press_key`, `summarize_page`, `read_page`, `inspect_screenshot`, `summarize_pdf`, `list_downloads`, `scroll`, `navigate`, `go_back`, `go_forward`, `reload`, `open_tab`, `switch_tab`, `close_tab`, `wait_for`, `extract`, `ask_user`, and `done`. `go_back` and `go_forward` use browser history. `open_tab` uses `url`, while `switch_tab`, `close_tab`, and optional `reload` targeting use `tabAlias` such as `tab-2`. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For multiple drag-and-drop pairs, `multi_drag` uses `dragPairs: [{ "elementId": "source", "targetElementId": "target" }]`. For file uploads, `upload_file` uses a page `elementId` and optional staged `fileId`; for PDFs, `summarize_pdf` can use `url`, `fileId`, or `downloadId`.
 
-The agent tracks tabs with aliases (`tab-1`, `tab-2`, ...) inside one visible `AI Agent` tab group. Only the seed tab, extension-created tabs, and popups opened by an owned tab are accessible. Removing a tab from that group revokes agent access. The model receives a compact tracked-tab list every step, but only the active tab's DOM observation is sent. To interact with another tab, the model must switch to that alias first and wait for the next observation.
+The agent tracks tabs with aliases (`tab-1`, `tab-2`, ...). A same-tab task leaves the seed tab ungrouped. When the agent first opens or adopts an additional tab, it atomically moves the seed and new tab into one visible `AI Agent` tab group; later owned tabs join that group. Only the seed tab, extension-created tabs, and popups opened by an owned tab are accessible. Removing a tab from an established group revokes agent access. The model receives a compact tracked-tab list every step, but only the active tab's DOM observation is sent. To interact with another tab, the model must switch to that alias first and wait for the next observation.
 
 Page observations are trimmed to roughly 4,000 input tokens. The readable text window is scroll-aware, so as the page scrolls down, old upper-page text drops out and lower-page text enters the model context.
 

@@ -29,4 +29,11 @@ export const PROVIDER_DEFAULT_MODELS = {
 export const MAX_PAGE_TEXT_CHARS = 10000;
 export const MAX_DOM_ELEMENTS = 80;
 export const MAX_LOG_ENTRIES = 80;
+export const MAX_CHAT_MESSAGES = 100;
+export const MAX_CHAT_SUGGESTIONS = 9;
+export const DEFAULT_CHAT_SUGGESTIONS = [
+  "Summarize the current page.",
+  "Give me the key takeaways from this page.",
+  "What can you help me do on this page?",
+] as const;
 export const MAX_TRACKED_TABS = 8;

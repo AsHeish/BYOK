@@ -16,16 +16,22 @@ export function UsageDashboard({ usage }: UsageDashboardProps) {
         <span>{usage.requestCount}</span>
       </div>
 
-      <div className="usage-grid">
+      <div className="usage-grid usage-grid-primary">
         <Metric label="Total tokens" value={formatInteger(usage.totalTokens)} />
-        <Metric label="Prompt" value={formatInteger(usage.promptTokens)} />
-        <Metric label="Output" value={formatInteger(usage.completionTokens)} />
         <Metric label="Cached" value={`${formatInteger(usage.cachedPromptTokens)} (${cacheHitRate}%)`} />
-        <Metric label="Cache hits" value={`${usage.cacheHitRequestCount}/${usage.requestCount || 0}`} />
         <Metric label="Avg latency" value={formatDuration(usage.averageLatencyMs)} />
-        <Metric label="Last latency" value={formatDuration(usage.lastLatencyMs)} />
         <Metric label="Cost est." value={formatCost(usage)} />
       </div>
+
+      <details className="usage-details">
+        <summary>Request details</summary>
+        <div className="usage-grid usage-grid-secondary">
+          <Metric label="Prompt" value={formatInteger(usage.promptTokens)} />
+          <Metric label="Output" value={formatInteger(usage.completionTokens)} />
+          <Metric label="Cache hits" value={`${usage.cacheHitRequestCount}/${usage.requestCount || 0}`} />
+          <Metric label="Last latency" value={formatDuration(usage.lastLatencyMs)} />
+        </div>
+      </details>
 
       <div className="usage-footer">
         <span>{usage.provider || "provider"}</span>

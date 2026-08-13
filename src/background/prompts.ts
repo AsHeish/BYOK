@@ -8,7 +8,7 @@ import type {
 import { MAX_TRACKED_TABS } from "../shared/defaults";
 import type { ChatMessage, ChatMessageContent } from "./modelClient";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.2.0";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.2.1";
 const MAX_ACTIONS_PER_RESPONSE = 10;
 const MAX_OBSERVATION_INPUT_TOKENS = 4000;
 const APPROX_CHARS_PER_TOKEN = 4;
@@ -116,10 +116,10 @@ export function buildAgentMessages(args: {
         "- Good batches: fill an answer then click a visible Continue button; select several visible controls; drag several visible items to visible targets.",
         "- Use go_back when you need to return to the previous browser history page.",
         "- You may manage tracked browser tabs by alias. Use open_tab with url, switch_tab with tabAlias, close_tab with tabAlias, reload with optional tabAlias, and go_forward/go_back for browser history.",
-        "- You can only use the tracked tabs listed below. They all live in one browser tab group owned by this agent run. The user's other tabs and windows are not visible to you and cannot be read, clicked, or closed.",
-        "- open_tab always creates the tab inside that agent tab group. A tab opened by a link or script inside a tracked tab is adopted into the group automatically and appears in the tracked tab list on the next step.",
+        "- You can only use the tracked tabs listed below. A single seed tab stays ungrouped. When a second owned tab opens, all tracked tabs move into one browser tab group owned by this run. The user's other tabs and windows are not visible to you and cannot be read, clicked, or closed.",
+        "- open_tab creates an owned tab. On the first additional tab, the extension groups the current seed tab and new tab together. A tab opened by a link or script inside a tracked tab is adopted the same way and appears in the tracked tab list on the next step.",
         `- The agent can own at most ${MAX_TRACKED_TABS} tabs at a time. If open_tab is refused because of that limit, close_tab a tab you no longer need first.`,
-        "- If a tab you were using disappears from the tracked list, the user removed it from the agent tab group. Do not try to reach it again; continue with a tab that is still listed.",
+        "- If a tab you were using disappears from the tracked list, it was closed or removed from the agent tab group. Do not try to reach it again; continue with a tab that is still listed.",
         "- If the task needs a page that is not in the tracked list, use open_tab or navigate rather than assuming the user already has it open.",
         "- The full page observation is only for the active tab alias. To work on another tab, switch_tab first and wait for the next observation.",
         "- Page observations may include elements from accessible same-origin iframes and open shadow DOM roots. Use frame/root fields to distinguish repeated controls in embedded widgets.",

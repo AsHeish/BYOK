@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from "react";
+import { Paperclip, X } from "lucide-react";
 import { MAX_STAGED_UPLOAD_BYTES, formatFileSize } from "../../shared/fileData";
 import { createId } from "../../shared/ids";
 import { clearStagedUploadFile, loadStagedUploadFile, saveStagedUploadFile } from "../../shared/storage";
 import type { StagedUploadFile } from "../../shared/types";
 
-export function FileStagingPanel() {
+interface FileStagingPanelProps {
+  disabled?: boolean;
+}
+
+export function FileStagingPanel({ disabled = false }: FileStagingPanelProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [stagedFile, setStagedFile] = useState<StagedUploadFile | undefined>();
   const [status, setStatus] = useState<string | undefined>();
@@ -64,6 +69,7 @@ export function FileStagingPanel() {
         ref={inputRef}
         className="file-input-hidden"
         type="file"
+        disabled={disabled}
         onChange={(event) => void handleChooseFile(event.target.files?.[0])}
       />
 
@@ -72,9 +78,10 @@ export function FileStagingPanel() {
         className={`icon-button plus-file-button ${stagedFile ? "has-file" : ""}`}
         title={stagedFile ? `Replace staged file: ${stagedFile.name}` : "Stage a file for upload"}
         aria-label={stagedFile ? `Replace staged file: ${stagedFile.name}` : "Stage a file for upload"}
+        disabled={disabled}
         onClick={() => inputRef.current?.click()}
       >
-        <span aria-hidden="true">+</span>
+        <Paperclip aria-hidden="true" />
       </button>
 
       {stagedFile ? (
@@ -87,24 +94,16 @@ export function FileStagingPanel() {
             className="icon-button clear-file-button"
             title="Clear staged file"
             aria-label="Clear staged file"
+            disabled={disabled}
             onClick={() => void handleClear()}
           >
-            <ClearIcon />
+            <X aria-hidden="true" />
           </button>
         </>
       ) : null}
 
       {status ? <span className="file-inline-status">{status}</span> : null}
     </div>
-  );
-}
-
-function ClearIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M18 6 6 18" />
-      <path d="m6 6 12 12" />
-    </svg>
   );
 }
 
