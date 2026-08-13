@@ -1,4 +1,15 @@
-import type { AgentAction, AgentModelResponse, AgentSettings, ModelUsageEvent, RiskLevel } from "../shared/types";
+import type {
+  AgentAction,
+  AgentModelResponse,
+  AgentRequirementItemUpdate,
+  AgentRequirementProposal,
+  AgentRequirementUpdate,
+  AgentSettings,
+  ModelUsageEvent,
+  RequirementStatus,
+  RiskLevel,
+  WaitCondition,
+} from "../shared/types";
 
 const MAX_ACTIONS_PER_MODEL_RESPONSE = 10;
 const MAX_MODEL_REQUEST_ATTEMPTS = 4;
@@ -8,9 +19,14 @@ const AUTOMATIC_PREFIX_CACHE_MODELS = new Set(["qwen-3.6-27b", "gemma-4-31b"]);
 
 type PromptCacheStrategy = "none" | "openai" | "automatic-prefix";
 
-interface ChatMessage {
+export type ChatMessageContent = string | Array<
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: "low" | "high" | "auto" } }
+>;
+
+export interface ChatMessage {
   role: "system" | "user";
-  content: string;
+  content: ChatMessageContent;
 }
 
 interface OpenAiChatCompletionResponse {
@@ -253,7 +269,10 @@ function logAiRequestPayload(args: {
       "Content-Type": "application/json",
       Authorization: "Bearer [redacted]"
     },
-    body: args.body
+    body: {
+      ...args.body,
+      messages: sanitizeMessagesForLogging(args.messages),
+    }
   };
 
   console.groupCollapsed(
@@ -342,14 +361,34 @@ function buildPromptCacheDebugInfo(
 
 function getStaticInstructionPrefix(messages: ChatMessage[]): string {
   const systemMessage = messages.find((message) => message.role === "system");
-  return systemMessage ? `${systemMessage.role}:\n${systemMessage.content}` : "";
+  return systemMessage ? `${systemMessage.role}:\n${getMessageText(systemMessage.content)}` : "";
 }
 
 function getStablePromptPrefix(messages: ChatMessage[]): string {
   return messages
     .slice(0, 2)
-    .map((message) => `${message.role}:\n${message.content}`)
+    .map((message) => `${message.role}:\n${getMessageText(message.content)}`)
     .join("\n\n");
+}
+
+export function sanitizeMessagesForLogging(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    content: typeof message.content === "string"
+      ? message.content
+      : message.content.map((part) => part.type === "image_url"
+        ? { ...part, image_url: { ...part.image_url, url: "[image redacted]" } }
+        : part),
+  }));
+}
+
+function getMessageText(content: ChatMessageContent): string {
+  return typeof content === "string"
+    ? content
+    : content
+        .filter((part): part is { type: "text"; text: string } => part.type === "text")
+        .map((part) => part.text)
+        .join("\n");
 }
 
 function shortHash(value: string): string {
@@ -550,7 +589,9 @@ function normalizeAgentModelResponse(value: unknown): AgentModelResponse | undef
   return {
     thought_summary: getString(value.thought_summary) || getString(value.thought) || getString(value.summary) || "Next browser action.",
     risk_level: normalizeRiskLevel(value.risk_level),
-    actions
+    actions,
+    requirements: normalizeRequirementProposals(value.requirements),
+    requirementUpdates: normalizeRequirementUpdates(value.requirementUpdates || value.requirement_updates),
   };
 }
 
@@ -608,7 +649,10 @@ function normalizeAgentAction(value: unknown): AgentAction[] {
     key: normalizeKey(value.key) || normalizeKey(value.text),
     url: getString(value.url),
     tabAlias: getString(value.tabAlias) || getString(value.tab_alias) || getString(value.alias) || getString(value.tab),
-    direction: normalizeDirection(value.direction)
+    direction: normalizeDirection(value.direction),
+    outcome: normalizeOutcome(value.outcome),
+    waitCondition: normalizeWaitCondition(value.waitCondition || value.wait_condition || value.condition),
+    timeoutMs: getNumber(value.timeoutMs) || getNumber(value.timeout_ms),
   };
 
   if (action.type === "multi_click" && !action.elementIds?.length && action.elementId) {
@@ -658,6 +702,12 @@ function normalizeActionType(type: string): AgentAction["type"] | undefined {
     page_summary: "summarize_page",
     summarize_webpage: "summarize_page",
     summarize_web_page: "summarize_page",
+    read_page: "read_page",
+    read_full_page: "read_page",
+    get_page_content: "read_page",
+    inspect_screenshot: "inspect_screenshot",
+    capture_screenshot: "inspect_screenshot",
+    screenshot: "inspect_screenshot",
     summarize_pdf: "summarize_pdf",
     pdf_summary: "summarize_pdf",
     list_downloads: "list_downloads",
@@ -686,6 +736,8 @@ function normalizeActionType(type: string): AgentAction["type"] | undefined {
     activate_tab: "switch_tab",
     select_tab: "switch_tab",
     close_tab: "close_tab",
+    wait_for: "wait_for",
+    wait_until: "wait_for",
     extract: "extract",
     ask_user: "ask_user",
     ask: "ask_user",
@@ -697,6 +749,123 @@ function normalizeActionType(type: string): AgentAction["type"] | undefined {
 function normalizeRiskLevel(value: unknown): RiskLevel {
   const normalized = String(value || "").toLowerCase();
   return normalized === "medium" || normalized === "high" ? normalized : "low";
+}
+
+function normalizeOutcome(value: unknown): AgentAction["outcome"] | undefined {
+  return value === "completed" || value === "partial" ? value : undefined;
+}
+
+function normalizeRequirementProposals(value: unknown): AgentRequirementProposal[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const proposals = value
+    .map((item): AgentRequirementProposal | undefined => {
+      if (!isRecord(item)) {
+        return undefined;
+      }
+      const text = getString(item.text) || getString(item.requirement) || getString(item.label);
+      if (!text) {
+        return undefined;
+      }
+      const labels = normalizeItemProposals(item.items);
+      return {
+        text,
+        expectedItemCount: getNumber(item.expectedItemCount) || getNumber(item.expected_item_count),
+        items: labels,
+      };
+    })
+    .filter((item): item is AgentRequirementProposal => Boolean(item))
+    .slice(0, 50);
+
+  return proposals.length ? proposals : undefined;
+}
+
+function normalizeRequirementUpdates(value: unknown): AgentRequirementUpdate[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const updates = value
+    .map((item): AgentRequirementUpdate | undefined => {
+      if (!isRecord(item)) {
+        return undefined;
+      }
+      const requirementId = getString(item.requirementId) || getString(item.requirement_id) || getString(item.id);
+      if (!requirementId) {
+        return undefined;
+      }
+      return {
+        requirementId,
+        status: normalizeRequirementStatus(item.status),
+        evidenceIds: getStringArray(item.evidenceIds) || getStringArray(item.evidence_ids),
+        blockedReason: getString(item.blockedReason) || getString(item.blocked_reason) || getString(item.reason),
+        expectedItemCount: getNumber(item.expectedItemCount) || getNumber(item.expected_item_count),
+        addItems: normalizeItemProposals(item.addItems || item.add_items),
+        itemUpdates: normalizeRequirementItemUpdates(item.itemUpdates || item.item_updates),
+      };
+    })
+    .filter((item): item is AgentRequirementUpdate => Boolean(item))
+    .slice(0, 100);
+
+  return updates.length ? updates : undefined;
+}
+
+function normalizeItemProposals(value: unknown): Array<{ label: string }> | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const items = value
+    .map((item) => isRecord(item) ? getString(item.label) || getString(item.text) : getString(item))
+    .filter((label): label is string => Boolean(label))
+    .slice(0, 200)
+    .map((label) => ({ label }));
+  return items.length ? items : undefined;
+}
+
+function normalizeRequirementItemUpdates(value: unknown): AgentRequirementUpdate["itemUpdates"] {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const updates = value
+    .map((item): AgentRequirementItemUpdate | undefined => {
+      if (!isRecord(item)) {
+        return undefined;
+      }
+      const itemId = getString(item.itemId) || getString(item.item_id) || getString(item.id);
+      const status = normalizeRequirementStatus(item.status);
+      if (!itemId || !status) {
+        return undefined;
+      }
+      return {
+        itemId,
+        status,
+        evidenceIds: getStringArray(item.evidenceIds) || getStringArray(item.evidence_ids),
+        blockedReason: getString(item.blockedReason) || getString(item.blocked_reason) || getString(item.reason),
+      };
+    })
+    .filter((item): item is AgentRequirementItemUpdate => Boolean(item))
+    .slice(0, 300);
+  return updates.length ? updates : undefined;
+}
+
+function normalizeRequirementStatus(value: unknown): RequirementStatus | undefined {
+  return value === "pending" || value === "satisfied" || value === "blocked" ? value : undefined;
+}
+
+function normalizeWaitCondition(value: unknown): WaitCondition | undefined {
+  const allowed: WaitCondition[] = [
+    "document_ready",
+    "dom_stable",
+    "url_changed",
+    "text_present",
+    "text_absent",
+    "element_hidden",
+    "element_enabled",
+  ];
+  const normalized = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_") as WaitCondition;
+  return allowed.includes(normalized) ? normalized : undefined;
 }
 
 function normalizeKey(value: unknown): AgentAction["key"] | undefined {

@@ -59,7 +59,10 @@ Then load the extension:
 5. Select the generated `dist` folder.
 6. Click the extension icon to open the browser's right-side side panel.
 
+Use `Ctrl+Shift+Y` on Windows/Linux or `Command+Shift+Y` on macOS to open the panel from the keyboard.
+
 For local iteration, run `npm run build` after changes and reload the unpacked extension.
+Run `npm test` for the focused agent behavior tests.
 
 ## Provider Settings
 
@@ -73,10 +76,11 @@ The side-panel settings support:
 - `requestTimeoutSeconds`: AI request timeout per attempt, default `60`.
 - `promptCacheMode`: `auto` selects cache hints by provider and model, `on` forces cache hints, and `off` disables them.
 - Optional token pricing rates: input, cached input, and output USD per 1M tokens for the dashboard cost estimate.
+- `saveRunHistory`: stores sanitized run reports locally; screenshots, uploaded files, form values, and API keys are never included in reports.
 - Named AI profiles: save the current provider/base URL/API key/model/max steps/timeout/cache mode/pricing under a name, then apply or delete profiles from Settings.
 
 The extension uses `fetch` against `POST {apiBaseUrl}/chat/completions` with OpenAI-compatible chat-completions JSON. No paid SDK is used.
-Each AI request uses the configured timeout and automatically retries before surfacing a timeout error.
+Each AI request uses the configured timeout. The action log tells the user when a timeout or provider-compatibility retry occurs.
 
 ## Prompt Caching
 
@@ -103,7 +107,21 @@ The Run tab includes a **File Dock** where the user can stage one local file. Th
 
 The background worker listens for completed browser downloads and can list recent downloads with `list_downloads`. Download metadata is included in the model context so the agent can reference recent PDF downloads by `downloadId`.
 
-The agent can summarize normal web pages from the readable page observation with `summarize_page`. It can summarize PDFs from a staged PDF, a PDF URL, the current PDF tab URL, or a recent PDF download source with `summarize_pdf`. PDF text extraction uses the open-source `pdfjs-dist` package with a lightweight fallback extractor.
+The agent can summarize normal web pages with `summarize_page`. Full-page prose is extracted with Mozilla Readability and converted to Markdown; form controls and media are removed before conversion. `read_page` provides that cleaned document to the next agent step, while `extract` remains the structured path for headings, links, tables, and forms.
+
+It can summarize PDFs from a staged PDF, a PDF URL, the current PDF tab URL, or a recent PDF download source with `summarize_pdf`. PDF text extraction uses the open-source `pdfjs-dist` package with a lightweight fallback extractor.
+
+## Completion, Waiting, and Visual Fallback
+
+Every run has a requirement ledger. The model proposes requirements, but the extension assigns IDs and only accepts evidence IDs that the runtime actually created. A `done` action is rejected recoverably unless it is the only action, declares `outcome` as `completed` or `partial`, and every requirement is evidence-backed or explicitly blocked. A fresh page observation and final model validation run before completion is accepted.
+
+`wait_for` polls a condition without blocking the Stop button. Supported conditions are `document_ready`, `dom_stable`, `url_changed`, `text_present`, `text_absent`, `element_hidden`, and `element_enabled`. Waits are capped at 15 seconds and return a fresh observation.
+
+`inspect_screenshot` is an explicit fallback for charts, canvas, diagrams, layout, and icon-only controls. It captures only the visible active tab when that tab belongs to the current agent-owned tab group. The image is resized, sent to the model once, redacted from debug logs, and never persisted. If the provider rejects visual input, the step is retried text-only and vision is disabled for that run.
+
+## Run History
+
+The History view stores up to 50 sanitized reports with task status, requirement progress, findings, final Markdown output, and usage. Reports can be copied, rerun on the current page, deleted individually, or cleared. Runs left active by a service-worker restart are marked `interrupted`.
 
 ## Iframes and Shadow DOM
 
@@ -131,7 +149,7 @@ The agent loop executes one action or a bounded action batch at a time:
 2. Background service worker asks the model for strict JSON.
 3. Background normalizes either `action` or `actions` into ordered actions.
 4. Content script executes up to 10 supported actions in order.
-5. Fail-safe mode stops the remaining batch on failure, stale elements, `ask_user`, `done`, navigation, or a tab-changing action, then sends completed-action progress into the next model prompt.
+5. Fail-safe mode stops the remaining batch on failure, stale elements, `ask_user`, `done`, navigation, `read_page`, `inspect_screenshot`, `wait_for`, or a tab-changing action, then sends completed-action progress into the next model prompt.
 
 `src/background/safety.ts` is present for reinstating policy checks, but this local test build currently bypasses background safety validation. Content execution still only supports the defined action schema. Controlled file upload is limited to the one file explicitly staged in the side panel.
 
@@ -159,9 +177,9 @@ The model must return strict JSON only. Use `action` for one action, or `actions
 }
 ```
 
-Supported action types are `click`, `multi_click`, `drag`, `multi_drag`, `upload_file`, `fill`, `type`, `select`, `press_key`, `summarize_page`, `summarize_pdf`, `list_downloads`, `scroll`, `navigate`, `go_back`, `go_forward`, `reload`, `open_tab`, `switch_tab`, `close_tab`, `extract`, `ask_user`, and `done`. `go_back` and `go_forward` use browser history. `open_tab` uses `url`, while `switch_tab`, `close_tab`, and optional `reload` targeting use `tabAlias` such as `tab-2`. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For multiple drag-and-drop pairs, `multi_drag` uses `dragPairs: [{ "elementId": "source", "targetElementId": "target" }]`. For file uploads, `upload_file` uses a page `elementId` and optional staged `fileId`; for PDFs, `summarize_pdf` can use `url`, `fileId`, or `downloadId`.
+Supported action types are `click`, `multi_click`, `drag`, `multi_drag`, `upload_file`, `fill`, `type`, `select`, `press_key`, `summarize_page`, `read_page`, `inspect_screenshot`, `summarize_pdf`, `list_downloads`, `scroll`, `navigate`, `go_back`, `go_forward`, `reload`, `open_tab`, `switch_tab`, `close_tab`, `wait_for`, `extract`, `ask_user`, and `done`. `go_back` and `go_forward` use browser history. `open_tab` uses `url`, while `switch_tab`, `close_tab`, and optional `reload` targeting use `tabAlias` such as `tab-2`. For multiple-answer checkbox questions, `multi_click` uses `elementIds` to select several options in one browser action. For multiple drag-and-drop pairs, `multi_drag` uses `dragPairs: [{ "elementId": "source", "targetElementId": "target" }]`. For file uploads, `upload_file` uses a page `elementId` and optional staged `fileId`; for PDFs, `summarize_pdf` can use `url`, `fileId`, or `downloadId`.
 
-The agent tracks tabs with aliases (`tab-1`, `tab-2`, ...). The model receives a compact tracked-tab list every step, but only the active tab's DOM observation is sent. To interact with another tab, the model must switch to that alias first and wait for the next observation.
+The agent tracks tabs with aliases (`tab-1`, `tab-2`, ...) inside one visible `AI Agent` tab group. Only the seed tab, extension-created tabs, and popups opened by an owned tab are accessible. Removing a tab from that group revokes agent access. The model receives a compact tracked-tab list every step, but only the active tab's DOM observation is sent. To interact with another tab, the model must switch to that alias first and wait for the next observation.
 
 Page observations are trimmed to roughly 4,000 input tokens. The readable text window is scroll-aware, so as the page scrolls down, old upper-page text drops out and lower-page text enters the model context.
 
@@ -172,4 +190,5 @@ Page observations are trimmed to roughly 4,000 input tokens. The readable text w
 - The DOM mapper is intentionally small and visible-element focused. Same-origin iframes and open shadow roots are supported; cross-origin iframes and closed shadow roots remain browser-restricted.
 - Drag-and-drop support uses synthetic pointer, mouse, and HTML5 drag events. Some sites only accept browser-trusted physical drag gestures, so specific quiz widgets may need targeted handling.
 - Downloaded files are detected through Chrome's downloads metadata. PDF summarization can fetch the original URL or use a staged PDF, but it cannot read arbitrary downloaded file paths directly from disk.
+- Screenshot fallback requires an OpenAI-compatible provider/model that accepts `image_url` message parts.
 - Strong API-key encryption is not implemented because no user-held secret is collected.

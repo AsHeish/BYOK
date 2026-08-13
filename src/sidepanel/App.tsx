@@ -1,30 +1,41 @@
 import { useEffect, useMemo, useState } from "react";
 import { DEFAULT_SETTINGS } from "../shared/defaults";
-import { loadSettings, saveSettings } from "../shared/storage";
+import {
+  RUN_REPORTS_KEY,
+  clearRunReports,
+  deleteRunReport,
+  loadRunReports,
+  loadSettings,
+  saveSettings,
+} from "../shared/storage";
 import type {
   AgentLogEntry,
   AgentSettings,
   AgentUsageSnapshot,
   BackgroundToSidePanelMessage,
+  RunReport,
   SidePanelToBackgroundMessage
 } from "../shared/types";
 import { ActionLog } from "./components/ActionLog";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { TaskRunner } from "./components/TaskRunner";
 import { UsageDashboard } from "./components/UsageDashboard";
+import { RunHistory } from "./components/RunHistory";
 
-type View = "run" | "console" | "settings";
+type View = "run" | "history" | "console" | "settings";
 
 export function App() {
   const [view, setView] = useState<View>("run");
   const [settings, setSettings] = useState<AgentSettings>(DEFAULT_SETTINGS);
   const [logs, setLogs] = useState<AgentLogEntry[]>([]);
   const [usage, setUsage] = useState<AgentUsageSnapshot>(createEmptyUsageSnapshot());
+  const [reports, setReports] = useState<RunReport[]>([]);
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState<string | undefined>();
 
   useEffect(() => {
     void loadSettings().then(setSettings);
+    void loadRunReports().then(setReports);
     void sendBackgroundMessage({ type: "SIDEPANEL_GET_STATE" }).then((state) => {
       if (isAgentState(state)) {
         setRunning(state.running);
@@ -48,7 +59,16 @@ export function App() {
     };
 
     chrome.runtime.onMessage.addListener(listener);
-    return () => chrome.runtime.onMessage.removeListener(listener);
+    const storageListener = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
+      if (areaName === "local" && changes[RUN_REPORTS_KEY]) {
+        void loadRunReports().then(setReports);
+      }
+    };
+    chrome.storage.onChanged.addListener(storageListener);
+    return () => {
+      chrome.runtime.onMessage.removeListener(listener);
+      chrome.storage.onChanged.removeListener(storageListener);
+    };
   }, []);
 
   const hasApiKey = useMemo(() => settings.apiKey.trim().length > 0, [settings.apiKey]);
@@ -80,6 +100,20 @@ export function App() {
 
   async function handleStop() {
     await sendBackgroundMessage({ type: "SIDEPANEL_STOP_TASK" });
+  }
+
+  async function handleRerun(task: string) {
+    setView("run");
+    await handleRun(task);
+  }
+
+  async function handleDeleteRun(runId: string) {
+    setReports(await deleteRunReport(runId));
+  }
+
+  async function handleClearRuns() {
+    await clearRunReports();
+    setReports([]);
   }
 
   return (
@@ -116,6 +150,9 @@ export function App() {
         <button className={view === "run" ? "active" : ""} onClick={() => setView("run")}>
           Run
         </button>
+        <button className={view === "history" ? "active" : ""} onClick={() => setView("history")}>
+          History
+        </button>
         <button className={view === "console" ? "active" : ""} onClick={() => setView("console")}>
           Console
         </button>
@@ -126,12 +163,20 @@ export function App() {
 
       {notice ? <div className="notice">{notice}</div> : null}
 
-      <div className={`view-scroll ${view === "run" ? "run-view" : view === "console" ? "console-view" : "settings-view"}`}>
+      <div className={`view-scroll ${view === "run" ? "run-view" : view === "history" ? "history-view" : view === "console" ? "console-view" : "settings-view"}`}>
         {view === "run" ? (
           <>
             <TaskRunner running={running} disabled={!hasApiKey} onRun={handleRun} onStop={handleStop} />
             <ActionLog logs={logs} />
           </>
+        ) : view === "history" ? (
+          <RunHistory
+            reports={reports}
+            running={running}
+            onRerun={handleRerun}
+            onDelete={handleDeleteRun}
+            onClear={handleClearRuns}
+          />
         ) : view === "console" ? (
           <UsageDashboard usage={usage} />
         ) : (

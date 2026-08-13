@@ -1,7 +1,14 @@
-import type { AgentModelResponse, PageObservation } from "../shared/types";
+import type {
+  AgentModelResponse,
+  FullPageDocument,
+  PageObservation,
+  RunEvidence,
+  RunRequirement,
+} from "../shared/types";
 import { MAX_TRACKED_TABS } from "../shared/defaults";
+import type { ChatMessage, ChatMessageContent } from "./modelClient";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.47";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.2.0";
 const MAX_ACTIONS_PER_RESPONSE = 10;
 const MAX_OBSERVATION_INPUT_TOKENS = 4000;
 const APPROX_CHARS_PER_TOKEN = 4;
@@ -38,6 +45,13 @@ export interface PromptFindingInfo {
   text: string;
 }
 
+export interface PromptScreenshotInfo {
+  dataUrl: string;
+  tabAlias: string;
+  url?: string;
+  title?: string;
+}
+
 export function buildAgentMessages(args: {
   task: string;
   observation: PageObservation;
@@ -48,9 +62,44 @@ export function buildAgentMessages(args: {
   activeTabAlias?: string;
   findings?: PromptFindingInfo[];
   totalFindingCount?: number;
+  requirements?: RunRequirement[];
+  evidence?: RunEvidence[];
+  document?: FullPageDocument;
+  screenshot?: PromptScreenshotInfo;
   stagedFile?: PromptStagedFileInfo;
   downloads?: PromptDownloadInfo[];
-}): Array<{ role: "system" | "user"; content: string }> {
+}): ChatMessage[] {
+  const currentContext = [
+    `Step: ${args.step} of ${args.maxSteps}`,
+    args.tabs?.length
+      ? `Tabs owned by this agent run (the only tabs you can use):\n${formatTabs(args.tabs, args.activeTabAlias)}`
+      : "",
+    args.stagedFile ? `Staged upload file:\n${formatStagedFile(args.stagedFile)}` : "Staged upload file: none",
+    args.downloads?.length ? `Recent downloads:\n${formatDownloads(args.downloads)}` : "Recent downloads: none",
+    formatRequirements(args.requirements),
+    formatEvidence(args.evidence),
+    formatFindings(args.findings, args.totalFindingCount),
+    formatDocument(args.document),
+    args.previousResult ? `Previous action result: ${args.previousResult}` : "",
+    "",
+    `Current page observation${args.activeTabAlias ? ` for ${args.activeTabAlias}` : ""}:`,
+    formatObservation(args.observation),
+    args.screenshot
+      ? `A one-shot screenshot of ${args.screenshot.tabAlias} is attached for visual inspection. URL=${quote(
+          args.screenshot.url || "",
+          180,
+        )} title=${quote(args.screenshot.title || "", 120)}`
+      : "",
+    "",
+    "Return the next action JSON now."
+  ].filter(Boolean).join("\n");
+  const currentContent: ChatMessageContent = args.screenshot
+    ? [
+        { type: "text", text: currentContext },
+        { type: "image_url", image_url: { url: args.screenshot.dataUrl, detail: "low" } },
+      ]
+    : currentContext;
+
   return [
     {
       role: "system",
@@ -79,7 +128,21 @@ export function buildAgentMessages(args: {
         "- If no staged file is available and the task needs an upload, use ask_user.",
         "- Use list_downloads to inspect recent browser downloads. Use summarize_pdf for PDFs from a staged file, a PDF URL, a downloadId, or the current PDF tab.",
         "- For a normal web page summary, use summarize_page or return done with the summary in action.text when the current observation already has enough text.",
+        "- Use read_page when you need the full prose of the current page. It returns cleaned Markdown once on the next step; structured tables, links, and forms remain available through extract.",
+        "- Use inspect_screenshot only when the DOM observation is insufficient for visual layout, charts, canvas, diagrams, or icon-only controls. It attaches one screenshot of the active agent-owned tab on the next step.",
+        "- Never use inspect_screenshot merely to read prose; use read_page. If vision is unavailable, continue with DOM/read_page or explain the limitation.",
+        "- Use wait_for instead of guessing delays. Set waitCondition to document_ready, dom_stable, url_changed, text_present, text_absent, element_hidden, or element_enabled; include text or elementId when required and optional timeoutMs up to 15000.",
+        "- For waitCondition=url_changed, set url to the page URL before the change when it is known.",
         "- summarize_page and summarize_pdf do not end the run. Each result is saved as a finding and shown back to you under \"Findings collected so far\". After a summary you must keep going until the whole task is complete.",
+        "",
+        "Requirement ledger:",
+        "- On the first step, include a requirements array that decomposes the entire user task into independently verifiable outcomes. For every/all/each tasks, include expectedItemCount and item labels when visible.",
+        "- The extension assigns requirement and item IDs after the first response. On later steps, use requirementUpdates with those exact IDs.",
+        "- Mark a requirement or item satisfied only with evidenceIds from the Evidence ledger. Never invent an evidence ID.",
+        "- Mark work blocked only when it cannot continue, and include blockedReason. Missing work remains pending.",
+        "- done is a completion proposal, not an unconditional stop. It must be the only action, include outcome=completed or outcome=partial, and include a concise final report in text.",
+        "- outcome=completed requires every requirement and item to be satisfied. outcome=partial requires no pending work and an explicit reason for every blocked requirement or item.",
+        "- The extension re-observes and validates completion. If done is rejected, continue from the reported missing requirements.",
         "",
         "Multi-item tasks:",
         "- When the task says each, every, all, or names a set of items, first enumerate the full list of items from the observation and state the count in thought_summary.",
@@ -108,7 +171,9 @@ export function buildAgentMessages(args: {
         "",
         "Allowed action schema:",
         "Return either action for one action or actions for an ordered batch. Do not include both unless actions is the intended plan.",
-        "Action type must be one of: click, multi_click, drag, multi_drag, upload_file, fill, type, select, press_key, summarize_page, summarize_pdf, list_downloads, scroll, navigate, go_back, go_forward, reload, open_tab, switch_tab, close_tab, extract, ask_user, done.",
+        "Action type must be one of: click, multi_click, drag, multi_drag, upload_file, fill, type, select, press_key, summarize_page, read_page, inspect_screenshot, summarize_pdf, list_downloads, scroll, navigate, go_back, go_forward, reload, open_tab, switch_tab, close_tab, wait_for, extract, ask_user, done.",
+        "Top-level requirements format: [{ text, optional expectedItemCount, optional items: [{ label }] }].",
+        "Top-level requirementUpdates format: [{ requirementId, optional status, optional evidenceIds, optional blockedReason, optional expectedItemCount, optional addItems: [{ label }], optional itemUpdates: [{ itemId, status, optional evidenceIds, optional blockedReason }] }].",
         `For action batches, set actions to an array of up to ${MAX_ACTIONS_PER_RESPONSE} action objects.`,
         "For multi_click, set elementIds to an array of the option IDs to select in the same browser action.",
         "For multi_drag, set dragPairs to an array of { elementId, targetElementId } pairs to drag in order.",
@@ -131,23 +196,7 @@ export function buildAgentMessages(args: {
     },
     {
       role: "user",
-      content: [
-        `Step: ${args.step} of ${args.maxSteps}`,
-        args.tabs?.length
-          ? `Tabs owned by this agent run (the only tabs you can use):\n${formatTabs(args.tabs, args.activeTabAlias)}`
-          : "",
-        args.stagedFile ? `Staged upload file:\n${formatStagedFile(args.stagedFile)}` : "Staged upload file: none",
-        args.downloads?.length ? `Recent downloads:\n${formatDownloads(args.downloads)}` : "Recent downloads: none",
-        formatFindings(args.findings, args.totalFindingCount),
-        args.previousResult ? `Previous action result: ${args.previousResult}` : "",
-        "",
-        `Current page observation${args.activeTabAlias ? ` for ${args.activeTabAlias}` : ""}:`,
-        formatObservation(args.observation),
-        "",
-        "Return the next action JSON now."
-      ]
-        .filter(Boolean)
-        .join("\n")
+      content: currentContent,
     }
   ];
 }
@@ -185,6 +234,58 @@ function formatFindings(findings?: PromptFindingInfo[], totalFindingCount?: numb
   return [header, ...lines].join("\n");
 }
 
+function formatRequirements(requirements?: RunRequirement[]): string {
+  if (!requirements?.length) {
+    return "Requirement ledger: not initialized. Include the complete top-level requirements array in this response.";
+  }
+
+  const lines = requirements.flatMap((requirement) => {
+    const count = requirement.expectedItemCount === undefined ? "" : ` expectedItems=${requirement.expectedItemCount}`;
+    const evidence = requirement.evidenceIds.length ? ` evidence=${requirement.evidenceIds.join(",")}` : "";
+    const reason = requirement.blockedReason ? ` blockedReason=${quote(requirement.blockedReason, 240)}` : "";
+    const header = `- ${requirement.id} status=${requirement.status}${count}${evidence}${reason} text=${quote(requirement.text, 300)}`;
+    const items = (requirement.items || []).map((item) => {
+      const itemEvidence = item.evidenceIds.length ? ` evidence=${item.evidenceIds.join(",")}` : "";
+      const itemReason = item.blockedReason ? ` blockedReason=${quote(item.blockedReason, 180)}` : "";
+      return `  - ${item.id} status=${item.status}${itemEvidence}${itemReason} label=${quote(item.label, 220)}`;
+    });
+    return [header, ...items];
+  });
+
+  return `Requirement ledger:\n${lines.join("\n")}`;
+}
+
+function formatEvidence(evidence?: RunEvidence[]): string {
+  if (!evidence?.length) {
+    return "Evidence ledger: none yet.";
+  }
+
+  const visible = evidence.slice(-40);
+  const hiddenCount = evidence.length - visible.length;
+  const lines = visible.map((item) =>
+    `- ${item.id} kind=${item.kind}${item.tabAlias ? ` tab=${item.tabAlias}` : ""}${
+      item.url ? ` url=${quote(item.url, 150)}` : ""
+    } summary=${quote(item.summary, 500)}`
+  );
+  return `Evidence ledger${hiddenCount ? ` (${hiddenCount} earlier omitted)` : ""}:\n${lines.join("\n")}`;
+}
+
+function formatDocument(document?: FullPageDocument): string {
+  if (!document) {
+    return "";
+  }
+  return [
+    "One-shot full-page document context:",
+    `URL: ${document.url}`,
+    `Title: ${document.title}`,
+    document.byline ? `Byline: ${document.byline}` : "",
+    document.excerpt ? `Excerpt: ${document.excerpt}` : "",
+    document.truncated ? `Note: source was truncated from ${document.sourceCharacters} characters.` : "",
+    "Markdown:",
+    document.markdown.slice(0, 24_000),
+  ].filter(Boolean).join("\n");
+}
+
 function formatDownloads(downloads: PromptDownloadInfo[]): string {
   return downloads
     .map((download) => {
@@ -206,6 +307,11 @@ function exampleResponse(): AgentModelResponse {
   return {
     thought_summary: "short user-visible reasoning",
     risk_level: "low",
+    requirements: [
+      {
+        text: "Complete the requested browser task"
+      }
+    ],
     actions: [
       {
         type: "fill",

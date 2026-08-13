@@ -1,4 +1,11 @@
-import type { DomElementInfo, ExtractedPageData, PageFrameInfo, PageObservation } from "../shared/types";
+import type {
+  ContentWaitCheckRequest,
+  ContentWaitCheckResult,
+  DomElementInfo,
+  ExtractedPageData,
+  PageFrameInfo,
+  PageObservation,
+} from "../shared/types";
 
 const MAX_DOM_ELEMENTS = 80;
 const MAX_PAGE_TEXT_CHARS = 10000;
@@ -138,6 +145,61 @@ export function observePage(): PageObservation {
     viewport: getViewportInfo(),
     frames: contexts.frames
   };
+}
+
+export function checkWaitCondition(request: ContentWaitCheckRequest): ContentWaitCheckResult {
+  const bodyText = request.condition === "text_present" || request.condition === "text_absent"
+    ? normalizeText(document.body?.innerText || document.body?.textContent || "").toLowerCase()
+    : "";
+  const expectedText = normalizeText(request.text || "").toLowerCase();
+  const element = request.elementId ? getMappedElement(request.elementId) : undefined;
+  const matched = (() => {
+    switch (request.condition) {
+      case "document_ready":
+        return document.readyState === "complete";
+      case "url_changed":
+        return Boolean(request.baselineUrl && location.href !== request.baselineUrl);
+      case "text_present":
+        return Boolean(expectedText && bodyText.includes(expectedText));
+      case "text_absent":
+        return Boolean(expectedText && !bodyText.includes(expectedText));
+      case "element_hidden":
+        return !element || !isVisibleElement(element);
+      case "element_enabled":
+        return Boolean(element && isVisibleElement(element) && !isDisabled(element));
+      case "dom_stable":
+        return false;
+    }
+  })();
+
+  return {
+    matched,
+    signature: buildDomStabilitySignature(),
+    url: location.href,
+    readyState: document.readyState,
+  };
+}
+
+function buildDomStabilitySignature(): string {
+  const body = document.body;
+  const text = normalizeText(body?.innerText || body?.textContent || "").slice(0, 8_000);
+  return [
+    location.href,
+    document.readyState,
+    body?.childElementCount || 0,
+    text.length,
+    hashText(text),
+    document.querySelectorAll("input,textarea,select,button,a[href],[role='button'],[role='textbox']").length,
+  ].join(":");
+}
+
+function hashText(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function getViewportInfo(): PageObservation["viewport"] {

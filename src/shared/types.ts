@@ -12,6 +12,7 @@ export interface AgentSettings {
   inputTokenCostPerMillion?: number;
   cachedInputTokenCostPerMillion?: number;
   outputTokenCostPerMillion?: number;
+  saveRunHistory: boolean;
   theme: "light" | "dark";
 }
 
@@ -45,6 +46,8 @@ export type AgentActionType =
   | "select"
   | "press_key"
   | "summarize_page"
+  | "read_page"
+  | "inspect_screenshot"
   | "summarize_pdf"
   | "list_downloads"
   | "scroll"
@@ -55,6 +58,7 @@ export type AgentActionType =
   | "open_tab"
   | "switch_tab"
   | "close_tab"
+  | "wait_for"
   | "extract"
   | "ask_user"
   | "done";
@@ -78,6 +82,45 @@ export interface AgentAction {
   url?: string;
   tabAlias?: string;
   direction?: "up" | "down" | "left" | "right";
+  outcome?: "completed" | "partial";
+  waitCondition?: WaitCondition;
+  timeoutMs?: number;
+}
+
+export type WaitCondition =
+  | "document_ready"
+  | "dom_stable"
+  | "url_changed"
+  | "text_present"
+  | "text_absent"
+  | "element_hidden"
+  | "element_enabled";
+
+export interface AgentRequirementItemProposal {
+  label: string;
+}
+
+export interface AgentRequirementProposal {
+  text: string;
+  expectedItemCount?: number;
+  items?: AgentRequirementItemProposal[];
+}
+
+export interface AgentRequirementItemUpdate {
+  itemId: string;
+  status: RequirementStatus;
+  evidenceIds?: string[];
+  blockedReason?: string;
+}
+
+export interface AgentRequirementUpdate {
+  requirementId: string;
+  status?: RequirementStatus;
+  evidenceIds?: string[];
+  blockedReason?: string;
+  expectedItemCount?: number;
+  addItems?: AgentRequirementItemProposal[];
+  itemUpdates?: AgentRequirementItemUpdate[];
 }
 
 export interface AgentModelResponse {
@@ -85,6 +128,8 @@ export interface AgentModelResponse {
   risk_level: RiskLevel;
   action?: AgentAction;
   actions?: AgentAction[];
+  requirements?: AgentRequirementProposal[];
+  requirementUpdates?: AgentRequirementUpdate[];
 }
 
 export interface ModelUsageEvent {
@@ -118,6 +163,73 @@ export interface AgentUsageSnapshot {
   provider?: Provider;
   model?: string;
   updatedAt?: number;
+}
+
+export type RunStatus =
+  | "running"
+  | "completed"
+  | "partial"
+  | "blocked"
+  | "stopped"
+  | "failed"
+  | "step_limit"
+  | "interrupted";
+
+export type RequirementStatus = "pending" | "satisfied" | "blocked";
+
+export interface RunRequirementItem {
+  id: string;
+  label: string;
+  status: RequirementStatus;
+  evidenceIds: string[];
+  blockedReason?: string;
+}
+
+export interface RunRequirement {
+  id: string;
+  text: string;
+  status: RequirementStatus;
+  evidenceIds: string[];
+  blockedReason?: string;
+  expectedItemCount?: number;
+  items?: RunRequirementItem[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface RunEvidence {
+  id: string;
+  kind: "observation" | "action" | "finding" | "download" | "user";
+  summary: string;
+  tabAlias?: string;
+  url?: string;
+  createdAt: number;
+}
+
+export interface RunFinding {
+  id: string;
+  tabAlias: string;
+  label: string;
+  url?: string;
+  text: string;
+  createdAt: number;
+}
+
+export interface RunReport {
+  id: string;
+  task: string;
+  status: RunStatus;
+  startUrl: string;
+  startTitle?: string;
+  requirements: RunRequirement[];
+  evidence: RunEvidence[];
+  findings: RunFinding[];
+  finalReport?: string;
+  failureReason?: string;
+  usage: AgentUsageSnapshot;
+  startedAt: number;
+  updatedAt: number;
+  endedAt?: number;
 }
 
 export interface DomElementInfo {
@@ -173,6 +285,30 @@ export interface PageFrameInfo {
   reason?: string;
 }
 
+export interface FullPageDocument {
+  url: string;
+  title: string;
+  byline?: string;
+  excerpt?: string;
+  markdown: string;
+  sourceCharacters: number;
+  truncated: boolean;
+}
+
+export interface ContentWaitCheckRequest {
+  condition: WaitCondition;
+  text?: string;
+  elementId?: string;
+  baselineUrl?: string;
+}
+
+export interface ContentWaitCheckResult {
+  matched: boolean;
+  signature: string;
+  url: string;
+  readyState: DocumentReadyState;
+}
+
 export interface StagedUploadFile {
   id: string;
   name: string;
@@ -225,6 +361,12 @@ export type BackgroundToSidePanelMessage =
 
 export type BackgroundToContentMessage =
   | { type: "CONTENT_OBSERVE" }
-  | { type: "CONTENT_EXECUTE"; action: AgentAction };
+  | { type: "CONTENT_EXECUTE"; action: AgentAction }
+  | { type: "CONTENT_READ_PAGE" }
+  | { type: "CONTENT_CHECK_WAIT"; request: ContentWaitCheckRequest };
 
-export type ContentToBackgroundResponse = PageObservation | ContentActionResult;
+export type ContentToBackgroundResponse =
+  | PageObservation
+  | ContentActionResult
+  | FullPageDocument
+  | ContentWaitCheckResult;

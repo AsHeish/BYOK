@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   maxSteps: 60,
   requestTimeoutSeconds: 60,
   promptCacheMode: "auto",
+  saveRunHistory: true,
   theme: "dark"
 };
 

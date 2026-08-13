@@ -1,8 +1,4 @@
-import type {
-  BackgroundToContentMessage,
-  ContentActionResult,
-  PageObservation
-} from "../shared/types";
+import type { BackgroundToContentMessage } from "../shared/types";
 
 export function getActiveTab(): Promise<chrome.tabs.Tab | undefined> {
   return new Promise((resolve, reject) => {
@@ -17,7 +13,7 @@ export function getActiveTab(): Promise<chrome.tabs.Tab | undefined> {
   });
 }
 
-export function sendTabMessage<T extends PageObservation | ContentActionResult>(
+export function sendTabMessage<T>(
   tabId: number,
   message: BackgroundToContentMessage
 ): Promise<T> {

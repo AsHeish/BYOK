@@ -333,6 +333,17 @@ export function SettingsPanel({
             placeholder="Optional USD rate"
           />
         </label>
+
+        <label className="checkbox-setting">
+          <input
+            type="checkbox"
+            checked={settings.saveRunHistory}
+            onChange={(event) =>
+              onChange({ ...settings, saveRunHistory: event.target.checked })
+            }
+          />
+          <span>Save run reports locally</span>
+        </label>
       </div>
 
       <p className="storage-note">

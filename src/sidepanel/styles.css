@@ -289,7 +289,7 @@ button:disabled {
 
 .tabs {
   display: inline-grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   flex: 0 0 auto;
   width: 100%;
   min-width: 0;
@@ -404,6 +404,7 @@ button:disabled {
 }
 
 .settings-view,
+.history-view,
 .console-view {
   padding-bottom: 2px;
 }
@@ -457,6 +458,21 @@ label {
   color: var(--muted-strong);
   font-size: 12px;
   font-weight: 720;
+}
+
+.checkbox-setting {
+  flex-direction: row;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+}
+
+.checkbox-setting input {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  padding: 0;
+  accent-color: var(--primary);
 }
 
 textarea,
@@ -762,6 +778,163 @@ select:focus {
   border-radius: 999px;
   background: color-mix(in srgb, var(--surface-strong) 78%, transparent);
   overflow-wrap: anywhere;
+}
+
+.history-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.history-toolbar,
+.run-report-header > div,
+.run-report-metrics {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-toolbar {
+  justify-content: space-between;
+}
+
+.history-toolbar p,
+.empty-history {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.run-report-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.run-report {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 86%, var(--primary));
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.run-report-header {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.run-report-header time,
+.run-report-metrics,
+.run-status {
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+}
+
+.run-report-header time,
+.run-report-metrics {
+  color: var(--muted);
+}
+
+.run-report-header strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.run-status {
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: var(--surface-strong);
+  color: var(--muted-strong);
+  font-weight: 800;
+}
+
+.run-status.completed {
+  background: var(--success-soft);
+  color: var(--primary);
+}
+
+.run-status.running {
+  background: var(--info-soft);
+  color: #60a5fa;
+}
+
+.run-status.partial,
+.run-status.blocked,
+.run-status.step_limit {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.run-status.failed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.run-report-metrics {
+  flex-wrap: wrap;
+  margin-top: 9px;
+}
+
+.run-report-metrics span + span::before {
+  margin-right: 8px;
+  color: var(--border-strong);
+  content: "/";
+}
+
+.run-report-output,
+.run-report-error {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.run-report-error {
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.run-findings {
+  margin-top: 10px;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.run-findings summary {
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.run-findings ol {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
+.run-findings li {
+  margin-bottom: 10px;
+}
+
+.run-findings li > strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text);
+}
+
+.run-report-actions {
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.run-report-actions button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 11px;
 }
 
 .log-panel {

@@ -1,5 +1,6 @@
 import { executeAction } from "./actions";
-import { observePage } from "./domMap";
+import { checkWaitCondition, observePage } from "./domMap";
+import { readFullPageDocument } from "./pageReader";
 import type { BackgroundToContentMessage, ContentActionResult } from "../shared/types";
 
 declare global {
@@ -32,6 +33,14 @@ async function handleMessage(message: BackgroundToContentMessage) {
 
   if (message.type === "CONTENT_EXECUTE") {
     return executeAction(message.action);
+  }
+
+  if (message.type === "CONTENT_READ_PAGE") {
+    return readFullPageDocument();
+  }
+
+  if (message.type === "CONTENT_CHECK_WAIT") {
+    return checkWaitCondition(message.request);
   }
 
   return {

@@ -1,21 +1,52 @@
-import { buildAgentMessages, type PromptFindingInfo, type PromptTabInfo } from "./prompts";
+import {
+  buildAgentMessages,
+  type PromptFindingInfo,
+  type PromptScreenshotInfo,
+  type PromptTabInfo,
+} from "./prompts";
 import { getActiveTab, notifySidePanel, sendTabMessage, sleep, tryInjectContentScript } from "./chromeAsync";
-import { ModelClientError, requestAgentStep, type ModelRequestNotice } from "./modelClient";
+import {
+  ModelClientError,
+  requestAgentStep,
+  sanitizeMessagesForLogging,
+  type ModelRequestNotice,
+} from "./modelClient";
 import { extractPdfText } from "./pdfText";
+import { captureAndResizeVisibleTab, isVisibleOwnedTab } from "./screenshot";
+import {
+  createRequirements as buildRunRequirements,
+  getCompletionLedgerIssues as inspectCompletionLedger,
+  updateRequirements as updateRunRequirements,
+} from "./runLedger";
+import { advanceDomStability } from "./wait";
 
 import { dataUrlToUint8Array, formatFileSize } from "../shared/fileData";
 import { MAX_LOG_ENTRIES, MAX_TRACKED_TABS } from "../shared/defaults";
 import { createId } from "../shared/ids";
-import { loadSettings, loadStagedUploadFile } from "../shared/storage";
+import {
+  loadSettings,
+  loadStagedUploadFile,
+  markInterruptedRunReports,
+  saveRunReport,
+} from "../shared/storage";
 import type {
   AgentAction,
   AgentLogEntry,
   AgentModelResponse,
+  AgentRequirementProposal,
+  AgentRequirementUpdate,
   AgentUsageSnapshot,
   BackgroundToSidePanelMessage,
+  ContentWaitCheckResult,
   ContentActionResult,
+  FullPageDocument,
   ModelUsageEvent,
   PageObservation,
+  RunFinding,
+  RunReport,
+  RunRequirement,
+  RunRequirementItem,
+  RunStatus,
   SidePanelToBackgroundMessage,
   StagedUploadFile
 } from "../shared/types";
@@ -27,17 +58,12 @@ interface RunningSession {
   windowId?: number;
   tabGroupId?: number;
   tabs: AgentTabState[];
-  findings: AgentFinding[];
+  run: RunReport;
+  pendingDocument?: FullPageDocument;
+  pendingScreenshot?: PromptScreenshotInfo;
+  visionDisabled?: boolean;
   nextTabNumber: number;
   stopped: boolean;
-}
-
-interface AgentFinding {
-  tabAlias: string;
-  label: string;
-  url?: string;
-  text: string;
-  createdAt: number;
 }
 
 type AgentTabOrigin = "seed" | "agent" | "popup";
@@ -57,6 +83,8 @@ interface AgentTabState {
 let runningSession: RunningSession | undefined;
 let logs: AgentLogEntry[] = [];
 let usageSnapshot: AgentUsageSnapshot = createEmptyUsageSnapshot();
+let runReportWriteQueue: Promise<void> = Promise.resolve();
+const historyDisabledRunIds = new Set<string>();
 
 const SIDE_PANEL_PATH = "sidepanel.html";
 const MAX_ACTIONS_PER_AGENT_STEP = 10;
@@ -67,10 +95,17 @@ const MAX_SUMMARY_INPUT_CHARS = 30000;
 const MAX_DOWNLOADS_FOR_PROMPT = 5;
 const MAX_FINDINGS_FOR_PROMPT = 12;
 const MAX_FINDING_CHARS_FOR_PROMPT = 700;
+const DEFAULT_WAIT_TIMEOUT_MS = 8_000;
+const MAX_WAIT_TIMEOUT_MS = 15_000;
+const WAIT_POLL_INTERVAL_MS = 200;
+const DOM_STABLE_SAMPLE_COUNT = 3;
 const AGENT_TAB_GROUP_TITLE = "AI Agent";
 const AGENT_TAB_GROUP_COLOR: chrome.tabGroups.ColorEnum = "blue";
 
 configureSidePanelSafely();
+void markInterruptedRunReports().catch((error: unknown) => {
+  console.warn("Could not mark interrupted run reports.", error);
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   configureSidePanelSafely();
@@ -82,6 +117,12 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.action.onClicked.addListener((tab) => {
   void openSidePanel(tab);
+});
+
+chrome.commands.onCommand.addListener((command) => {
+  if (command === "open_side_panel") {
+    void openSidePanelInLastFocusedWindow();
+  }
 });
 
 chrome.runtime.onMessage.addListener((message: SidePanelToBackgroundMessage, _sender, sendResponse) => {
@@ -155,6 +196,16 @@ async function openSidePanel(tab: chrome.tabs.Tab): Promise<void> {
   }
 }
 
+async function openSidePanelInLastFocusedWindow(): Promise<void> {
+  if (!chrome.sidePanel?.open) {
+    return;
+  }
+  const window = await chrome.windows.getLastFocused();
+  if (typeof window.id === "number") {
+    await chrome.sidePanel.open({ windowId: window.id });
+  }
+}
+
 async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Promise<unknown> {
   switch (message.type) {
     case "SIDEPANEL_RUN_TASK":
@@ -162,7 +213,7 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
       return { ok: true };
 
     case "SIDEPANEL_STOP_TASK":
-      stopCurrentTask("Stopped by user.");
+      stopCurrentTask("Stopped by user.", "stopped");
       return { ok: true };
 
     case "SIDEPANEL_GET_STATE":
@@ -198,6 +249,11 @@ async function startTask(task: string): Promise<void> {
       appendLog("error", "Add a model name in Settings before running a task.");
       return;
     }
+    if (settings.saveRunHistory) {
+      historyDisabledRunIds.delete(taskId);
+    } else {
+      historyDisabledRunIds.add(taskId);
+    }
 
     const tab = await getActiveTab();
     if (!tab?.id || !isSupportedTabUrl(tab.url)) {
@@ -205,9 +261,10 @@ async function startTask(task: string): Promise<void> {
       return;
     }
 
-    runningSession = createRunningSession(taskId, tab);
-    await ensureSessionTabGroup(runningSession, [tab.id]);
     usageSnapshot = createEmptyUsageSnapshot(settings);
+    runningSession = createRunningSession(taskId, task, tab, usageSnapshot);
+    await ensureSessionTabGroup(runningSession, [tab.id]);
+    await persistRunReport(runningSession.run);
     emitUsage();
     emitStatus();
     appendLog("info", `Task started on ${new URL(tab.url).hostname} as tab-1 in the "${AGENT_TAB_GROUP_TITLE}" tab group.`);
@@ -231,11 +288,14 @@ async function startTask(task: string): Promise<void> {
       assertOwnedTabId(session, session.activeTabId);
       const observation = await observePage(session.activeTabId);
       updateTrackedTabFromObservation(session, session.activeTabId, observation);
+      recordObservationEvidence(session, observation);
       appendLog("info", `Observed ${session.activeTabAlias}: ${observation.title || observation.url}`);
       const stagedFile = await loadStagedUploadFile();
       const recentDownloads = await getRecentDownloadsForPrompt(MAX_DOWNLOADS_FOR_PROMPT);
+      const documentContext = session.pendingDocument;
+      const screenshotContext = session.visionDisabled ? undefined : session.pendingScreenshot;
 
-      const messages = buildAgentMessages({
+      const promptArgs = {
         task,
         observation,
         step,
@@ -244,15 +304,43 @@ async function startTask(task: string): Promise<void> {
         tabs: getPromptTabs(session),
         activeTabAlias: session.activeTabAlias,
         findings: getPromptFindings(session),
-        totalFindingCount: session.findings.length,
+        totalFindingCount: session.run.findings.length,
+        requirements: session.run.requirements,
+        evidence: session.run.evidence,
+        document: documentContext,
+        screenshot: screenshotContext,
         stagedFile: stagedFile ? toPromptStagedFile(stagedFile) : undefined,
         downloads: recentDownloads
-      });
+      };
+      let messages = buildAgentMessages(promptArgs);
       logPromptBeforeModelCall(step, messages);
 
       let modelResponse: AgentModelResponse;
       try {
-        const modelResult = await requestAgentStep(settings, messages, reportModelNotice);
+        let modelResult;
+        try {
+          modelResult = await requestAgentStep(settings, messages, reportModelNotice);
+        } catch (error) {
+          if (!screenshotContext || !isVisionUnsupportedError(error)) {
+            throw error;
+          }
+          if (error instanceof ModelClientError && error.usage) {
+            recordUsageEvent(error.usage, settings);
+          }
+          session.visionDisabled = true;
+          session.pendingScreenshot = undefined;
+          appendLog("warning", "The configured model rejected screenshot input. Retrying this step with text-only context; visual inspection is disabled for this run.");
+          messages = buildAgentMessages({ ...promptArgs, screenshot: undefined });
+          logPromptBeforeModelCall(step, messages);
+          modelResult = await requestAgentStep(settings, messages, reportModelNotice);
+        }
+        if (session.pendingDocument === documentContext) {
+          session.pendingDocument = undefined;
+        }
+        if (screenshotContext && session.pendingScreenshot === screenshotContext) {
+          session.pendingScreenshot = undefined;
+          recordVisualEvidence(session, screenshotContext, modelResult.response.thought_summary);
+        }
         recordUsageEvent(modelResult.usage, settings);
         modelResponse = modelResult.response;
       } catch (error) {
@@ -268,6 +356,8 @@ async function startTask(task: string): Promise<void> {
         throw error;
       }
 
+      initializeRequirements(session, task, modelResponse.requirements);
+      applyRequirementUpdates(session, modelResponse.requirementUpdates);
       const plannedActions = getPlannedActions(modelResponse);
 
       appendLog("info", `${modelResponse.thought_summary} Next: ${formatActions(plannedActions)}.`);
@@ -277,6 +367,7 @@ async function startTask(task: string): Promise<void> {
       const loopResult = await handlePlannedActions(modelResponse, plannedActions, completedInputActions, taskId);
       previousResult = buildPreviousResultForModel(loopResult);
       appendLog(loopResult.ok ? "success" : loopResult.recoverable ? "warning" : "error", loopResult.message);
+      queueRunReportSave(session.run);
 
       if (loopResult.shouldStop || (!loopResult.ok && !loopResult.recoverable) || isStopped(taskId)) {
         break;
@@ -285,16 +376,23 @@ async function startTask(task: string): Promise<void> {
       await sleep(getPostBatchDelay(plannedActions));
     }
 
-    if (!isStopped(taskId)) {
+    if (!isStopped(taskId) && runningSession?.taskId === taskId && runningSession.run.status === "running") {
+      finishRun(runningSession, "step_limit", "The task reached the configured maximum number of steps.");
       appendLog("info", "Task loop finished.");
     }
   } catch (error) {
-    appendLog("error", getErrorMessage(error));
+    const message = getErrorMessage(error);
+    if (runningSession?.taskId === taskId && runningSession.run.status === "running") {
+      finishRun(runningSession, "failed", message);
+    }
+    appendLog("error", message);
   } finally {
     if (runningSession?.taskId === taskId) {
+      await persistRunReport(runningSession.run);
       runningSession = undefined;
       emitStatus();
     }
+    historyDisabledRunIds.delete(taskId);
   }
 }
 
@@ -317,6 +415,17 @@ async function handlePlannedActions(
   const messages: string[] = [];
   const completedActions: string[] = [];
   let lastObservation: PageObservation | undefined;
+
+  if (actions.some((action) => action.type === "done") && actions.length !== 1) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "Completion was rejected because done must be the only action in its batch. Re-observe and propose done by itself after all work is complete.",
+      shouldStop: false,
+      completedActions,
+      failedAction: "done was batched with another action",
+    };
+  }
 
   for (let index = 0; index < actions.length; index += 1) {
     if (isStopped(taskId)) {
@@ -373,6 +482,11 @@ async function handlePlannedActions(
       const latestSession = runningSession;
       rememberCompletedInputAction(action, completedInputActions, latestSession?.activeTabAlias || session.activeTabAlias);
       completedActions.push(formatCompletedAction(index, action, result.message, "done"));
+      if (latestSession?.taskId === taskId && action.type !== "done" && action.type !== "ask_user") {
+        if (action.type !== "inspect_screenshot") {
+          recordActionEvidence(latestSession, action, result.message);
+        }
+      }
     }
 
     if (result.shouldStop || !result.ok) {
@@ -412,29 +526,60 @@ async function handleSingleAction(
   modelResponse: AgentModelResponse,
   action: AgentAction
 ): Promise<ActionLoopResult> {
-  if (action.type === "done") {
-    return {
-      ok: true,
-      message: action.text || modelResponse.thought_summary || "Done.",
-      shouldStop: true,
-      completedActions: []
-    };
-  }
-
-  if (action.type === "ask_user") {
-    return {
-      ok: true,
-      message: action.text || modelResponse.thought_summary || "The agent needs input from you.",
-      shouldStop: true,
-      completedActions: []
-    };
-  }
-
   const session = runningSession;
   if (!session || session.taskId !== taskId) {
     return {
       ok: true,
       message: "Stopped by user.",
+      shouldStop: true,
+      completedActions: []
+    };
+  }
+
+  if (action.type === "done") {
+    const finalReport = action.text || modelResponse.thought_summary || "Done.";
+    const ledgerIssues = getCompletionLedgerIssues(session.run, action.outcome);
+    if (ledgerIssues.length) {
+      return {
+        ok: false,
+        recoverable: true,
+        message: `Completion rejected: ${ledgerIssues.join(" ")}`,
+        shouldStop: false,
+        completedActions: [],
+      };
+    }
+
+    const observation = await observePage(session.activeTabId);
+    updateTrackedTabFromObservation(session, session.activeTabId, observation);
+    recordObservationEvidence(session, observation);
+    const validation = await validateCompletionWithModel(session, observation, finalReport);
+    if (!validation.accepted) {
+      return {
+        ok: false,
+        recoverable: true,
+        message: `Completion rejected by final validation: ${validation.message}`,
+        shouldStop: false,
+        completedActions: [],
+        lastObservation: observation,
+      };
+    }
+
+    finishRun(session, action.outcome === "partial" ? "partial" : "completed", undefined, finalReport);
+    return {
+      ok: true,
+      message: finalReport,
+      shouldStop: true,
+      completedActions: [],
+      lastObservation: observation,
+    };
+  }
+
+  if (action.type === "ask_user") {
+    const message = action.text || modelResponse.thought_summary || "The agent needs input from you.";
+    finishRun(session, "blocked", message, message);
+    return {
+      ok: true,
+      message,
       shouldStop: true,
       completedActions: []
     };
@@ -450,6 +595,41 @@ async function handleSingleAction(
       shouldStop: false,
       recoverable: result.recoverable,
       completedActions: []
+    };
+  }
+
+  if (action.type === "read_page") {
+    const document = await readPageDocument(session.activeTabId);
+    session.pendingDocument = document;
+    recordDocumentEvidence(session, document);
+    return {
+      ok: true,
+      message: `Read the full page document for ${document.title || document.url}.`,
+      shouldStop: false,
+      completedActions: [],
+    };
+  }
+
+  if (action.type === "inspect_screenshot") {
+    const result = await captureScreenshotForSession(session);
+    return {
+      ok: result.ok,
+      message: result.message,
+      shouldStop: false,
+      recoverable: result.recoverable,
+      completedActions: [],
+    };
+  }
+
+  if (action.type === "wait_for") {
+    const result = await waitForCondition(session, action, taskId);
+    return {
+      ok: result.ok,
+      message: result.message,
+      shouldStop: isStopped(taskId),
+      recoverable: result.recoverable,
+      completedActions: [],
+      lastObservation: result.observation,
     };
   }
 
@@ -530,11 +710,175 @@ async function observePage(tabId: number): Promise<PageObservation> {
   }
 }
 
-function createRunningSession(taskId: string, tab: chrome.tabs.Tab): RunningSession {
+async function readPageDocument(tabId: number): Promise<FullPageDocument> {
+  try {
+    return await sendTabMessage<FullPageDocument>(tabId, { type: "CONTENT_READ_PAGE" });
+  } catch (firstError) {
+    try {
+      await tryInjectContentScript(tabId);
+      await sleep(250);
+      return await sendTabMessage<FullPageDocument>(tabId, { type: "CONTENT_READ_PAGE" });
+    } catch {
+      throw new Error(`Could not read the full page document. ${getErrorMessage(firstError)}`);
+    }
+  }
+}
+
+async function captureScreenshotForSession(
+  session: RunningSession,
+): Promise<{ ok: boolean; message: string; recoverable?: boolean }> {
+  if (session.visionDisabled) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "Visual inspection is disabled because the configured model rejected screenshot input earlier in this run.",
+    };
+  }
+  if (session.windowId === undefined) {
+    return { ok: false, recoverable: true, message: "The agent window is not available for screenshot capture." };
+  }
+
+  assertOwnedTabId(session, session.activeTabId);
+  const [visibleTab] = await chrome.tabs.query({ active: true, windowId: session.windowId });
+  if (!isVisibleOwnedTab(session.tabs.map((tab) => tab.tabId), session.activeTabId, visibleTab?.id)) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: "Screenshot capture was refused because the visible tab is not the active agent-owned tab. Use switch_tab to activate the tracked tab, then retry.",
+    };
+  }
+
+  const trackedTab = findTrackedTab(session);
+  try {
+    const dataUrl = await captureAndResizeVisibleTab(session.windowId);
+    session.pendingScreenshot = {
+      dataUrl,
+      tabAlias: session.activeTabAlias,
+      url: visibleTab.url || trackedTab?.url,
+      title: visibleTab.title || trackedTab?.title,
+    };
+    return {
+      ok: true,
+      message: `Captured a one-shot screenshot of ${session.activeTabAlias} for visual inspection on the next step.`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: `Could not capture the active agent tab. ${getErrorMessage(error)}`,
+    };
+  }
+}
+
+async function waitForCondition(
+  session: RunningSession,
+  action: AgentAction,
+  taskId: string,
+): Promise<ContentActionResult> {
+  const condition = action.waitCondition;
+  if (!condition) {
+    return { ok: false, recoverable: true, message: "wait_for requires waitCondition." };
+  }
+  if ((condition === "text_present" || condition === "text_absent") && !action.text?.trim()) {
+    return { ok: false, recoverable: true, message: `${condition} requires text.` };
+  }
+  if ((condition === "element_hidden" || condition === "element_enabled") && !action.elementId) {
+    return { ok: false, recoverable: true, message: `${condition} requires elementId.` };
+  }
+
+  const timeoutMs = Math.min(Math.max(action.timeoutMs || DEFAULT_WAIT_TIMEOUT_MS, 250), MAX_WAIT_TIMEOUT_MS);
+  const tabBefore = await getTabSafely(session.activeTabId);
+  const baselineUrl = action.url || tabBefore?.url;
+  const startedAt = Date.now();
+  let previousSignature: string | undefined;
+  let stableSamples = 0;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (isStopped(taskId)) {
+      return { ok: true, message: "Wait stopped by user." };
+    }
+
+    const check = await checkWaitConditionSafely(session.activeTabId, {
+      condition,
+      text: action.text,
+      elementId: action.elementId,
+      baselineUrl,
+    });
+    if (check) {
+      let matched = check.matched;
+      if (condition === "dom_stable") {
+        const progress = advanceDomStability(
+          previousSignature,
+          stableSamples,
+          check.signature,
+          check.readyState,
+          DOM_STABLE_SAMPLE_COUNT,
+        );
+        stableSamples = progress.stableSamples;
+        previousSignature = progress.signature;
+        matched = progress.matched;
+      }
+
+      if (matched) {
+        const observation = await observePageSafely(session.activeTabId);
+        return {
+          ok: true,
+          message: `Wait condition ${condition} was met after ${Date.now() - startedAt}ms.`,
+          observation,
+        };
+      }
+    }
+
+    await sleep(WAIT_POLL_INTERVAL_MS);
+  }
+
+  return {
+    ok: false,
+    recoverable: true,
+    message: `Timed out after ${timeoutMs}ms waiting for ${condition}.`,
+    observation: await observePageSafely(session.activeTabId),
+  };
+}
+
+async function checkWaitConditionSafely(
+  tabId: number,
+  request: Parameters<typeof sendWaitCheck>[1],
+): Promise<ContentWaitCheckResult | undefined> {
+  try {
+    return await sendWaitCheck(tabId, request);
+  } catch {
+    try {
+      await tryInjectContentScript(tabId);
+      return await sendWaitCheck(tabId, request);
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function sendWaitCheck(
+  tabId: number,
+  request: {
+    condition: NonNullable<AgentAction["waitCondition"]>;
+    text?: string;
+    elementId?: string;
+    baselineUrl?: string;
+  },
+): Promise<ContentWaitCheckResult> {
+  return sendTabMessage<ContentWaitCheckResult>(tabId, { type: "CONTENT_CHECK_WAIT", request });
+}
+
+function createRunningSession(
+  taskId: string,
+  task: string,
+  tab: chrome.tabs.Tab,
+  usage: AgentUsageSnapshot,
+): RunningSession {
   if (typeof tab.id !== "number") {
     throw new Error("The active tab does not have an id.");
   }
 
+  const now = Date.now();
   const initialTab: AgentTabState = {
     alias: "tab-1",
     tabId: tab.id,
@@ -543,7 +887,7 @@ function createRunningSession(taskId: string, tab: chrome.tabs.Tab): RunningSess
     title: tab.title,
     url: tab.url,
     active: true,
-    createdAt: Date.now()
+    createdAt: now
   };
 
   return {
@@ -552,7 +896,19 @@ function createRunningSession(taskId: string, tab: chrome.tabs.Tab): RunningSess
     activeTabAlias: initialTab.alias,
     windowId: tab.windowId,
     tabs: [initialTab],
-    findings: [],
+    run: {
+      id: taskId,
+      task,
+      status: "running",
+      startUrl: tab.url || "",
+      startTitle: tab.title,
+      requirements: [],
+      evidence: [],
+      findings: [],
+      usage,
+      startedAt: now,
+      updatedAt: now,
+    },
     nextTabNumber: 2,
     stopped: false
   };
@@ -996,7 +1352,8 @@ async function goBackInTab(tabId: number): Promise<ContentActionResult> {
 
 async function summarizeCurrentPage(session: RunningSession, instruction?: string): Promise<ContentActionResult> {
   const observation = await observePage(session.activeTabId);
-  const pageText = truncateForSummary(observation.text);
+  const document = await readPageDocument(session.activeTabId);
+  const pageText = truncateForSummary(document.markdown || observation.text);
   if (!pageText.trim()) {
     return {
       ok: false,
@@ -1007,13 +1364,14 @@ async function summarizeCurrentPage(session: RunningSession, instruction?: strin
   }
 
   const summary = await summarizeTextWithModel({
-    title: observation.title || observation.url,
-    sourceLabel: observation.url,
+    title: document.title || observation.title || observation.url,
+    sourceLabel: document.url,
     text: pageText,
     instruction: instruction || "Summarize this web page clearly and concisely."
   });
 
   recordFinding(session, {
+    id: createId("finding"),
     tabAlias: session.activeTabAlias,
     label: observation.title || observation.url,
     url: observation.url,
@@ -1062,6 +1420,7 @@ async function summarizePdf(session: RunningSession, action: AgentAction): Promi
   });
 
   recordFinding(session, {
+    id: createId("finding"),
     tabAlias: session.activeTabAlias,
     label: source.label,
     text: summary,
@@ -1074,12 +1433,25 @@ async function summarizePdf(session: RunningSession, action: AgentAction): Promi
   };
 }
 
-function recordFinding(session: RunningSession, finding: AgentFinding): void {
-  session.findings = [...session.findings, finding];
+function recordFinding(session: RunningSession, finding: RunFinding): void {
+  session.run.findings = [...session.run.findings, finding];
+  session.run.evidence = [
+    ...session.run.evidence,
+    {
+      id: finding.id,
+      kind: "finding",
+      summary: `${finding.label}: ${truncateFindingText(finding.text)}`,
+      tabAlias: finding.tabAlias,
+      url: finding.url,
+      createdAt: finding.createdAt,
+    },
+  ];
+  touchRun(session.run);
+  queueRunReportSave(session.run);
 }
 
 function getPromptFindings(session: RunningSession): PromptFindingInfo[] {
-  return session.findings.slice(-MAX_FINDINGS_FOR_PROMPT).map((finding) => ({
+  return session.run.findings.slice(-MAX_FINDINGS_FOR_PROMPT).map((finding) => ({
     tabAlias: finding.tabAlias,
     label: finding.label,
     url: finding.url,
@@ -1092,6 +1464,82 @@ function truncateFindingText(text: string): string {
   return normalized.length <= MAX_FINDING_CHARS_FOR_PROMPT
     ? normalized
     : `${normalized.slice(0, MAX_FINDING_CHARS_FOR_PROMPT)}...`;
+}
+
+function initializeRequirements(
+  session: RunningSession,
+  task: string,
+  proposals?: AgentRequirementProposal[],
+): void {
+  if (session.run.requirements.length > 0) {
+    return;
+  }
+  session.run.requirements = buildRunRequirements(task, proposals);
+  touchRun(session.run);
+  queueRunReportSave(session.run);
+}
+
+function applyRequirementUpdates(session: RunningSession, updates?: AgentRequirementUpdate[]): void {
+  if (!updates?.length || session.run.requirements.length === 0) {
+    return;
+  }
+  const result = updateRunRequirements(
+    session.run.requirements,
+    updates,
+    session.run.evidence,
+  );
+  session.run.requirements = result.requirements;
+  if (result.changed) {
+    touchRun(session.run);
+    queueRunReportSave(session.run);
+  }
+}
+
+function getCompletionLedgerIssues(
+  report: RunReport,
+  outcome: AgentAction["outcome"],
+): string[] {
+  return inspectCompletionLedger(report, outcome);
+}
+
+async function validateCompletionWithModel(
+  session: RunningSession,
+  observation: PageObservation,
+  proposedReport: string,
+): Promise<{ accepted: boolean; message: string }> {
+  const settings = await loadSettings();
+  const messages: Array<{ role: "system" | "user"; content: string }> = [
+    {
+      role: "system",
+      content: [
+        "You validate completion of a browser task from an extension-owned evidence ledger and a fresh page observation.",
+        "Return strict JSON using the normal agent schema.",
+        "Return action type done only when every requirement is supported by the supplied evidence and the fresh observation does not contradict completion.",
+        "Otherwise return action type ask_user with text listing the concrete missing or contradictory work.",
+        "Do not infer completion from the proposed final report alone. Do not invent evidence.",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: [
+        `Task: ${session.run.task}`,
+        `Proposed final report: ${proposedReport}`,
+        `Requirements: ${JSON.stringify(session.run.requirements)}`,
+        `Evidence: ${JSON.stringify(session.run.evidence.slice(-80))}`,
+        `Fresh URL: ${observation.url}`,
+        `Fresh title: ${observation.title}`,
+        `Fresh text: ${observation.text.slice(0, 6_000)}`,
+        `Fresh controls: ${JSON.stringify(observation.elements.slice(0, 40))}`,
+      ].join("\n"),
+    },
+  ];
+
+  const result = await requestAgentStep(settings, messages, reportModelNotice);
+  recordUsageEvent(result.usage, settings);
+  const action = getPlannedActions(result.response)[0];
+  return action.type === "done"
+    ? { accepted: true, message: action.text || result.response.thought_summary }
+    : { accepted: false, message: action.text || result.response.thought_summary || "The evidence did not prove completion." };
 }
 
 async function summarizeTextWithModel(args: {
@@ -1362,9 +1810,133 @@ function canActionUnloadContentScript(action: AgentAction): boolean {
   return action.type === "click" || action.type === "multi_click" || action.type === "navigate" || action.type === "go_back";
 }
 
-function stopCurrentTask(reason: string): void {
+function recordObservationEvidence(session: RunningSession, observation: PageObservation): void {
+  const latest = session.run.evidence[session.run.evidence.length - 1];
+  const summary = `Observed ${observation.title || observation.url}`;
+  if (latest?.kind === "observation" && latest.url === observation.url && latest.summary === summary) {
+    return;
+  }
+
+  session.run.evidence = [
+    ...session.run.evidence,
+    {
+      id: createId("evidence"),
+      kind: "observation",
+      summary,
+      tabAlias: session.activeTabAlias,
+      url: observation.url,
+      createdAt: Date.now(),
+    },
+  ];
+  touchRun(session.run);
+}
+
+function recordDocumentEvidence(session: RunningSession, document: FullPageDocument): void {
+  session.run.evidence = [
+    ...session.run.evidence,
+    {
+      id: createId("evidence"),
+      kind: "observation",
+      summary: `Read full-page document ${document.title || document.url} (${document.sourceCharacters} characters${
+        document.truncated ? ", truncated" : ""
+      }).`,
+      tabAlias: session.activeTabAlias,
+      url: document.url,
+      createdAt: Date.now(),
+    },
+  ];
+  touchRun(session.run);
+  queueRunReportSave(session.run);
+}
+
+function recordVisualEvidence(
+  session: RunningSession,
+  screenshot: PromptScreenshotInfo,
+  modelSummary: string,
+): void {
+  session.run.evidence = [
+    ...session.run.evidence,
+    {
+      id: createId("evidence"),
+      kind: "observation",
+      summary: `Visual inspection of ${screenshot.title || screenshot.url || screenshot.tabAlias}: ${modelSummary}`,
+      tabAlias: screenshot.tabAlias,
+      url: screenshot.url,
+      createdAt: Date.now(),
+    },
+  ];
+  touchRun(session.run);
+  queueRunReportSave(session.run);
+}
+
+function recordActionEvidence(session: RunningSession, action: AgentAction, message: string): void {
+  const trackedTab = findTrackedTab(session);
+  session.run.evidence = [
+    ...session.run.evidence,
+    {
+      id: createId("evidence"),
+      kind: "action",
+      summary: `${formatAction(action)}: ${message}`,
+      tabAlias: session.activeTabAlias,
+      url: trackedTab?.url,
+      createdAt: Date.now(),
+    },
+  ];
+  touchRun(session.run);
+}
+
+function finishRun(
+  session: RunningSession,
+  status: Exclude<RunStatus, "running">,
+  failureReason?: string,
+  finalReport?: string,
+): void {
+  const now = Date.now();
+  session.run.status = status;
+  session.run.failureReason = failureReason;
+  session.run.finalReport = finalReport || session.run.finalReport;
+  session.run.usage = usageSnapshot;
+  session.run.updatedAt = now;
+  session.run.endedAt = now;
+  queueRunReportSave(session.run);
+}
+
+function touchRun(report: RunReport): void {
+  report.updatedAt = Date.now();
+}
+
+function queueRunReportSave(report: RunReport): void {
+  if (historyDisabledRunIds.has(report.id)) {
+    return;
+  }
+  void enqueueRunReportSave(report).catch((error: unknown) => {
+    console.warn("Could not persist run report.", error);
+  });
+}
+
+async function persistRunReport(report: RunReport): Promise<void> {
+  if (historyDisabledRunIds.has(report.id)) {
+    return;
+  }
+  await enqueueRunReportSave(report);
+}
+
+function enqueueRunReportSave(report: RunReport): Promise<void> {
+  const snapshot = JSON.parse(JSON.stringify(report)) as RunReport;
+  runReportWriteQueue = runReportWriteQueue
+    .catch(() => undefined)
+    .then(async () => {
+      await saveRunReport(snapshot);
+    });
+  return runReportWriteQueue;
+}
+
+function stopCurrentTask(reason: string, status: Exclude<RunStatus, "running"> = "stopped"): void {
   if (runningSession && !runningSession.stopped) {
     runningSession.stopped = true;
+    if (runningSession.run.status === "running") {
+      finishRun(runningSession, status, reason);
+    }
     appendLog("warning", reason);
   }
 
@@ -1388,10 +1960,15 @@ function appendLog(level: AgentLogEntry["level"], message: string): void {
 }
 
 function logPromptBeforeModelCall(step: number, messages: ReturnType<typeof buildAgentMessages>): void {
+  const safeMessages = sanitizeMessagesForLogging(messages);
   console.groupCollapsed(`[BYOK Agent] Prompt messages for step ${step}`);
-  console.info({ messages });
-  console.info("Messages JSON:", JSON.stringify(messages, null, 2));
+  console.info({ messages: safeMessages });
+  console.info("Messages JSON:", JSON.stringify(safeMessages, null, 2));
   console.groupEnd();
+}
+
+function isVisionUnsupportedError(error: unknown): boolean {
+  return error instanceof ModelClientError && /image|vision|multimodal|image_url|content.*array|unsupported.*content/i.test(error.message);
 }
 
 function isHiddenActionLog(message: string): boolean {
@@ -1471,6 +2048,11 @@ function recordUsageEvent(event: ModelUsageEvent, settings: {
   };
 
   console.info("[BYOK Agent] Usage dashboard update:", usageSnapshot);
+  if (runningSession) {
+    runningSession.run.usage = usageSnapshot;
+    touchRun(runningSession.run);
+    queueRunReportSave(runningSession.run);
+  }
   emitUsage();
 }
 
@@ -1554,6 +2136,12 @@ function formatAction(action: AgentAction): string {
   if (action.type === "summarize_page") {
     return "summarize page";
   }
+  if (action.type === "read_page") {
+    return "read full page";
+  }
+  if (action.type === "inspect_screenshot") {
+    return "inspect screenshot";
+  }
   if (action.type === "summarize_pdf") {
     return action.downloadId ? `summarize PDF download #${action.downloadId}` : `summarize PDF ${action.url || action.fileId || ""}`.trim();
   }
@@ -1598,6 +2186,9 @@ function formatAction(action: AgentAction): string {
   }
   if (action.type === "close_tab") {
     return `close ${action.tabAlias || "active tab"}`;
+  }
+  if (action.type === "wait_for") {
+    return `wait for ${action.waitCondition || "condition"}`;
   }
   if (action.type === "scroll") {
     return `scroll ${action.direction || "down"}`;
@@ -1699,7 +2290,12 @@ function getInterActionDelay(action: AgentAction): number {
 }
 
 function shouldHaltBatchAfterAction(action: AgentAction): boolean {
-  return isNavigationLikeAction(action);
+  return (
+    isNavigationLikeAction(action) ||
+    action.type === "wait_for" ||
+    action.type === "read_page" ||
+    action.type === "inspect_screenshot"
+  );
 }
 
 function isNavigationLikeAction(action: AgentAction): boolean {

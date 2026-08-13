@@ -2,12 +2,21 @@
   "manifest_version": 3,
   "name": "BYOK AI Browser Agent",
   "description": "A bring-your-own-key browser agent that can summarize, extract, and safely interact with webpages.",
-  "version": "0.1.49",
+  "version": "0.2.0",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "downloads", "scripting", "sidePanel", "storage", "tabGroups", "tabs", "unlimitedStorage"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_title": "Open BYOK Agent side panel"
+  },
+  "commands": {
+    "open_side_panel": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "Open the BYOK Agent side panel"
+    }
   },
   "side_panel": {
     "default_path": "sidepanel.html"
