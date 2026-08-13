@@ -1,6 +1,7 @@
 import type { AgentModelResponse, PageObservation } from "../shared/types";
+import { MAX_TRACKED_TABS } from "../shared/defaults";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.45";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.1.47";
 const MAX_ACTIONS_PER_RESPONSE = 10;
 const MAX_OBSERVATION_INPUT_TOKENS = 4000;
 const APPROX_CHARS_PER_TOKEN = 4;
@@ -30,6 +31,13 @@ export interface PromptDownloadInfo {
   exists?: boolean;
 }
 
+export interface PromptFindingInfo {
+  tabAlias: string;
+  label: string;
+  url?: string;
+  text: string;
+}
+
 export function buildAgentMessages(args: {
   task: string;
   observation: PageObservation;
@@ -38,6 +46,8 @@ export function buildAgentMessages(args: {
   previousResult?: string;
   tabs?: PromptTabInfo[];
   activeTabAlias?: string;
+  findings?: PromptFindingInfo[];
+  totalFindingCount?: number;
   stagedFile?: PromptStagedFileInfo;
   downloads?: PromptDownloadInfo[];
 }): Array<{ role: "system" | "user"; content: string }> {
@@ -56,7 +66,12 @@ export function buildAgentMessages(args: {
         "- The browser executes batches in fail-safe mode: it stops the remaining batch if an action fails, goes stale, asks the user, finishes, or navigates, then sends you the latest progress and page observation.",
         "- Good batches: fill an answer then click a visible Continue button; select several visible controls; drag several visible items to visible targets.",
         "- Use go_back when you need to return to the previous browser history page.",
-        "- You can manage tracked browser tabs by alias. Use open_tab with url, switch_tab with tabAlias, close_tab with tabAlias, reload with optional tabAlias, and go_forward/go_back for browser history.",
+        "- You may manage tracked browser tabs by alias. Use open_tab with url, switch_tab with tabAlias, close_tab with tabAlias, reload with optional tabAlias, and go_forward/go_back for browser history.",
+        "- You can only use the tracked tabs listed below. They all live in one browser tab group owned by this agent run. The user's other tabs and windows are not visible to you and cannot be read, clicked, or closed.",
+        "- open_tab always creates the tab inside that agent tab group. A tab opened by a link or script inside a tracked tab is adopted into the group automatically and appears in the tracked tab list on the next step.",
+        `- The agent can own at most ${MAX_TRACKED_TABS} tabs at a time. If open_tab is refused because of that limit, close_tab a tab you no longer need first.`,
+        "- If a tab you were using disappears from the tracked list, the user removed it from the agent tab group. Do not try to reach it again; continue with a tab that is still listed.",
+        "- If the task needs a page that is not in the tracked list, use open_tab or navigate rather than assuming the user already has it open.",
         "- The full page observation is only for the active tab alias. To work on another tab, switch_tab first and wait for the next observation.",
         "- Page observations may include elements from accessible same-origin iframes and open shadow DOM roots. Use frame/root fields to distinguish repeated controls in embedded widgets.",
         "- Cross-origin iframes and closed shadow roots cannot be inspected directly. If a needed control is only inside an inaccessible frame/root, ask the user to open that frame/page directly or interact manually.",
@@ -64,6 +79,15 @@ export function buildAgentMessages(args: {
         "- If no staged file is available and the task needs an upload, use ask_user.",
         "- Use list_downloads to inspect recent browser downloads. Use summarize_pdf for PDFs from a staged file, a PDF URL, a downloadId, or the current PDF tab.",
         "- For a normal web page summary, use summarize_page or return done with the summary in action.text when the current observation already has enough text.",
+        "- summarize_page and summarize_pdf do not end the run. Each result is saved as a finding and shown back to you under \"Findings collected so far\". After a summary you must keep going until the whole task is complete.",
+        "",
+        "Multi-item tasks:",
+        "- When the task says each, every, all, or names a set of items, first enumerate the full list of items from the observation and state the count in thought_summary.",
+        "- Then handle exactly one item per step: open or navigate to it, summarize or extract it, then move to the next item. Do not stop after the first item.",
+        "- Use the findings list to track progress. Before returning done, compare the number of findings against the number of items you enumerated.",
+        "- Only return done when every item has a finding, or when you have hit the tab limit or step limit. When you return done early, say in action.text which items are still unhandled.",
+        "- When iterating over many items, close each finished tab with close_tab before opening the next one so you stay under the agent tab limit.",
+        "- If the item list is paginated, finish the visible page, then move to the next page before returning done.",
         "- Do not batch actions after navigate, go_back, go_forward, reload, open_tab, switch_tab, close_tab, after a click that likely changes the page, after a final submit-like action, or when you need the next page observation to decide.",
         "- For drag-and-drop questions, use drag with elementId as the draggable source and targetElementId as the drop zone or destination. For several visible drag/drop pairs in the same question, prefer multi_drag with dragPairs.",
         "- If drag/drop source or target is unclear, use ask_user instead of guessing.",
@@ -109,9 +133,12 @@ export function buildAgentMessages(args: {
       role: "user",
       content: [
         `Step: ${args.step} of ${args.maxSteps}`,
-        args.tabs?.length ? `Tracked browser tabs:\n${formatTabs(args.tabs, args.activeTabAlias)}` : "",
+        args.tabs?.length
+          ? `Tabs owned by this agent run (the only tabs you can use):\n${formatTabs(args.tabs, args.activeTabAlias)}`
+          : "",
         args.stagedFile ? `Staged upload file:\n${formatStagedFile(args.stagedFile)}` : "Staged upload file: none",
         args.downloads?.length ? `Recent downloads:\n${formatDownloads(args.downloads)}` : "Recent downloads: none",
+        formatFindings(args.findings, args.totalFindingCount),
         args.previousResult ? `Previous action result: ${args.previousResult}` : "",
         "",
         `Current page observation${args.activeTabAlias ? ` for ${args.activeTabAlias}` : ""}:`,
@@ -136,6 +163,26 @@ function formatTabs(tabs: PromptTabInfo[], activeTabAlias?: string): string {
 
 function formatStagedFile(file: PromptStagedFileInfo): string {
   return `- fileId=${file.id} name=${quote(file.name, 120)} type=${quote(file.type || "application/octet-stream", 80)} size=${file.size}`;
+}
+
+function formatFindings(findings?: PromptFindingInfo[], totalFindingCount?: number): string {
+  if (!findings?.length) {
+    return "Findings collected so far: none. Nothing has been summarized or extracted yet.";
+  }
+
+  const total = totalFindingCount ?? findings.length;
+  const hiddenCount = Math.max(0, total - findings.length);
+  const header = hiddenCount
+    ? `Findings collected so far (${total} total, ${hiddenCount} earlier omitted, latest shown):`
+    : `Findings collected so far (${total} total):`;
+  const lines = findings.map(
+    (finding, index) =>
+      `${index + 1 + hiddenCount}. [${finding.tabAlias}] ${quote(finding.label, 120)}${
+        finding.url ? ` url=${quote(finding.url, 150)}` : ""
+      }\n   ${finding.text}`
+  );
+
+  return [header, ...lines].join("\n");
 }
 
 function formatDownloads(downloads: PromptDownloadInfo[]): string {

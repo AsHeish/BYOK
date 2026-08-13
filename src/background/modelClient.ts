@@ -54,9 +54,17 @@ export class ModelClientError extends Error {
   }
 }
 
+export interface ModelRequestNotice {
+  kind: "timeout-retry" | "prompt-cache-retry" | "response-format-retry";
+  attempt: number;
+  maxAttempts: number;
+  message: string;
+}
+
 export async function requestAgentStep(
   settings: AgentSettings,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  onNotice?: (notice: ModelRequestNotice) => void
 ): Promise<{ response: AgentModelResponse; usage: ModelUsageEvent }> {
   const endpoint = buildChatCompletionsUrl(settings.apiBaseUrl);
   const requestTimeoutMs = getRequestTimeoutMs(settings);
@@ -84,20 +92,22 @@ export async function requestAgentStep(
     } catch (error) {
       if (isAbortError(error)) {
         const willRetry = attempt < MAX_MODEL_REQUEST_ATTEMPTS - 1;
-        console.warn(
-          `[BYOK Agent] AI request timed out after ${requestTimeoutMs / 1000}s${
-            willRetry ? `; retrying automatically (${attempts + 1}/${MAX_MODEL_REQUEST_ATTEMPTS}).` : "."
-          }`
-        );
+        const timeoutSeconds = Math.round(requestTimeoutMs / 1000);
 
         if (willRetry) {
+          onNotice?.({
+            kind: "timeout-retry",
+            attempt: attempts,
+            maxAttempts: MAX_MODEL_REQUEST_ATTEMPTS,
+            message: `The model did not respond within ${timeoutSeconds}s on attempt ${attempts} of ${MAX_MODEL_REQUEST_ATTEMPTS}. Retrying the same step now.`
+          });
           continue;
         }
 
         logAiResponseTiming(settings, requestStartedAt, attempts, "timeout", false);
         const timeoutUsage = buildUsageEvent(settings, undefined, requestStartedAt, attempts, "timeout", false);
         throw new ModelClientError(
-          `The model request timed out after ${requestTimeoutMs / 1000} seconds and automatic retries were exhausted.`,
+          `The model request timed out after ${timeoutSeconds} seconds on all ${MAX_MODEL_REQUEST_ATTEMPTS} attempts. Try a longer request timeout or a faster model in Settings.`,
           undefined,
           timeoutUsage
         );
@@ -114,12 +124,23 @@ export async function requestAgentStep(
 
     if (promptCacheStrategy !== "none" && shouldRetryWithoutPromptCacheFields(result.response.status, result.responseText)) {
       promptCacheStrategy = "none";
-      console.warn("[BYOK Agent] Provider rejected prompt cache fields; retrying without them.");
+      onNotice?.({
+        kind: "prompt-cache-retry",
+        attempt: attempts,
+        maxAttempts: MAX_MODEL_REQUEST_ATTEMPTS,
+        message: "The provider rejected the prompt cache fields. Retrying this step without prompt caching."
+      });
       continue;
     }
 
     if (includeResponseFormat && shouldRetryWithoutResponseFormat(result.response.status, result.responseText)) {
       includeResponseFormat = false;
+      onNotice?.({
+        kind: "response-format-retry",
+        attempt: attempts,
+        maxAttempts: MAX_MODEL_REQUEST_ATTEMPTS,
+        message: "The provider rejected JSON response format. Retrying this step without it."
+      });
       continue;
     }
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { AgentLogEntry } from "../../shared/types";
+import { Markdown } from "./Markdown";
 
 interface ActionLogProps {
   logs: AgentLogEntry[];
@@ -29,7 +30,9 @@ export function ActionLog({ logs }: ActionLogProps) {
               <time>{formatTime(entry.timestamp)}</time>
               <span>{entry.level}</span>
             </div>
-            <p className="log-message">{entry.message}</p>
+            <div className="log-message">
+              <Markdown text={entry.message} />
+            </div>
           </li>
         ))}
       </ol>

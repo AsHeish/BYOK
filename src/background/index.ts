@@ -1,10 +1,10 @@
-import { buildAgentMessages, type PromptTabInfo } from "./prompts";
+import { buildAgentMessages, type PromptFindingInfo, type PromptTabInfo } from "./prompts";
 import { getActiveTab, notifySidePanel, sendTabMessage, sleep, tryInjectContentScript } from "./chromeAsync";
-import { ModelClientError, requestAgentStep } from "./modelClient";
+import { ModelClientError, requestAgentStep, type ModelRequestNotice } from "./modelClient";
 import { extractPdfText } from "./pdfText";
 
 import { dataUrlToUint8Array, formatFileSize } from "../shared/fileData";
-import { MAX_LOG_ENTRIES } from "../shared/defaults";
+import { MAX_LOG_ENTRIES, MAX_TRACKED_TABS } from "../shared/defaults";
 import { createId } from "../shared/ids";
 import { loadSettings, loadStagedUploadFile } from "../shared/storage";
 import type {
@@ -24,15 +24,29 @@ interface RunningSession {
   taskId: string;
   activeTabId: number;
   activeTabAlias: string;
+  windowId?: number;
+  tabGroupId?: number;
   tabs: AgentTabState[];
+  findings: AgentFinding[];
   nextTabNumber: number;
   stopped: boolean;
 }
+
+interface AgentFinding {
+  tabAlias: string;
+  label: string;
+  url?: string;
+  text: string;
+  createdAt: number;
+}
+
+type AgentTabOrigin = "seed" | "agent" | "popup";
 
 interface AgentTabState {
   alias: string;
   tabId: number;
   windowId?: number;
+  origin: AgentTabOrigin;
   title?: string;
   url?: string;
   active: boolean;
@@ -51,6 +65,10 @@ const MAX_ACTION_LOG_PREVIEW = 20;
 const TAB_SETTLE_TIMEOUT_MS = 5000;
 const MAX_SUMMARY_INPUT_CHARS = 30000;
 const MAX_DOWNLOADS_FOR_PROMPT = 5;
+const MAX_FINDINGS_FOR_PROMPT = 12;
+const MAX_FINDING_CHARS_FOR_PROMPT = 700;
+const AGENT_TAB_GROUP_TITLE = "AI Agent";
+const AGENT_TAB_GROUP_COLOR: chrome.tabGroups.ColorEnum = "blue";
 
 configureSidePanelSafely();
 
@@ -73,6 +91,10 @@ chrome.runtime.onMessage.addListener((message: SidePanelToBackgroundMessage, _se
       sendResponse({ ok: false, error: getErrorMessage(error) });
     });
   return true;
+});
+
+chrome.tabs.onCreated.addListener((tab) => {
+  void adoptTabOpenedByAgent(tab);
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -184,10 +206,11 @@ async function startTask(task: string): Promise<void> {
     }
 
     runningSession = createRunningSession(taskId, tab);
+    await ensureSessionTabGroup(runningSession, [tab.id]);
     usageSnapshot = createEmptyUsageSnapshot(settings);
     emitUsage();
     emitStatus();
-    appendLog("info", `Task started on ${new URL(tab.url).hostname} as tab-1.`);
+    appendLog("info", `Task started on ${new URL(tab.url).hostname} as tab-1 in the "${AGENT_TAB_GROUP_TITLE}" tab group.`);
 
     let previousResult: string | undefined;
     const completedInputActions = new Set<string>();
@@ -202,6 +225,10 @@ async function startTask(task: string): Promise<void> {
       }
 
       await refreshTrackedTabs(session);
+      if (isStopped(taskId)) {
+        break;
+      }
+      assertOwnedTabId(session, session.activeTabId);
       const observation = await observePage(session.activeTabId);
       updateTrackedTabFromObservation(session, session.activeTabId, observation);
       appendLog("info", `Observed ${session.activeTabAlias}: ${observation.title || observation.url}`);
@@ -216,6 +243,8 @@ async function startTask(task: string): Promise<void> {
         previousResult,
         tabs: getPromptTabs(session),
         activeTabAlias: session.activeTabAlias,
+        findings: getPromptFindings(session),
+        totalFindingCount: session.findings.length,
         stagedFile: stagedFile ? toPromptStagedFile(stagedFile) : undefined,
         downloads: recentDownloads
       });
@@ -223,7 +252,7 @@ async function startTask(task: string): Promise<void> {
 
       let modelResponse: AgentModelResponse;
       try {
-        const modelResult = await requestAgentStep(settings, messages);
+        const modelResult = await requestAgentStep(settings, messages, reportModelNotice);
         recordUsageEvent(modelResult.usage, settings);
         modelResponse = modelResult.response;
       } catch (error) {
@@ -411,6 +440,8 @@ async function handleSingleAction(
     };
   }
 
+  assertOwnedTabId(session, session.activeTabId);
+
   if (action.type === "list_downloads") {
     const result = await listDownloads(action.maxItems);
     return {
@@ -427,7 +458,7 @@ async function handleSingleAction(
     return {
       ok: result.ok,
       message: result.message,
-      shouldStop: result.ok,
+      shouldStop: false,
       recoverable: result.recoverable,
       completedActions: [],
       lastObservation: result.observation
@@ -439,7 +470,7 @@ async function handleSingleAction(
     return {
       ok: result.ok,
       message: result.message,
-      shouldStop: result.ok,
+      shouldStop: false,
       recoverable: result.recoverable,
       completedActions: [],
       lastObservation: result.observation
@@ -508,6 +539,7 @@ function createRunningSession(taskId: string, tab: chrome.tabs.Tab): RunningSess
     alias: "tab-1",
     tabId: tab.id,
     windowId: tab.windowId,
+    origin: "seed",
     title: tab.title,
     url: tab.url,
     active: true,
@@ -518,17 +550,128 @@ function createRunningSession(taskId: string, tab: chrome.tabs.Tab): RunningSess
     taskId,
     activeTabId: tab.id,
     activeTabAlias: initialTab.alias,
+    windowId: tab.windowId,
     tabs: [initialTab],
+    findings: [],
     nextTabNumber: 2,
     stopped: false
   };
 }
 
+// The agent may only touch tabs it seeded or opened; everything else stays the user's.
+async function adoptTabOpenedByAgent(tab: chrome.tabs.Tab): Promise<void> {
+  const session = runningSession;
+  if (!session || session.stopped || typeof tab.id !== "number") {
+    return;
+  }
+
+  const opener = session.tabs.find((trackedTab) => trackedTab.tabId === tab.openerTabId);
+  if (!opener) {
+    return;
+  }
+
+  if (session.tabs.length >= MAX_TRACKED_TABS) {
+    appendLog(
+      "warning",
+      `${opener.alias} opened a tab, but the agent already owns ${MAX_TRACKED_TABS} tabs. The new tab stays outside the agent tab group.`
+    );
+    return;
+  }
+
+  const movedTab = await moveTabIntoSessionWindow(session, tab);
+  if (!movedTab) {
+    appendLog("warning", `${opener.alias} opened a tab that could not join the agent tab group. The agent cannot use it.`);
+    return;
+  }
+
+  const trackedTab = addTrackedTab(session, movedTab, "popup");
+  if (!(await ensureSessionTabGroup(session, [trackedTab.tabId]))) {
+    session.tabs = session.tabs.filter((existingTab) => existingTab.tabId !== trackedTab.tabId);
+    appendLog("warning", `${opener.alias} opened a tab that could not join the agent tab group. The agent cannot use it.`);
+    return;
+  }
+
+  appendLog("info", `Adopted ${trackedTab.alias} opened by ${opener.alias}.`);
+}
+
+function addTrackedTab(session: RunningSession, tab: chrome.tabs.Tab, origin: AgentTabOrigin): AgentTabState {
+  const trackedTab: AgentTabState = {
+    alias: `tab-${session.nextTabNumber}`,
+    tabId: tab.id as number,
+    windowId: tab.windowId,
+    origin,
+    title: tab.title,
+    url: tab.url,
+    active: false,
+    createdAt: Date.now()
+  };
+
+  session.nextTabNumber += 1;
+  session.tabs = [...session.tabs, trackedTab];
+  return trackedTab;
+}
+
+async function ensureSessionTabGroup(session: RunningSession, tabIds: number[]): Promise<boolean> {
+  if (!chrome.tabs.group || tabIds.length === 0) {
+    return false;
+  }
+
+  try {
+    const groupId =
+      session.tabGroupId === undefined
+        ? await chrome.tabs.group({ tabIds, createProperties: { windowId: session.windowId } })
+        : await chrome.tabs.group({ tabIds, groupId: session.tabGroupId });
+
+    if (session.tabGroupId === undefined) {
+      session.tabGroupId = groupId;
+      await chrome.tabGroups?.update(groupId, { title: AGENT_TAB_GROUP_TITLE, color: AGENT_TAB_GROUP_COLOR });
+    }
+
+    return true;
+  } catch (error) {
+    console.warn("[BYOK Agent] Could not add a tab to the agent tab group.", error);
+    return false;
+  }
+}
+
+async function moveTabIntoSessionWindow(
+  session: RunningSession,
+  tab: chrome.tabs.Tab
+): Promise<chrome.tabs.Tab | undefined> {
+  if (typeof tab.id !== "number") {
+    return undefined;
+  }
+
+  if (session.windowId === undefined || tab.windowId === session.windowId) {
+    return tab;
+  }
+
+  try {
+    const moved = await chrome.tabs.move(tab.id, { windowId: session.windowId, index: -1 });
+    return Array.isArray(moved) ? moved[0] : moved;
+  } catch (error) {
+    console.warn("[BYOK Agent] Could not move an agent-opened tab into the session window.", error);
+    return undefined;
+  }
+}
+
+function assertOwnedTabId(session: RunningSession, tabId: number): void {
+  if (!session.tabs.some((tab) => tab.tabId === tabId)) {
+    throw new Error(`Tab ${tabId} is not in the agent tab group. The agent may only use tabs it opened.`);
+  }
+}
+
 async function refreshTrackedTabs(session: RunningSession): Promise<void> {
   const refreshedTabs: AgentTabState[] = [];
+  const releasedTabs: AgentTabState[] = [];
   for (const trackedTab of session.tabs) {
     const tab = await getTabSafely(trackedTab.tabId);
     if (!tab?.id) {
+      continue;
+    }
+
+    if (hasLeftAgentTabGroup(session, tab)) {
+      releasedTabs.push(trackedTab);
       continue;
     }
 
@@ -543,12 +686,26 @@ async function refreshTrackedTabs(session: RunningSession): Promise<void> {
   }
 
   session.tabs = refreshedTabs;
-  if (!session.tabs.some((tab) => tab.tabId === session.activeTabId)) {
-    const fallback = session.tabs[0];
-    if (fallback) {
-      setActiveTrackedTab(session, fallback);
-    }
+  for (const releasedTab of releasedTabs) {
+    appendLog("warning", `${releasedTab.alias} left the agent tab group and is no longer accessible to the agent.`);
   }
+
+  if (session.tabs.length === 0) {
+    stopCurrentTask("Every agent-owned tab was closed or removed from the agent tab group.");
+    return;
+  }
+
+  if (!session.tabs.some((tab) => tab.tabId === session.activeTabId)) {
+    setActiveTrackedTab(session, session.tabs[0]);
+  }
+}
+
+function hasLeftAgentTabGroup(session: RunningSession, tab: chrome.tabs.Tab): boolean {
+  if (session.tabGroupId === undefined || typeof tab.groupId !== "number") {
+    return false;
+  }
+
+  return tab.groupId !== session.tabGroupId;
 }
 
 function updateTrackedTabFromObservation(session: RunningSession, tabId: number, observation: PageObservation): void {
@@ -652,10 +809,18 @@ async function openTrackedTab(session: RunningSession, url?: string): Promise<Co
   }
 
   const activeTab = findTrackedTab(session);
+  if (session.tabs.length >= MAX_TRACKED_TABS) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: `The agent already owns ${session.tabs.length} tabs (limit ${MAX_TRACKED_TABS}). Close one with close_tab before opening another.`
+    };
+  }
+
   const tab = await chrome.tabs.create({
     url: parsed.toString(),
     active: true,
-    windowId: activeTab?.windowId
+    windowId: session.windowId ?? activeTab?.windowId
   });
 
   if (typeof tab.id !== "number") {
@@ -666,25 +831,15 @@ async function openTrackedTab(session: RunningSession, url?: string): Promise<Co
     };
   }
 
-  const alias = `tab-${session.nextTabNumber}`;
-  session.nextTabNumber += 1;
-  const trackedTab: AgentTabState = {
-    alias,
-    tabId: tab.id,
-    windowId: tab.windowId,
-    title: tab.title,
-    url: tab.url || parsed.toString(),
-    active: true,
-    createdAt: Date.now()
-  };
-  session.tabs = [...session.tabs.map((existingTab) => ({ ...existingTab, active: false })), trackedTab];
+  const trackedTab = addTrackedTab(session, { ...tab, url: tab.url || parsed.toString() }, "agent");
+  await ensureSessionTabGroup(session, [trackedTab.tabId]);
   setActiveTrackedTab(session, trackedTab);
-  await waitForTabToSettle(tab.id);
+  await waitForTabToSettle(trackedTab.tabId);
 
   return {
     ok: true,
-    message: `Opened ${alias}: ${parsed.toString()}.`,
-    observation: await observePageSafely(tab.id)
+    message: `Opened ${trackedTab.alias} in the agent tab group: ${parsed.toString()}.`,
+    observation: await observePageSafely(trackedTab.tabId)
   };
 }
 
@@ -858,6 +1013,14 @@ async function summarizeCurrentPage(session: RunningSession, instruction?: strin
     instruction: instruction || "Summarize this web page clearly and concisely."
   });
 
+  recordFinding(session, {
+    tabAlias: session.activeTabAlias,
+    label: observation.title || observation.url,
+    url: observation.url,
+    text: summary,
+    createdAt: Date.now()
+  });
+
   return {
     ok: true,
     observation,
@@ -898,10 +1061,37 @@ async function summarizePdf(session: RunningSession, action: AgentAction): Promi
     instruction: action.text || "Summarize this PDF. Include key points, important facts, and any action items."
   });
 
+  recordFinding(session, {
+    tabAlias: session.activeTabAlias,
+    label: source.label,
+    text: summary,
+    createdAt: Date.now()
+  });
+
   return {
     ok: true,
     message: `PDF summary (${sourceDetails}):\n${summary}`
   };
+}
+
+function recordFinding(session: RunningSession, finding: AgentFinding): void {
+  session.findings = [...session.findings, finding];
+}
+
+function getPromptFindings(session: RunningSession): PromptFindingInfo[] {
+  return session.findings.slice(-MAX_FINDINGS_FOR_PROMPT).map((finding) => ({
+    tabAlias: finding.tabAlias,
+    label: finding.label,
+    url: finding.url,
+    text: truncateFindingText(finding.text)
+  }));
+}
+
+function truncateFindingText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length <= MAX_FINDING_CHARS_FOR_PROMPT
+    ? normalized
+    : `${normalized.slice(0, MAX_FINDING_CHARS_FOR_PROMPT)}...`;
 }
 
 async function summarizeTextWithModel(args: {
@@ -934,10 +1124,14 @@ async function summarizeTextWithModel(args: {
     }
   ];
 
-  const result = await requestAgentStep(settings, messages);
+  const result = await requestAgentStep(settings, messages, reportModelNotice);
   recordUsageEvent(result.usage, settings);
   const doneAction = result.response.actions?.find((action) => action.type === "done");
   return doneAction?.text || result.response.thought_summary || "The model did not return a summary.";
+}
+
+function reportModelNotice(notice: ModelRequestNotice): void {
+  appendLog(notice.kind === "timeout-retry" ? "warning" : "info", notice.message);
 }
 
 async function resolvePdfSource(
