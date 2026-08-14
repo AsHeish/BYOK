@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Bot, Pencil, Plus, RotateCcw, Send, Sparkles, Square, Trash2, User, X } from "lucide-react";
+import { Bot, ChevronDown, ChevronUp, Pencil, Plus, RotateCcw, Send, Sparkles, Trash2, User, X } from "lucide-react";
 import { DEFAULT_CHAT_SUGGESTIONS, MAX_CHAT_SUGGESTIONS } from "../../shared/defaults";
 import {
   loadChatSuggestions,
@@ -16,12 +16,13 @@ interface ChatPanelProps {
   messages: AgentChatMessage[];
   running: boolean;
   disabled: boolean;
+  model: string;
   onSend: (message: string) => Promise<void>;
   onStop: () => Promise<void>;
   onClear: () => Promise<void>;
 }
 
-export function ChatPanel({ messages, running, disabled, onSend, onStop, onClear }: ChatPanelProps) {
+export function ChatPanel({ messages, running, disabled, model, onSend, onStop, onClear }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
@@ -62,7 +63,7 @@ export function ChatPanel({ messages, running, disabled, onSend, onStop, onClear
 
   async function sendMessage() {
     const message = draft.trim();
-    if (!message || running || disabled || busy) {
+    if (!message || disabled || busy) {
       return;
     }
 
@@ -105,47 +106,45 @@ export function ChatPanel({ messages, running, disabled, onSend, onStop, onClear
       </header>
 
       <div className="chat-thread" ref={threadRef} aria-live="polite">
-        {messages.length === 0 ? <WelcomeMessage /> : null}
+        <WelcomeMessage />
         {messages.map((message) => <ChatMessage key={message.id} message={message} />)}
         {running ? (
           <div className="chat-row assistant-row working-row">
             <span className="chat-avatar" aria-hidden="true"><Bot /></span>
-            <div className="chat-bubble assistant-bubble">
+            <button
+              type="button"
+              className="chat-bubble assistant-bubble working-bubble"
+              aria-label="Stop current task"
+              title="Stop current task"
+              onClick={() => void onStop()}
+            >
               <span className="typing-dots" aria-label="Agent is working"><i /><i /><i /></span>
-              <span>Working on your request</span>
-            </div>
+            </button>
           </div>
         ) : null}
       </div>
 
-      {messages.length === 0 ? (
-        <ChatSuggestions running={running} onSelect={useStarter} />
-      ) : null}
+      <ChatSuggestions hasMessages={messages.length > 0} running={running} onSelect={useStarter} />
 
       <div className="chat-composer">
-        <label className="sr-only" htmlFor="chat-message">Message</label>
-        <textarea
-          ref={inputRef}
-          id="chat-message"
-          value={draft}
-          rows={3}
-          placeholder="Ask about this page or give the agent a task..."
-          disabled={running}
-          onChange={(event) => updateDraft(event.target.value)}
-          onKeyDown={handleKeyDown}
-        />
-        <div className="chat-composer-toolbar">
-          <FileStagingPanel disabled={running} />
-          {running ? (
-            <button type="button" className="composer-action stop-action" aria-label="Stop task" title="Stop task" onClick={() => void onStop()}>
-              <Square aria-hidden="true" />
-            </button>
-          ) : (
-            <button type="button" className="composer-action send-action" disabled={disabled || busy || !draft.trim()} aria-label="Send message" title="Send message" onClick={() => void sendMessage()}>
-              <Send aria-hidden="true" />
-            </button>
-          )}
+        <div className="chat-composer-main">
+          <FileStagingPanel disabled={busy} />
+          <label className="sr-only" htmlFor="chat-message">Message</label>
+          <textarea
+            ref={inputRef}
+            id="chat-message"
+            value={draft}
+            rows={2}
+            placeholder="Type your message..."
+            disabled={busy}
+            onChange={(event) => updateDraft(event.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+          <button type="button" className="composer-action send-action" disabled={disabled || busy || !draft.trim()} aria-label="Send message" title="Send message" onClick={() => void sendMessage()}>
+            <Send aria-hidden="true" />
+          </button>
         </div>
+        <p className="composer-model"><span>Model:</span> {model || "Not configured"}</p>
       </div>
 
       {disabled ? <p className="inline-warning">Add an API key in Settings.</p> : null}
@@ -153,14 +152,24 @@ export function ChatPanel({ messages, running, disabled, onSend, onStop, onClear
   );
 }
 
-function ChatSuggestions({ running, onSelect }: { running: boolean; onSelect: (suggestion: string) => void }) {
+function ChatSuggestions({
+  hasMessages,
+  running,
+  onSelect,
+}: {
+  hasMessages: boolean;
+  running: boolean;
+  onSelect: (suggestion: string) => void;
+}) {
   const [suggestions, setSuggestions] = useState<string[]>([...DEFAULT_CHAT_SUGGESTIONS]);
   const [drafts, setDrafts] = useState<string[]>([]);
   const [newSuggestion, setNewSuggestion] = useState("");
   const [editing, setEditing] = useState(false);
+  const [expanded, setExpanded] = useState(!hasMessages);
   const [saving, setSaving] = useState(false);
   const [resetOnSave, setResetOnSave] = useState(false);
   const [error, setError] = useState<string>();
+  const hadMessagesRef = useRef(hasMessages);
 
   useEffect(() => {
     let mounted = true;
@@ -176,7 +185,22 @@ function ChatSuggestions({ running, onSelect }: { running: boolean; onSelect: (s
     };
   }, []);
 
+  useEffect(() => {
+    const hadMessages = hadMessagesRef.current;
+    hadMessagesRef.current = hasMessages;
+    if (!hadMessages && hasMessages) {
+      setExpanded(false);
+      setEditing(false);
+      setDrafts([]);
+      setNewSuggestion("");
+      setError(undefined);
+    } else if (hadMessages && !hasMessages) {
+      setExpanded(true);
+    }
+  }, [hasMessages]);
+
   function beginEditing() {
+    setExpanded(true);
     setDrafts(suggestions);
     setNewSuggestion("");
     setResetOnSave(false);
@@ -243,22 +267,36 @@ function ChatSuggestions({ running, onSelect }: { running: boolean; onSelect: (s
     !hasSuggestion(drafts, newSuggestion);
 
   return (
-    <div className={`chat-suggestions ${editing ? "is-editing" : ""}`}>
+    <div className={`chat-suggestions ${editing ? "is-editing" : ""} ${expanded ? "is-expanded" : "is-collapsed"}`}>
       <div className="chat-suggestions-header">
         <span><Sparkles aria-hidden="true" />Suggestions</span>
-        {editing ? (
-          <button type="button" className="suggestion-reset-button" disabled={saving} onClick={restoreDefaults}>
-            <RotateCcw aria-hidden="true" />
-            <span>Reset</span>
+        <div className="chat-suggestion-actions">
+          {editing ? (
+            <button type="button" className="suggestion-reset-button" disabled={saving} onClick={restoreDefaults}>
+              <RotateCcw aria-hidden="true" />
+              <span>Reset</span>
+            </button>
+          ) : (
+            <button type="button" className="suggestion-manage-button" disabled={running} aria-label="Edit suggestions" title="Edit suggestions" onClick={beginEditing}>
+              <Pencil aria-hidden="true" />
+            </button>
+          )}
+          <button
+            type="button"
+            className="suggestion-toggle-button"
+            aria-controls="chat-suggestion-content"
+            aria-expanded={expanded}
+            aria-label={expanded ? "Fold suggestions" : "Show suggestions"}
+            title={expanded ? "Fold suggestions" : "Show suggestions"}
+            disabled={editing || saving}
+            onClick={() => setExpanded((current) => !current)}
+          >
+            {expanded ? <ChevronDown aria-hidden="true" /> : <ChevronUp aria-hidden="true" />}
           </button>
-        ) : (
-          <button type="button" className="suggestion-manage-button" disabled={running} aria-label="Edit suggestions" title="Edit suggestions" onClick={beginEditing}>
-            <Pencil aria-hidden="true" />
-          </button>
-        )}
+        </div>
       </div>
 
-      {editing ? (
+      {expanded && editing ? (
         <div className="suggestion-editor" aria-label="Edit chat suggestions">
           <div className="suggestion-editor-list">
             {drafts.map((suggestion, index) => (
@@ -306,8 +344,8 @@ function ChatSuggestions({ running, onSelect }: { running: boolean; onSelect: (s
             <button type="button" className="primary-button" disabled={saving} onClick={() => void saveSuggestions()}>Save</button>
           </div>
         </div>
-      ) : (
-        <div className="chat-starters" aria-label="Chat starters">
+      ) : expanded ? (
+        <div className="chat-starters" id="chat-suggestion-content" aria-label="Chat starters">
           {suggestions.map((suggestion) => (
             <button key={suggestion} type="button" disabled={running} onClick={() => onSelect(suggestion)}>
               <Sparkles aria-hidden="true" />
@@ -321,7 +359,7 @@ function ChatSuggestions({ running, onSelect }: { running: boolean; onSelect: (s
             </button>
           ) : null}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

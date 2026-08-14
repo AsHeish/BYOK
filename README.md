@@ -80,7 +80,7 @@ The side-panel settings support:
 - Named AI profiles: save the current provider/base URL/API key/model/max steps/timeout/cache mode/pricing under a name, then apply or delete profiles from Settings.
 
 The extension uses `fetch` against `POST {apiBaseUrl}/chat/completions` with OpenAI-compatible chat-completions JSON. No paid SDK is used.
-Each AI request uses the configured timeout. The action log tells the user when a timeout or provider-compatibility retry occurs.
+Each AI request uses the configured timeout. A timed-out step gets up to four attempts. Provider compatibility downgrades for rejected prompt-cache fields and JSON response-format fields use separate bounded retries, so earlier timeouts cannot consume a promised compatibility fallback. Authentication and other non-compatible HTTP failures are returned immediately. The action log reports every retry.
 
 ## Prompt Caching
 
@@ -125,7 +125,7 @@ The History view stores up to 50 sanitized reports with task status, requirement
 
 ## Chat
 
-The Chat view shows user requests, final Markdown answers, page and PDF summaries, and questions that need user input. Replies to those questions retain the paused task context. Up to 100 chat messages are stored locally and can be cleared from the Chat header. The empty-chat suggestions can be edited, added, deleted, or reset and are stored locally in the browser profile. Conversational requests can be answered without webpage access; browser actions still require an active HTTP(S) page.
+The Chat view shows user requests, final Markdown answers, page and PDF summaries, and questions that need user input. Replies to those questions retain the paused task context. Up to 100 chat messages are stored locally and can be cleared from the Chat header. Suggestions can be edited, added, deleted, or reset and are stored locally in the browser profile. They fold after the first message but remain available from the Suggestions chevron. Conversational requests can be answered without webpage access; browser actions still require an active HTTP(S) page.
 
 Operational observations and action results stay in Console instead of appearing as chat messages. A task launched from Run switches to Chat when its final answer is ready.
 

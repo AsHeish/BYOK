@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import {
   MessageCircle,
   History as HistoryIcon,
+  MoreVertical,
   Moon,
   Play,
-  Settings2,
-  ShieldCheck,
+  SlidersHorizontal,
   SquareTerminal,
   Sun
 } from "lucide-react";
@@ -152,31 +152,36 @@ export function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand-block">
-          <div className="brand-line">
-            <span className="brand-mark" aria-hidden="true">
-              BA
-            </span>
-            <h1>BYOK Agent</h1>
-          </div>
+        <div className="brand-line">
+          <span className="brand-mark" aria-hidden="true">
+            BA
+          </span>
+          <h1>BYOK Agent</h1>
           <p className="status-pill">
-            <span className={`status-dot ${running ? "running" : hasApiKey ? "ready" : "needs-settings"}`} />
-            {running ? "Running" : hasApiKey ? "Ready" : "Needs settings"}
+            <span className={`status-dot ${hasApiKey ? "ready" : "needs-settings"}`} />
+            {hasApiKey ? "Ready" : "Needs settings"}
           </p>
         </div>
-        <button
-          type="button"
-          className="theme-toggle"
-          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-          title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-          onClick={() => void handleToggleTheme()}
-        >
-          <span className="theme-toggle-track" aria-hidden="true">
-            <span className="theme-toggle-thumb" />
-          </span>
-          {theme === "dark" ? <Moon size={15} /> : <Sun size={15} />}
-          <span>{theme === "dark" ? "Dark" : "Light"}</span>
-        </button>
+        <div className="top-actions">
+          <button
+            type="button"
+            className="header-icon-button theme-toggle"
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            onClick={() => void handleToggleTheme()}
+          >
+            {theme === "dark" ? <Sun /> : <Moon />}
+          </button>
+          <button
+            type="button"
+            className="header-icon-button more-button"
+            aria-label="Open settings"
+            title="Open settings"
+            onClick={() => setView("settings")}
+          >
+            <MoreVertical />
+          </button>
+        </div>
       </header>
 
       <nav className="tabs" aria-label="Side panel views">
@@ -197,7 +202,7 @@ export function App() {
           <span>Console</span>
         </button>
         <button type="button" className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>
-          <Settings2 aria-hidden="true" />
+          <SlidersHorizontal aria-hidden="true" />
           <span>Settings</span>
         </button>
       </nav>
@@ -210,6 +215,7 @@ export function App() {
             messages={chatMessages}
             running={running}
             disabled={!hasApiKey}
+            model={settings.model}
             onSend={handleChat}
             onStop={handleStop}
             onClear={handleClearChat}
@@ -233,22 +239,6 @@ export function App() {
           <SettingsPanel settings={settings} onChange={setSettings} onSave={handleSaveSettings} />
         )}
       </div>
-
-      <footer className="privacy-bar">
-        <div className="privacy-status">
-          <span className="privacy-icon" aria-hidden="true">
-            <ShieldCheck />
-          </span>
-          <span className="privacy-copy">
-            <strong>Local BYOK</strong>
-            <span>{hasApiKey ? `${settings.provider} / ${settings.model}` : "API key required"}</span>
-          </span>
-        </div>
-        <button type="button" className="footer-settings" onClick={() => setView("settings")}>
-          <Settings2 aria-hidden="true" />
-          <span>Settings</span>
-        </button>
-      </footer>
     </main>
   );
 }

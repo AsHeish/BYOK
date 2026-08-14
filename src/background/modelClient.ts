@@ -12,7 +12,9 @@ import type {
 } from "../shared/types";
 
 const MAX_ACTIONS_PER_MODEL_RESPONSE = 10;
-const MAX_MODEL_REQUEST_ATTEMPTS = 4;
+const MAX_TIMEOUT_ATTEMPTS = 4;
+const MAX_PROVIDER_COMPATIBILITY_RETRIES = 2;
+const MAX_TOTAL_MODEL_REQUEST_ATTEMPTS = MAX_TIMEOUT_ATTEMPTS + MAX_PROVIDER_COMPATIBILITY_RETRIES;
 const MIN_REQUEST_TIMEOUT_SECONDS = 10;
 const MAX_REQUEST_TIMEOUT_SECONDS = 300;
 const AUTOMATIC_PREFIX_CACHE_MODELS = new Set(["qwen-3.6-27b", "gemma-4-31b"]);
@@ -86,12 +88,13 @@ export async function requestAgentStep(
   const requestTimeoutMs = getRequestTimeoutMs(settings);
   const requestStartedAt = Date.now();
   let attempts = 0;
+  let timeoutAttempts = 0;
 
   let includeResponseFormat = true;
   let promptCacheStrategy = getPromptCacheStrategy(settings);
   let result: { response: Response; responseText: string } | undefined;
 
-  for (let attempt = 0; attempt < MAX_MODEL_REQUEST_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt < MAX_TOTAL_MODEL_REQUEST_ATTEMPTS; attempt += 1) {
     attempts = attempt + 1;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
@@ -107,15 +110,16 @@ export async function requestAgentStep(
       });
     } catch (error) {
       if (isAbortError(error)) {
-        const willRetry = attempt < MAX_MODEL_REQUEST_ATTEMPTS - 1;
+        timeoutAttempts += 1;
+        const willRetry = timeoutAttempts < MAX_TIMEOUT_ATTEMPTS;
         const timeoutSeconds = Math.round(requestTimeoutMs / 1000);
 
         if (willRetry) {
           onNotice?.({
             kind: "timeout-retry",
-            attempt: attempts,
-            maxAttempts: MAX_MODEL_REQUEST_ATTEMPTS,
-            message: `The model did not respond within ${timeoutSeconds}s on attempt ${attempts} of ${MAX_MODEL_REQUEST_ATTEMPTS}. Retrying the same step now.`
+            attempt: timeoutAttempts,
+            maxAttempts: MAX_TIMEOUT_ATTEMPTS,
+            message: `The model did not respond within ${timeoutSeconds}s on attempt ${timeoutAttempts} of ${MAX_TIMEOUT_ATTEMPTS}. Retrying the same step now.`
           });
           continue;
         }
@@ -123,7 +127,7 @@ export async function requestAgentStep(
         logAiResponseTiming(settings, requestStartedAt, attempts, "timeout", false);
         const timeoutUsage = buildUsageEvent(settings, undefined, requestStartedAt, attempts, "timeout", false);
         throw new ModelClientError(
-          `The model request timed out after ${timeoutSeconds} seconds on all ${MAX_MODEL_REQUEST_ATTEMPTS} attempts. Try a longer request timeout or a faster model in Settings.`,
+          `The model request timed out after ${timeoutSeconds} seconds on all ${MAX_TIMEOUT_ATTEMPTS} attempts. Try a longer request timeout or a faster model in Settings.`,
           undefined,
           timeoutUsage
         );
@@ -143,7 +147,7 @@ export async function requestAgentStep(
       onNotice?.({
         kind: "prompt-cache-retry",
         attempt: attempts,
-        maxAttempts: MAX_MODEL_REQUEST_ATTEMPTS,
+        maxAttempts: MAX_TOTAL_MODEL_REQUEST_ATTEMPTS,
         message: "The provider rejected the prompt cache fields. Retrying this step without prompt caching."
       });
       continue;
@@ -154,7 +158,7 @@ export async function requestAgentStep(
       onNotice?.({
         kind: "response-format-retry",
         attempt: attempts,
-        maxAttempts: MAX_MODEL_REQUEST_ATTEMPTS,
+        maxAttempts: MAX_TOTAL_MODEL_REQUEST_ATTEMPTS,
         message: "The provider rejected JSON response format. Retrying this step without it."
       });
       continue;
@@ -295,7 +299,7 @@ function logAiRequestPayload(args: {
 }
 
 function shouldRetryWithoutResponseFormat(status: number, body: string): boolean {
-  return (status === 400 || status === 422) && /response_format|json_object|unsupported parameter|unknown field/i.test(body);
+  return (status === 400 || status === 422) && /response[\s_-]*format|json[\s_-]*object/i.test(body);
 }
 
 function shouldRetryWithoutPromptCacheFields(status: number, body: string): boolean {
