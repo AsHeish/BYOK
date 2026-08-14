@@ -117,6 +117,8 @@ Every run has a requirement ledger. The model proposes requirements, but the ext
 
 `wait_for` polls a condition without blocking the Stop button. Supported conditions are `document_ready`, `dom_stable`, `url_changed`, `text_present`, `text_absent`, `element_hidden`, and `element_enabled`. Waits are capped at 15 seconds and return a fresh observation.
 
+Before another LLM step, ordinary browser interactions automatically wait for a complete, unchanged DOM across consecutive samples (at least 800ms, capped at 3 seconds), then the loop takes a fresh observation. The stability signature includes visible text, interactive control values/states, open shadow roots, and accessible same-origin frames. Navigation actions separately wait for Chrome tab completion. For workflows with a specific delayed completion signal, use `wait_for` explicitly.
+
 `inspect_screenshot` is an explicit fallback for charts, canvas, diagrams, layout, and icon-only controls. It captures only the visible active tab when that tab belongs to the current agent run. The image is resized, sent to the model once, redacted from debug logs, and never persisted. If the provider rejects visual input, the step is retried text-only and vision is disabled for that run.
 
 ## Run History

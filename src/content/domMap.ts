@@ -181,15 +181,43 @@ export function checkWaitCondition(request: ContentWaitCheckRequest): ContentWai
 }
 
 function buildDomStabilitySignature(): string {
-  const body = document.body;
-  const text = normalizeText(body?.innerText || body?.textContent || "").slice(0, 8_000);
+  const contexts = collectDomContexts();
+  const text = contexts.roots
+    .map((context) => normalizeText(
+      isDocumentRoot(context.root)
+        ? context.root.body?.innerText || context.root.body?.textContent || ""
+        : context.root.textContent || "",
+    ))
+    .join("|")
+    .slice(0, 8_000);
+  const controls = queryAllInContexts(contexts, "input,textarea,select,button").slice(0, 200);
+  const controlState = controls
+    .slice(0, 200)
+    .map((element) => {
+      if (isInputElement(element)) {
+        return `${element.type}:${element.value}:${element.checked}:${element.disabled}`;
+      }
+      if (isTextAreaElement(element)) {
+        return `textarea:${element.value}:${element.disabled}`;
+      }
+      if (isSelectElement(element)) {
+        return `select:${element.value}:${element.selectedIndex}:${element.disabled}`;
+      }
+      return isButtonElement(element)
+        ? `button:${element.disabled}:${normalizeText(element.textContent || "")}`
+        : element.tagName.toLowerCase();
+    })
+    .join("|");
   return [
     location.href,
     document.readyState,
-    body?.childElementCount || 0,
+    contexts.roots.length,
+    contexts.roots.reduce((count, context) => count + queryRoot(context.root, "*").length, 0),
     text.length,
     hashText(text),
-    document.querySelectorAll("input,textarea,select,button,a[href],[role='button'],[role='textbox']").length,
+    queryAllInContexts(contexts, "input,textarea,select,button,a[href],[role='button'],[role='textbox']").length,
+    hashText(controlState),
+    hashText(JSON.stringify(contexts.frames)),
   ].join(":");
 }
 

@@ -19,7 +19,11 @@ import {
   getCompletionLedgerIssues as inspectCompletionLedger,
   updateRequirements as updateRunRequirements,
 } from "./runLedger";
-import { advanceDomStability } from "./wait";
+import {
+  advanceDomStability,
+  needsAutomaticDomSettlement,
+  waitForDomSettlement,
+} from "./wait";
 import { getTabIdsForGrouping } from "./tabGrouping";
 import {
   buildContextualChatInstruction,
@@ -426,7 +430,26 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
         break;
       }
 
-      await sleep(getPostBatchDelay(plannedActions));
+      if (needsAutomaticDomSettlement(plannedActions)) {
+        const settlement = await waitForDomSettlement(
+          async () => {
+            const check = await checkWaitConditionSafely(session.activeTabId, { condition: "dom_stable" });
+            return check
+              ? { signature: check.signature, readyState: check.readyState }
+              : undefined;
+          },
+          sleep,
+          () => isStopped(taskId),
+        );
+        if (!settlement.settled && !settlement.cancelled) {
+          appendLog(
+            "warning",
+            "The page kept changing during the automatic interaction wait. Continuing with a fresh observation; use wait_for when the task has a specific completion signal.",
+          );
+        }
+      } else {
+        await sleep(getPostBatchDelay(plannedActions));
+      }
     }
 
     if (!isStopped(taskId) && runningSession?.taskId === taskId && runningSession.run.status === "running") {
@@ -1402,8 +1425,17 @@ async function goForwardInTrackedTab(session: RunningSession): Promise<ContentAc
 }
 
 async function executeAction(tabId: number, action: AgentAction): Promise<ContentActionResult> {
+  const tabBeforeNavigation = action.type === "navigate" ? await getTabSafely(tabId) : undefined;
   try {
-    return await sendTabMessage<ContentActionResult>(tabId, { type: "CONTENT_EXECUTE", action });
+    const result = await sendTabMessage<ContentActionResult>(tabId, { type: "CONTENT_EXECUTE", action });
+    if (result.ok && action.type === "navigate") {
+      await waitForTabToSettle(tabId, tabBeforeNavigation?.url);
+      return {
+        ...result,
+        observation: await observePageSafely(tabId),
+      };
+    }
+    return result;
   } catch (error) {
     if (shouldRecoverFromClosedMessageChannel(action, error)) {
       await waitForTabToSettle(tabId);
