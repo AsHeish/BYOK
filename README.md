@@ -103,7 +103,7 @@ The dynamic observation also begins with a compact page-state summary: viewport 
 
 ## Uploads, Downloads, and Summaries
 
-The Run tab includes a **File Dock** where the user can stage one local file. The agent can only upload that staged file with `upload_file`; it cannot browse arbitrary local paths or silently choose files.
+The Chat composer includes a **File Dock** where the user can stage one local file. The agent can only upload that staged file with `upload_file`; it cannot browse arbitrary local paths or silently choose files.
 
 The background worker listens for completed browser downloads and can list recent downloads with `list_downloads`. Download metadata is included in the model context so the agent can reference recent PDF downloads by `downloadId`.
 

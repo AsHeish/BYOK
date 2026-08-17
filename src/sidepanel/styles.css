@@ -278,7 +278,7 @@ summary:focus-visible {
 
 .tabs {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   min-width: 0;
   padding: 5px;
 }
@@ -580,6 +580,55 @@ summary:focus-visible {
   align-items: center;
   gap: 9px;
   color: var(--text-subtle);
+}
+
+.chat-action-log {
+  display: grid;
+  grid-template-columns: 6px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% - 43px);
+  max-width: 620px;
+  margin-left: 43px;
+  padding: 3px 2px;
+  color: var(--text-muted);
+}
+
+.chat-action-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--info);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--info) 48%, transparent);
+}
+
+.chat-action-log.success .chat-action-dot {
+  background: var(--accent);
+}
+
+.chat-action-log.warning .chat-action-dot {
+  background: var(--warning);
+}
+
+.chat-action-log.error .chat-action-dot {
+  background: var(--danger);
+}
+
+.chat-action-message {
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.chat-action-log time {
+  align-self: start;
+  padding-top: 1px;
+  color: var(--text-muted);
+  font-family: "JetBrains Mono Variable", monospace;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .typing-dots {

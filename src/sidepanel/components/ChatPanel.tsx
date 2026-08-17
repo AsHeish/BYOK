@@ -8,12 +8,13 @@ import {
   saveChatSuggestions,
   saveTaskDraft,
 } from "../../shared/storage";
-import type { AgentChatMessage } from "../../shared/types";
+import type { AgentChatMessage, AgentLogEntry } from "../../shared/types";
 import { FileStagingPanel } from "./FileStagingPanel";
 import { Markdown } from "./Markdown";
 
 interface ChatPanelProps {
   messages: AgentChatMessage[];
+  currentLog?: AgentLogEntry;
   running: boolean;
   disabled: boolean;
   model: string;
@@ -22,7 +23,7 @@ interface ChatPanelProps {
   onClear: () => Promise<void>;
 }
 
-export function ChatPanel({ messages, running, disabled, model, onSend, onStop, onClear }: ChatPanelProps) {
+export function ChatPanel({ messages, currentLog, running, disabled, model, onSend, onStop, onClear }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
@@ -48,7 +49,7 @@ export function ChatPanel({ messages, running, disabled, model, onSend, onStop, 
       top: threadRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [messages.length, running]);
+  }, [messages.length, currentLog?.id, running]);
 
   function updateDraft(value: string) {
     draftChangedRef.current = true;
@@ -108,6 +109,13 @@ export function ChatPanel({ messages, running, disabled, model, onSend, onStop, 
       <div className="chat-thread" ref={threadRef} aria-live="polite">
         <WelcomeMessage />
         {messages.map((message) => <ChatMessage key={message.id} message={message} />)}
+        {running && currentLog ? (
+          <div className={`chat-action-log ${currentLog.level}`} role="status" aria-label="Current action">
+            <span className="chat-action-dot" aria-hidden="true" />
+            <span className="chat-action-message">{currentLog.message}</span>
+            <time>{formatLogTime(currentLog.timestamp)}</time>
+          </div>
+        ) : null}
         {running ? (
           <div className="chat-row assistant-row working-row">
             <span className="chat-avatar" aria-hidden="true"><Bot /></span>
@@ -402,5 +410,13 @@ function formatMessageTime(timestamp: number): string {
   return new Intl.DateTimeFormat(undefined, {
     hour: "2-digit",
     minute: "2-digit",
+  }).format(timestamp);
+}
+
+function formatLogTime(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
   }).format(timestamp);
 }

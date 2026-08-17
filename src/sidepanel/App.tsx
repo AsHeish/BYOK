@@ -4,7 +4,6 @@ import {
   History as HistoryIcon,
   MoreVertical,
   Moon,
-  Play,
   SlidersHorizontal,
   SquareTerminal,
   Sun
@@ -30,11 +29,10 @@ import type {
 import { ActionLog } from "./components/ActionLog";
 import { ChatPanel } from "./components/ChatPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
-import { TaskRunner } from "./components/TaskRunner";
 import { UsageDashboard } from "./components/UsageDashboard";
 import { RunHistory } from "./components/RunHistory";
 
-type View = "chat" | "run" | "history" | "console" | "settings";
+type View = "chat" | "history" | "console" | "settings";
 
 export function App() {
   const [view, setView] = useState<View>("chat");
@@ -66,9 +64,6 @@ export function App() {
       }
       if (message.type === "AGENT_CHAT_MESSAGE") {
         setChatMessages((current) => [...current, message.message].slice(-100));
-        if (message.message.role === "assistant") {
-          setView((current) => current === "run" ? "chat" : current);
-        }
       }
       if (message.type === "AGENT_CHAT_CLEARED") {
         setChatMessages([]);
@@ -136,7 +131,7 @@ export function App() {
   }
 
   async function handleRerun(task: string) {
-    setView("run");
+    setView("chat");
     await handleRun(task);
   }
 
@@ -189,10 +184,6 @@ export function App() {
           <MessageCircle aria-hidden="true" />
           <span>Chat</span>
         </button>
-        <button type="button" className={view === "run" ? "active" : ""} onClick={() => setView("run")}>
-          <Play aria-hidden="true" />
-          <span>Run</span>
-        </button>
         <button type="button" className={view === "history" ? "active" : ""} onClick={() => setView("history")}>
           <HistoryIcon aria-hidden="true" />
           <span>History</span>
@@ -213,6 +204,7 @@ export function App() {
         {view === "chat" ? (
           <ChatPanel
             messages={chatMessages}
+            currentLog={logs[logs.length - 1]}
             running={running}
             disabled={!hasApiKey}
             model={settings.model}
@@ -220,8 +212,6 @@ export function App() {
             onStop={handleStop}
             onClear={handleClearChat}
           />
-        ) : view === "run" ? (
-          <TaskRunner running={running} disabled={!hasApiKey} onRun={handleRun} onStop={handleStop} />
         ) : view === "history" ? (
           <RunHistory
             reports={reports}
