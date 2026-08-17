@@ -72,6 +72,13 @@ export class ModelClientError extends Error {
   }
 }
 
+export class ModelRequestCancelledError extends ModelClientError {
+  constructor() {
+    super("The model request was stopped.");
+    this.name = "ModelRequestCancelledError";
+  }
+}
+
 export interface ModelRequestNotice {
   kind: "timeout-retry" | "prompt-cache-retry" | "response-format-retry";
   attempt: number;
@@ -82,7 +89,8 @@ export interface ModelRequestNotice {
 export async function requestAgentStep(
   settings: AgentSettings,
   messages: ChatMessage[],
-  onNotice?: (notice: ModelRequestNotice) => void
+  onNotice?: (notice: ModelRequestNotice) => void,
+  signal?: AbortSignal,
 ): Promise<{ response: AgentModelResponse; usage: ModelUsageEvent }> {
   const endpoint = buildChatCompletionsUrl(settings.apiBaseUrl);
   const requestTimeoutMs = getRequestTimeoutMs(settings);
@@ -95,8 +103,14 @@ export async function requestAgentStep(
   let result: { response: Response; responseText: string } | undefined;
 
   for (let attempt = 0; attempt < MAX_TOTAL_MODEL_REQUEST_ATTEMPTS; attempt += 1) {
+    if (signal?.aborted) {
+      throw new ModelRequestCancelledError();
+    }
+
     attempts = attempt + 1;
     const controller = new AbortController();
+    const cancelRequest = () => controller.abort();
+    signal?.addEventListener("abort", cancelRequest, { once: true });
     const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
 
     try {
@@ -108,7 +122,14 @@ export async function requestAgentStep(
         includeResponseFormat,
         promptCacheStrategy
       });
+      if (signal?.aborted) {
+        throw new ModelRequestCancelledError();
+      }
     } catch (error) {
+      if (error instanceof ModelRequestCancelledError || signal?.aborted) {
+        throw new ModelRequestCancelledError();
+      }
+
       if (isAbortError(error)) {
         timeoutAttempts += 1;
         const willRetry = timeoutAttempts < MAX_TIMEOUT_ATTEMPTS;
@@ -136,6 +157,7 @@ export async function requestAgentStep(
       throw error;
     } finally {
       clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", cancelRequest);
     }
 
     if (result.response.ok) {
@@ -591,12 +613,17 @@ function normalizeAgentModelResponse(value: unknown): AgentModelResponse | undef
   }
 
   return {
+    mode: normalizeAgentResponseMode(value.mode),
     thought_summary: getString(value.thought_summary) || getString(value.thought) || getString(value.summary) || "Next browser action.",
     risk_level: normalizeRiskLevel(value.risk_level),
     actions,
     requirements: normalizeRequirementProposals(value.requirements),
     requirementUpdates: normalizeRequirementUpdates(value.requirementUpdates || value.requirement_updates),
   };
+}
+
+function normalizeAgentResponseMode(value: unknown): AgentModelResponse["mode"] {
+  return getString(value)?.trim().toLowerCase() === "chat" ? "chat" : "browser";
 }
 
 function getRawActions(value: Record<string, unknown>): unknown[] {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Bot, ChevronDown, ChevronUp, Pencil, Plus, RotateCcw, Send, Sparkles, Trash2, User, X } from "lucide-react";
+import { Bot, ChevronDown, ChevronUp, Pencil, Plus, RotateCcw, Send, Sparkles, Square, Trash2, User, X } from "lucide-react";
 import { DEFAULT_CHAT_SUGGESTIONS, MAX_CHAT_SUGGESTIONS } from "../../shared/defaults";
 import {
   loadChatSuggestions,
@@ -16,14 +16,16 @@ interface ChatPanelProps {
   messages: AgentChatMessage[];
   currentLog?: AgentLogEntry;
   running: boolean;
+  waitingForModel: boolean;
   disabled: boolean;
   model: string;
   onSend: (message: string) => Promise<void>;
+  onRerun: (message: string) => Promise<void>;
   onStop: () => Promise<void>;
   onClear: () => Promise<void>;
 }
 
-export function ChatPanel({ messages, currentLog, running, disabled, model, onSend, onStop, onClear }: ChatPanelProps) {
+export function ChatPanel({ messages, currentLog, running, waitingForModel, disabled, model, onSend, onRerun, onStop, onClear }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
@@ -49,7 +51,7 @@ export function ChatPanel({ messages, currentLog, running, disabled, model, onSe
       top: threadRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [messages.length, currentLog?.id, running]);
+  }, [messages.length, currentLog?.id, running, waitingForModel]);
 
   function updateDraft(value: string) {
     draftChangedRef.current = true;
@@ -108,7 +110,14 @@ export function ChatPanel({ messages, currentLog, running, disabled, model, onSe
 
       <div className="chat-thread" ref={threadRef} aria-live="polite">
         <WelcomeMessage />
-        {messages.map((message) => <ChatMessage key={message.id} message={message} />)}
+        {messages.map((message) => (
+          <ChatMessage
+            key={message.id}
+            message={message}
+            rerunDisabled={disabled || running || busy}
+            onRerun={onRerun}
+          />
+        ))}
         {running && currentLog ? (
           <div className={`chat-action-log ${currentLog.level}`} role="status" aria-label="Current action">
             <span className="chat-action-dot" aria-hidden="true" />
@@ -116,18 +125,10 @@ export function ChatPanel({ messages, currentLog, running, disabled, model, onSe
             <time>{formatLogTime(currentLog.timestamp)}</time>
           </div>
         ) : null}
-        {running ? (
-          <div className="chat-row assistant-row working-row">
-            <span className="chat-avatar" aria-hidden="true"><Bot /></span>
-            <button
-              type="button"
-              className="chat-bubble assistant-bubble working-bubble"
-              aria-label="Stop current task"
-              title="Stop current task"
-              onClick={() => void onStop()}
-            >
-              <span className="typing-dots" aria-label="Agent is working"><i /><i /><i /></span>
-            </button>
+        {running && waitingForModel ? (
+          <div className="model-waiting-status" role="status">
+            <Sparkles aria-hidden="true" />
+            <span>Polishing the next thought...</span>
           </div>
         ) : null}
       </div>
@@ -148,8 +149,15 @@ export function ChatPanel({ messages, currentLog, running, disabled, model, onSe
             onChange={(event) => updateDraft(event.target.value)}
             onKeyDown={handleKeyDown}
           />
-          <button type="button" className="composer-action send-action" disabled={disabled || busy || !draft.trim()} aria-label="Send message" title="Send message" onClick={() => void sendMessage()}>
-            <Send aria-hidden="true" />
+          <button
+            type="button"
+            className={`composer-action ${running ? "stop-action" : "send-action"}`}
+            disabled={!running && (disabled || busy || !draft.trim())}
+            aria-label={running ? "Stop current task" : "Send message"}
+            title={running ? "Stop current task" : "Send message"}
+            onClick={() => running ? void onStop() : void sendMessage()}
+          >
+            {running ? <Square aria-hidden="true" /> : <Send aria-hidden="true" />}
           </button>
         </div>
         <p className="composer-model"><span>Model:</span> {model || "Not configured"}</p>
@@ -389,7 +397,15 @@ function WelcomeMessage() {
   );
 }
 
-function ChatMessage({ message }: { message: AgentChatMessage }) {
+function ChatMessage({
+  message,
+  rerunDisabled,
+  onRerun,
+}: {
+  message: AgentChatMessage;
+  rerunDisabled: boolean;
+  onRerun: (message: string) => Promise<void>;
+}) {
   const isUser = message.role === "user";
   return (
     <div className={`chat-row ${isUser ? "user-row" : "assistant-row"}`}>
@@ -399,7 +415,21 @@ function ChatMessage({ message }: { message: AgentChatMessage }) {
         <div className={`chat-bubble ${isUser ? "user-bubble" : "assistant-bubble"}`}>
           {isUser ? <p>{message.content}</p> : <Markdown text={message.content} />}
         </div>
-        <time>{formatMessageTime(message.timestamp)}</time>
+        <div className="chat-message-footer">
+          <time>{formatMessageTime(message.timestamp)}</time>
+          {isUser ? (
+            <button
+              type="button"
+              className="chat-rerun-button"
+              disabled={rerunDisabled}
+              aria-label="Rerun message"
+              title="Rerun message"
+              onClick={() => void onRerun(message.content)}
+            >
+              <RotateCcw aria-hidden="true" />
+            </button>
+          ) : null}
+        </div>
       </div>
       {isUser ? <span className="chat-avatar user-avatar" aria-hidden="true"><User /></span> : null}
     </div>

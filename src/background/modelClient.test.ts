@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSettings } from "../shared/types";
 import {
   ModelClientError,
+  ModelRequestCancelledError,
   requestAgentStep,
   sanitizeMessagesForLogging,
   type ChatMessage,
@@ -47,6 +48,31 @@ describe("multimodal prompt logging", () => {
 });
 
 describe("model request retries", () => {
+  it("aborts an in-flight request without retrying", async () => {
+    const notices: ModelRequestNotice[] = [];
+    const controller = new AbortController();
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => rejectWhenAborted(init.signal));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcomePromise = captureOutcome(
+      requestAgentStep(SETTINGS, MESSAGES, (notice) => notices.push(notice), controller.signal),
+    );
+    controller.abort();
+    const outcome = await outcomePromise;
+
+    expect(outcome.error).toBeInstanceOf(ModelRequestCancelledError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(notices).toEqual([]);
+  });
+
+  it("preserves chat mode from the model response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(okResponse("chat")));
+
+    const result = await requestAgentStep(SETTINGS, MESSAGES, () => undefined);
+
+    expect(result.response.mode).toBe("chat");
+  });
+
   it("retries a timed-out request and reports the successful attempt count", async () => {
     vi.useFakeTimers();
     const notices: ModelRequestNotice[] = [];
@@ -215,11 +241,12 @@ function rejectWhenAborted(signal: AbortSignal | null | undefined): Promise<Resp
   });
 }
 
-function okResponse(): Response {
+function okResponse(mode: "chat" | "browser" = "browser"): Response {
   return new Response(JSON.stringify({
     choices: [{
       message: {
         content: JSON.stringify({
+          mode,
           thought_summary: "Finished",
           risk_level: "low",
           action: { type: "done", outcome: "completed", text: "Done" },

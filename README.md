@@ -127,9 +127,9 @@ The History view stores up to 50 sanitized reports with task status, requirement
 
 ## Chat
 
-The Chat view shows user requests, final Markdown answers, page and PDF summaries, and questions that need user input. Replies to those questions retain the paused task context. Up to 100 chat messages are stored locally and can be cleared from the Chat header. Suggestions can be edited, added, deleted, or reset and are stored locally in the browser profile. They fold after the first message but remain available from the Suggestions chevron. Conversational requests can be answered without webpage access; browser actions still require an active HTTP(S) page.
+The Chat view shows user requests, final Markdown answers, page and PDF summaries, and questions that need user input. Replies to those questions retain the paused task context. Each prior user message has a rerun action that submits the same prompt as a new turn. Up to 100 chat messages are stored locally and can be cleared from the Chat header. Suggestions can be edited, added, deleted, or reset and are stored locally in the browser profile. They fold after the first message but remain available from the Suggestions chevron.
 
-Operational observations and action results stay in Console instead of appearing as chat messages. A task launched from Run switches to Chat when its final answer is ready.
+On the first request, one model call receives the recent conversation and current browser observation, then returns `mode: "chat"` with a direct answer or `mode: "browser"` with the first browser action. This avoids a separate classification request. Browser-task continuations and later agent steps stay in browser mode. Chat shows only the latest timed action while work is running; the full operational log remains in Console. During a model request, Chat displays a short thinking status. The composer Send button becomes Stop for the full active task; Stop aborts the model HTTP request immediately and cancels the remaining task without creating an error reply.
 
 ## Iframes and Shadow DOM
 
@@ -154,8 +154,8 @@ Cost estimates use the configured USD per 1M token rates. If no rates are config
 The agent loop executes one action or a bounded action batch at a time:
 
 1. Content script observes readable page text and visible interactive elements.
-2. Background service worker asks the model for strict JSON.
-3. Background normalizes either `action` or `actions` into ordered actions.
+2. Background service worker asks the model for strict JSON containing `mode` and the answer or first action.
+3. Chat mode returns the direct answer immediately; browser mode normalizes either `action` or `actions` into ordered actions.
 4. Content script executes up to 10 supported actions in order.
 5. Fail-safe mode stops the remaining batch on failure, stale elements, `ask_user`, `done`, navigation, `read_page`, `inspect_screenshot`, `wait_for`, or a tab-changing action, then sends completed-action progress into the next model prompt.
 
@@ -165,10 +165,11 @@ API keys are profile-local extension data, not a secure vault. Use scoped, revoc
 
 ## Model Response Format
 
-The model must return strict JSON only. Use `action` for one action, or `actions` for an ordered batch of up to 10 actions. The extension executes until the batch ends or a fail-safe stop condition:
+The model must return strict JSON only and choose `mode` as `chat` or `browser`. Chat mode returns one `done` action containing the direct answer. Browser mode uses `action` for one action or `actions` for an ordered batch of up to 10 actions. The extension executes browser actions until the batch ends or a fail-safe stop condition:
 
 ```json
 {
+  "mode": "browser",
   "thought_summary": "short user-visible reasoning",
   "risk_level": "low",
   "actions": [

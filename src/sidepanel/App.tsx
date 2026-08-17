@@ -42,6 +42,7 @@ export function App() {
   const [usage, setUsage] = useState<AgentUsageSnapshot>(createEmptyUsageSnapshot());
   const [reports, setReports] = useState<RunReport[]>([]);
   const [running, setRunning] = useState(false);
+  const [waitingForModel, setWaitingForModel] = useState(false);
   const [notice, setNotice] = useState<string | undefined>();
 
   useEffect(() => {
@@ -50,6 +51,7 @@ export function App() {
     void sendBackgroundMessage({ type: "SIDEPANEL_GET_STATE" }).then((state) => {
       if (isAgentState(state)) {
         setRunning(state.running);
+        setWaitingForModel(state.waitingForModel || false);
         setLogs(filterHiddenActionLogs(state.logs));
         setChatMessages(state.chatMessages || []);
         setUsage(state.usage || createEmptyUsageSnapshot());
@@ -70,6 +72,12 @@ export function App() {
       }
       if (message.type === "AGENT_STATUS") {
         setRunning(message.running);
+        if (!message.running) {
+          setWaitingForModel(false);
+        }
+      }
+      if (message.type === "AGENT_MODEL_STATUS") {
+        setWaitingForModel(message.waiting);
       }
       if (message.type === "USAGE_UPDATE") {
         setUsage(message.usage);
@@ -206,9 +214,11 @@ export function App() {
             messages={chatMessages}
             currentLog={logs[logs.length - 1]}
             running={running}
+            waitingForModel={waitingForModel}
             disabled={!hasApiKey}
             model={settings.model}
             onSend={handleChat}
+            onRerun={handleChat}
             onStop={handleStop}
             onClear={handleClearChat}
           />
@@ -248,6 +258,7 @@ function sendBackgroundMessage(message: SidePanelToBackgroundMessage): Promise<u
 
 function isAgentState(value: unknown): value is {
   running: boolean;
+  waitingForModel?: boolean;
   logs: AgentLogEntry[];
   chatMessages?: AgentChatMessage[];
   usage?: AgentUsageSnapshot;

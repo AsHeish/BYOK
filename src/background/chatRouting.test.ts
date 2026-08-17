@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { AgentAction, AgentModelResponse } from "../shared/types";
-import { buildContinuationInstruction, getConsolePlanSummary } from "./chatRouting";
+import { buildContinuationInstruction, getConsolePlanSummary, getDirectChatAnswer } from "./chatRouting";
 
 function response(thoughtSummary: string, action: AgentAction): AgentModelResponse {
   return {
+    mode: "browser",
     thought_summary: thoughtSummary,
     risk_level: "low",
     action,
@@ -11,6 +12,24 @@ function response(thoughtSummary: string, action: AgentAction): AgentModelRespon
 }
 
 describe("chat output routing", () => {
+  it("returns a direct answer when the first model response selects chat mode", () => {
+    const action: AgentAction = {
+      type: "done",
+      outcome: "completed",
+      text: "Hello! How can I help?",
+    };
+    const modelResponse = { ...response("Greeting response", action), mode: "chat" as const };
+
+    expect(getDirectChatAnswer(modelResponse, [action], true)).toBe("Hello! How can I help?");
+  });
+
+  it("does not bypass browser routing when chat mode is not allowed", () => {
+    const action: AgentAction = { type: "done", outcome: "completed", text: "Finished" };
+    const modelResponse = { ...response("Finished", action), mode: "chat" as const };
+
+    expect(getDirectChatAnswer(modelResponse, [action], false)).toBeUndefined();
+  });
+
   it.each([
     { type: "summarize_page" as const },
     { type: "summarize_pdf" as const },

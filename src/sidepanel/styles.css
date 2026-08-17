@@ -553,6 +553,41 @@ summary:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+.chat-message-footer {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+}
+
+.user-row .chat-message-footer {
+  justify-content: flex-end;
+}
+
+.chat-rerun-button {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.chat-rerun-button:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--surface-raised);
+  color: var(--accent);
+}
+
+.chat-rerun-button svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 1.9;
+}
+
 .welcome-row {
   margin: auto 0;
 }
@@ -571,15 +606,26 @@ summary:focus-visible {
   color: var(--text-muted);
 }
 
-.working-row {
-  align-items: center;
-}
-
-.working-row .assistant-bubble {
+.model-waiting-status {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  color: var(--text-subtle);
+  gap: 7px;
+  width: calc(100% - 43px);
+  max-width: 620px;
+  margin-left: 43px;
+  padding: 4px 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.model-waiting-status svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  color: var(--accent);
+  stroke-width: 1.8;
+  animation: waiting-pulse 1.4s ease-in-out infinite;
 }
 
 .chat-action-log {
@@ -629,29 +675,6 @@ summary:focus-visible {
   font-size: 9px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-
-.typing-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  height: 12px;
-}
-
-.typing-dots i {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: typing-bounce 1s ease-in-out infinite;
-}
-
-.typing-dots i:nth-child(2) {
-  animation-delay: 120ms;
-}
-
-.typing-dots i:nth-child(3) {
-  animation-delay: 240ms;
 }
 
 .chat-suggestions {
@@ -2137,6 +2160,19 @@ textarea:focus {
   }
 }
 
+@keyframes waiting-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.92);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 /* Reference shell */
 .app-shell {
   gap: 9px;
@@ -2418,27 +2454,8 @@ textarea:focus {
   line-height: 1.55;
 }
 
-.working-row {
-  align-items: flex-start;
-  margin-top: 12px;
-}
-
-.working-row .assistant-bubble {
-  display: grid;
-  place-items: center;
-  width: 56px;
-  height: 33px;
-  padding: 0;
-  cursor: pointer;
-}
-
-.typing-dots {
-  gap: 2px;
-}
-
-.typing-dots i {
-  width: 4px;
-  height: 4px;
+.model-waiting-status {
+  margin-top: 5px;
 }
 
 .chat-suggestions {
@@ -2527,6 +2544,17 @@ textarea:focus {
   background: var(--accent);
   color: #02120b;
   opacity: 1;
+}
+
+.chat-composer .stop-action {
+  border-color: color-mix(in srgb, var(--danger) 72%, var(--border));
+  background: var(--danger);
+  color: #ffffff;
+  box-shadow: 0 7px 18px color-mix(in srgb, var(--danger) 22%, transparent);
+}
+
+.chat-composer .stop-action svg {
+  fill: currentColor;
 }
 
 .composer-model {

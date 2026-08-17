@@ -17,6 +17,18 @@ export function getConsolePlanSummary(
   return modelResponse.thought_summary;
 }
 
+export function getDirectChatAnswer(
+  modelResponse: AgentModelResponse,
+  actions: AgentAction[],
+  allowChatMode: boolean,
+): string | undefined {
+  if (!allowChatMode || modelResponse.mode !== "chat" || actions.length !== 1 || actions[0].type !== "done") {
+    return undefined;
+  }
+
+  return actions[0].text?.trim() || modelResponse.thought_summary.trim() || undefined;
+}
+
 export function buildContextualChatInstruction(
   messages: AgentChatMessage[],
   submittedTask: string,

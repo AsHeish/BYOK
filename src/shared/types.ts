@@ -124,6 +124,7 @@ export interface AgentRequirementUpdate {
 }
 
 export interface AgentModelResponse {
+  mode: "chat" | "browser";
   thought_summary: string;
   risk_level: RiskLevel;
   action?: AgentAction;
@@ -370,6 +371,7 @@ export type BackgroundToSidePanelMessage =
   | { type: "AGENT_CHAT_MESSAGE"; message: AgentChatMessage }
   | { type: "AGENT_CHAT_CLEARED" }
   | { type: "AGENT_STATUS"; running: boolean; taskId?: string }
+  | { type: "AGENT_MODEL_STATUS"; waiting: boolean }
   | { type: "USAGE_UPDATE"; usage: AgentUsageSnapshot };
 
 export type BackgroundToContentMessage =

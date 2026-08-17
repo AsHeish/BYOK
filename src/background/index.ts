@@ -7,6 +7,7 @@ import {
 import { getActiveTab, notifySidePanel, sendTabMessage, sleep, tryInjectContentScript } from "./chromeAsync";
 import {
   ModelClientError,
+  ModelRequestCancelledError,
   requestAgentStep,
   sanitizeMessagesForLogging,
   type ChatMessage,
@@ -29,6 +30,7 @@ import {
   buildContextualChatInstruction,
   buildContinuationInstruction,
   getConsolePlanSummary,
+  getDirectChatAnswer,
 } from "./chatRouting";
 
 import { dataUrlToUint8Array, formatFileSize } from "../shared/fileData";
@@ -82,6 +84,8 @@ interface RunningSession {
   visionDisabled?: boolean;
   nextTabNumber: number;
   stopped: boolean;
+  runPersistenceEnabled: boolean;
+  abortSignal: AbortSignal;
 }
 
 type AgentTabOrigin = "seed" | "agent" | "popup";
@@ -100,12 +104,14 @@ interface AgentTabState {
 
 let runningSession: RunningSession | undefined;
 let directChatTaskId: string | undefined;
+let activeTaskAbortController: AbortController | undefined;
 let pendingChatContinuation: { instruction: string; question: string } | undefined;
 let logs: AgentLogEntry[] = [];
 let chatMessages: AgentChatMessage[] = [];
 let usageSnapshot: AgentUsageSnapshot = createEmptyUsageSnapshot();
 let runReportWriteQueue: Promise<void> = Promise.resolve();
 let chatMessageWriteQueue: Promise<void> = Promise.resolve();
+let pendingModelRequestCount = 0;
 const historyDisabledRunIds = new Set<string>();
 const chatMessagesReady = loadChatMessages()
   .then((messages) => {
@@ -260,6 +266,7 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
     case "SIDEPANEL_GET_STATE":
       return {
         running: Boolean((runningSession && !runningSession.stopped) || directChatTaskId),
+        waitingForModel: pendingModelRequestCount > 0,
         logs: logs.filter((entry) => !isHiddenActionLog(entry.message)),
         chatMessages,
         usage: usageSnapshot
@@ -277,13 +284,16 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
     return;
   }
 
-  if (runningSession || directChatTaskId) {
+  if (runningSession || directChatTaskId || activeTaskAbortController) {
     stopCurrentTask("Starting a new task.");
   }
 
   const taskId = createId("task");
+  const taskAbortController = new AbortController();
+  activeTaskAbortController = taskAbortController;
   const priorChatMessages = chatMessages.slice(-10);
   const continuation = source === "chat" ? pendingChatContinuation : undefined;
+  const allowChatMode = source === "chat" && !continuation;
   const agentInstruction = continuation
     ? buildContinuationInstruction(continuation, submittedTask)
     : source === "chat"
@@ -312,7 +322,7 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
     const tab = await getActiveTab();
     if (!tab?.id || !isSupportedTabUrl(tab.url)) {
       if (source === "chat" && !continuation) {
-        await answerDirectChat(submittedTask, priorChatMessages, taskId, settings);
+        await answerDirectChat(submittedTask, priorChatMessages, taskId, settings, taskAbortController.signal);
         return;
       }
       reportTaskError(taskId, "Open an http(s) webpage before running the agent. Browser internal pages are blocked.");
@@ -320,7 +330,15 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
     }
 
     usageSnapshot = createEmptyUsageSnapshot(settings);
-    runningSession = createRunningSession(taskId, submittedTask, agentInstruction, tab, usageSnapshot);
+    runningSession = createRunningSession(
+      taskId,
+      submittedTask,
+      agentInstruction,
+      tab,
+      usageSnapshot,
+      !allowChatMode,
+      taskAbortController.signal,
+    );
     await persistRunReport(runningSession.run);
     emitUsage();
     emitStatus();
@@ -367,7 +385,8 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
         document: documentContext,
         screenshot: screenshotContext,
         stagedFile: stagedFile ? toPromptStagedFile(stagedFile) : undefined,
-        downloads: recentDownloads
+        downloads: recentDownloads,
+        allowChatMode: allowChatMode && step === 1,
       };
       let messages = buildAgentMessages(promptArgs);
       logPromptBeforeModelCall(step, messages);
@@ -376,7 +395,7 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
       try {
         let modelResult;
         try {
-          modelResult = await requestAgentStep(settings, messages, reportModelNotice);
+          modelResult = await requestModelStep(settings, messages, session.abortSignal);
         } catch (error) {
           if (!screenshotContext || !isVisionUnsupportedError(error)) {
             throw error;
@@ -389,7 +408,7 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
           appendLog("warning", "The configured model rejected screenshot input. Retrying this step with text-only context; visual inspection is disabled for this run.");
           messages = buildAgentMessages({ ...promptArgs, screenshot: undefined });
           logPromptBeforeModelCall(step, messages);
-          modelResult = await requestAgentStep(settings, messages, reportModelNotice);
+          modelResult = await requestModelStep(settings, messages, session.abortSignal);
         }
         if (session.pendingDocument === documentContext) {
           session.pendingDocument = undefined;
@@ -413,9 +432,25 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
         throw error;
       }
 
+      const plannedActions = getPlannedActions(modelResponse);
+      const directChatAnswer = getDirectChatAnswer(modelResponse, plannedActions, allowChatMode && step === 1);
+      if (modelResponse.mode === "chat" && allowChatMode && step === 1) {
+        if (!directChatAnswer) {
+          throw new Error("The model selected chat mode without returning one done action containing a direct answer.");
+        }
+        finishRun(session, "completed", undefined, directChatAnswer);
+        appendChatMessage("assistant", directChatAnswer, "answer", taskId);
+        appendLog("success", "Conversational response sent to Chat.");
+        return;
+      }
+
+      if (!session.runPersistenceEnabled) {
+        session.runPersistenceEnabled = true;
+        await persistRunReport(session.run);
+      }
+
       initializeRequirements(session, agentInstruction, modelResponse.requirements);
       applyRequirementUpdates(session, modelResponse.requirementUpdates);
-      const plannedActions = getPlannedActions(modelResponse);
 
       appendLog("info", `${getConsolePlanSummary(modelResponse, plannedActions)} Next: ${formatActions(plannedActions)}.`);
 
@@ -459,6 +494,9 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
       appendLog("info", "Task loop finished.");
     }
   } catch (error) {
+    if (error instanceof ModelRequestCancelledError && taskAbortController.signal.aborted) {
+      return;
+    }
     const message = getErrorMessage(error);
     if (runningSession?.taskId === taskId && runningSession.run.status === "running") {
       finishRun(runningSession, "failed", message);
@@ -471,6 +509,9 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
       emitStatus();
     }
     historyDisabledRunIds.delete(taskId);
+    if (activeTaskAbortController === taskAbortController) {
+      activeTaskAbortController = undefined;
+    }
   }
 }
 
@@ -955,6 +996,8 @@ function createRunningSession(
   instruction: string,
   tab: chrome.tabs.Tab,
   usage: AgentUsageSnapshot,
+  runPersistenceEnabled: boolean,
+  abortSignal: AbortSignal,
 ): RunningSession {
   if (typeof tab.id !== "number") {
     throw new Error("The active tab does not have an id.");
@@ -994,7 +1037,9 @@ function createRunningSession(
       updatedAt: now,
     },
     nextTabNumber: 2,
-    stopped: false
+    stopped: false,
+    runPersistenceEnabled,
+    abortSignal,
   };
 }
 
@@ -1490,7 +1535,8 @@ async function summarizeCurrentPage(session: RunningSession, instruction?: strin
     title: document.title || observation.title || observation.url,
     sourceLabel: document.url,
     text: pageText,
-    instruction: instruction || "Summarize this web page clearly and concisely."
+    instruction: instruction || "Summarize this web page clearly and concisely.",
+    signal: session.abortSignal,
   });
 
   recordFinding(session, {
@@ -1539,7 +1585,8 @@ async function summarizePdf(session: RunningSession, action: AgentAction): Promi
     title: source.label,
     sourceLabel: sourceDetails,
     text: truncateForSummary(extraction.text),
-    instruction: action.text || "Summarize this PDF. Include key points, important facts, and any action items."
+    instruction: action.text || "Summarize this PDF. Include key points, important facts, and any action items.",
+    signal: session.abortSignal,
   });
 
   recordFinding(session, {
@@ -1657,7 +1704,7 @@ async function validateCompletionWithModel(
     },
   ];
 
-  const result = await requestAgentStep(settings, messages, reportModelNotice);
+  const result = await requestModelStep(settings, messages, session.abortSignal);
   recordUsageEvent(result.usage, settings);
   const action = getPlannedActions(result.response)[0];
   return action.type === "done"
@@ -1670,6 +1717,7 @@ async function summarizeTextWithModel(args: {
   sourceLabel: string;
   text: string;
   instruction: string;
+  signal: AbortSignal;
 }): Promise<string> {
   const settings = await loadSettings();
   const messages: Array<{ role: "system" | "user"; content: string }> = [
@@ -1695,7 +1743,7 @@ async function summarizeTextWithModel(args: {
     }
   ];
 
-  const result = await requestAgentStep(settings, messages, reportModelNotice);
+  const result = await requestModelStep(settings, messages, args.signal);
   recordUsageEvent(result.usage, settings);
   const doneAction = result.response.actions?.find((action) => action.type === "done");
   return doneAction?.text || result.response.thought_summary || "The model did not return a summary.";
@@ -1703,6 +1751,21 @@ async function summarizeTextWithModel(args: {
 
 function reportModelNotice(notice: ModelRequestNotice): void {
   appendLog(notice.kind === "timeout-retry" ? "warning" : "info", notice.message);
+}
+
+async function requestModelStep(
+  settings: AgentSettings,
+  messages: ChatMessage[],
+  signal: AbortSignal,
+): ReturnType<typeof requestAgentStep> {
+  pendingModelRequestCount += 1;
+  emitModelStatus();
+  try {
+    return await requestAgentStep(settings, messages, reportModelNotice, signal);
+  } finally {
+    pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
+    emitModelStatus();
+  }
 }
 
 async function resolvePdfSource(
@@ -2029,7 +2092,7 @@ function touchRun(report: RunReport): void {
 }
 
 function queueRunReportSave(report: RunReport): void {
-  if (historyDisabledRunIds.has(report.id)) {
+  if (historyDisabledRunIds.has(report.id) || isRunPersistencePending(report)) {
     return;
   }
   void enqueueRunReportSave(report).catch((error: unknown) => {
@@ -2038,10 +2101,14 @@ function queueRunReportSave(report: RunReport): void {
 }
 
 async function persistRunReport(report: RunReport): Promise<void> {
-  if (historyDisabledRunIds.has(report.id)) {
+  if (historyDisabledRunIds.has(report.id) || isRunPersistencePending(report)) {
     return;
   }
   await enqueueRunReportSave(report);
+}
+
+function isRunPersistencePending(report: RunReport): boolean {
+  return runningSession?.run.id === report.id && !runningSession.runPersistenceEnabled;
 }
 
 function enqueueRunReportSave(report: RunReport): Promise<void> {
@@ -2055,6 +2122,8 @@ function enqueueRunReportSave(report: RunReport): Promise<void> {
 }
 
 function stopCurrentTask(reason: string, status: Exclude<RunStatus, "running"> = "stopped"): void {
+  activeTaskAbortController?.abort();
+
   if (runningSession && !runningSession.stopped) {
     runningSession.stopped = true;
     if (runningSession.run.status === "running") {
@@ -2134,6 +2203,7 @@ async function answerDirectChat(
   priorMessages: AgentChatMessage[],
   taskId: string,
   settings: AgentSettings,
+  signal: AbortSignal,
 ): Promise<void> {
   directChatTaskId = taskId;
   usageSnapshot = createEmptyUsageSnapshot(settings);
@@ -2148,7 +2218,7 @@ async function answerDirectChat(
         "You are the conversational mode of a BYOK browser agent.",
         "Answer the user directly without claiming to inspect or control a webpage.",
         "Return strict JSON only using this schema:",
-        '{"thought_summary":"short summary","risk_level":"low","action":{"type":"done","outcome":"completed","text":"the complete user-facing answer"}}',
+        '{"mode":"chat","thought_summary":"short summary","risk_level":"low","action":{"type":"done","outcome":"completed","text":"the complete user-facing answer"}}',
         "The action text may contain Markdown.",
       ].join("\n"),
     },
@@ -2160,7 +2230,7 @@ async function answerDirectChat(
   ];
 
   try {
-    const result = await requestAgentStep(settings, messages, reportModelNotice);
+    const result = await requestModelStep(settings, messages, signal);
     recordUsageEvent(result.usage, settings);
     if (directChatTaskId !== taskId) {
       return;
@@ -2210,6 +2280,13 @@ function emitStatus(): void {
     type: "AGENT_STATUS",
     running: Boolean((runningSession && !runningSession.stopped) || directChatTaskId),
     taskId: runningSession?.taskId || directChatTaskId
+  } satisfies BackgroundToSidePanelMessage);
+}
+
+function emitModelStatus(): void {
+  notifySidePanel({
+    type: "AGENT_MODEL_STATUS",
+    waiting: pendingModelRequestCount > 0,
   } satisfies BackgroundToSidePanelMessage);
 }
 
