@@ -351,6 +351,7 @@ export interface AgentChatMessage {
   kind: "message" | "answer" | "question" | "error";
   timestamp: number;
   runId?: string;
+  responseTimeMs?: number;
 }
 
 export interface SafetyDecision {
@@ -362,6 +363,7 @@ export interface SafetyDecision {
 export type SidePanelToBackgroundMessage =
   | { type: "SIDEPANEL_SEND_CHAT"; message: string }
   | { type: "SIDEPANEL_RUN_TASK"; task: string }
+  | { type: "SIDEPANEL_TEST_MODEL_CONNECTION"; settings: AgentSettings }
   | { type: "SIDEPANEL_STOP_TASK" }
   | { type: "SIDEPANEL_CLEAR_CHAT" }
   | { type: "SIDEPANEL_GET_STATE" };

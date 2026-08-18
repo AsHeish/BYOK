@@ -560,6 +560,15 @@ summary:focus-visible {
   min-height: 24px;
 }
 
+.chat-response-time {
+  padding-inline: 3px;
+  color: var(--text-muted);
+  font-family: "JetBrains Mono Variable", monospace;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .user-row .chat-message-footer {
   justify-content: flex-end;
 }
@@ -1584,6 +1593,26 @@ input::placeholder {
   border-bottom: 1px solid var(--border);
 }
 
+.profile-create-actions,
+.profile-record-actions,
+.profile-transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.profile-create-actions > button {
+  flex: 1 1 140px;
+}
+
+.profile-record-actions > button {
+  flex: 1 1 84px;
+}
+
+.profile-transfer-actions > button {
+  flex: 1 1 110px;
+}
+
 label {
   display: flex;
   flex-direction: column;
@@ -1658,6 +1687,21 @@ textarea:focus {
     border-color 120ms ease;
 }
 
+.button-with-icon {
+  gap: 6px;
+}
+
+.button-with-icon svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  stroke-width: 1.9;
+}
+
+.button-with-icon .spin {
+  animation: control-spin 900ms linear infinite;
+}
+
 .primary-button {
   background: var(--accent);
   color: var(--accent-contrast);
@@ -1723,6 +1767,12 @@ textarea:focus {
 .profile-notice {
   color: var(--text-subtle);
   font-weight: 650;
+}
+
+@keyframes control-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .privacy-bar {

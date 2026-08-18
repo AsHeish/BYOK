@@ -133,6 +133,17 @@ export function App() {
     await sendBackgroundMessage({ type: "SIDEPANEL_STOP_TASK" });
   }
 
+  async function handleTestConnection(candidateSettings: AgentSettings): Promise<{ latencyMs: number }> {
+    const response = await sendBackgroundMessage({
+      type: "SIDEPANEL_TEST_MODEL_CONNECTION",
+      settings: candidateSettings,
+    });
+    if (isConnectionTestSuccess(response)) {
+      return { latencyMs: response.latencyMs };
+    }
+    throw new Error(getResponseError(response) || "Could not test the model connection.");
+  }
+
   async function handleClearChat() {
     await sendBackgroundMessage({ type: "SIDEPANEL_CLEAR_CHAT" });
     setChatMessages([]);
@@ -236,7 +247,12 @@ export function App() {
             <ActionLog logs={logs} />
           </>
         ) : (
-          <SettingsPanel settings={settings} onChange={setSettings} onSave={handleSaveSettings} />
+          <SettingsPanel
+            settings={settings}
+            onChange={setSettings}
+            onSave={handleSaveSettings}
+            onTestConnection={handleTestConnection}
+          />
         )}
       </div>
     </main>
@@ -264,6 +280,21 @@ function isAgentState(value: unknown): value is {
   usage?: AgentUsageSnapshot;
 } {
   return value !== null && typeof value === "object" && "running" in value && "logs" in value;
+}
+
+function isConnectionTestSuccess(value: unknown): value is { ok: true; latencyMs: number } {
+  return value !== null &&
+    typeof value === "object" &&
+    "ok" in value &&
+    value.ok === true &&
+    "latencyMs" in value &&
+    typeof value.latencyMs === "number";
+}
+
+function getResponseError(value: unknown): string | undefined {
+  return value !== null && typeof value === "object" && "error" in value && typeof value.error === "string"
+    ? value.error
+    : undefined;
 }
 
 function filterHiddenActionLogs(logs: AgentLogEntry[]): AgentLogEntry[] {

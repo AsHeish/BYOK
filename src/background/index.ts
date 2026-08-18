@@ -10,6 +10,7 @@ import {
   ModelRequestCancelledError,
   requestAgentStep,
   sanitizeMessagesForLogging,
+  testModelConnection,
   type ChatMessage,
   type ModelRequestNotice,
 } from "./modelClient";
@@ -29,6 +30,7 @@ import { getTabIdsForGrouping } from "./tabGrouping";
 import {
   buildContextualChatInstruction,
   buildContinuationInstruction,
+  getChatResponseTimeMs,
   getConsolePlanSummary,
   getDirectChatAnswer,
 } from "./chatRouting";
@@ -251,6 +253,9 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
     case "SIDEPANEL_RUN_TASK":
       void startTask(message.task, "run");
       return { ok: true };
+
+    case "SIDEPANEL_TEST_MODEL_CONNECTION":
+      return testModelConnection(message.settings);
 
     case "SIDEPANEL_STOP_TASK":
       stopCurrentTask("Stopped by user.", "stopped");
@@ -2162,13 +2167,17 @@ function appendChatMessage(
   kind: AgentChatMessage["kind"],
   runId?: string,
 ): void {
+  const timestamp = Date.now();
   const message: AgentChatMessage = {
     id: createId("chat"),
     role,
     content,
     kind,
-    timestamp: Date.now(),
+    timestamp,
     runId,
+    responseTimeMs: role === "assistant"
+      ? getChatResponseTimeMs(chatMessages, runId, timestamp)
+      : undefined,
   };
 
   chatMessages = [...chatMessages, message].slice(-MAX_CHAT_MESSAGES);

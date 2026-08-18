@@ -29,6 +29,25 @@ export function getDirectChatAnswer(
   return actions[0].text?.trim() || modelResponse.thought_summary.trim() || undefined;
 }
 
+export function getChatResponseTimeMs(
+  messages: AgentChatMessage[],
+  runId: string | undefined,
+  responseTimestamp: number,
+): number | undefined {
+  if (!runId) {
+    return undefined;
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "user" && message.runId === runId) {
+      return Math.max(0, responseTimestamp - message.timestamp);
+    }
+  }
+
+  return undefined;
+}
+
 export function buildContextualChatInstruction(
   messages: AgentChatMessage[],
   submittedTask: string,

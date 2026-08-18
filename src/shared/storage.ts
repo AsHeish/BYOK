@@ -43,6 +43,8 @@ const MAX_FINDING_TEXT_CHARS = 8_000;
 const MAX_EVIDENCE_SUMMARY_CHARS = 1_000;
 const MAX_CHAT_MESSAGE_CHARS = 60_000;
 const MAX_CHAT_SUGGESTION_CHARS = 240;
+const CONFIGURATION_PROFILE_EXPORT_FORMAT = "byok-browser-agent-profiles";
+const CONFIGURATION_PROFILE_EXPORT_VERSION = 1;
 
 function normalizeProvider(value: unknown): Provider {
   if (
@@ -265,29 +267,10 @@ export async function saveConfigurationProfile(
   }
 
   const profiles = await loadConfigurationProfiles();
-  const now = Date.now();
   const existing = profiles.find(
     (profile) => profile.name.toLowerCase() === trimmedName.toLowerCase(),
   );
-  const savedProfile: AiConfigurationProfile = {
-    id: existing?.id || createProfileId(),
-    name: trimmedName,
-    provider: settings.provider,
-    apiBaseUrl: settings.apiBaseUrl.replace(/\/+$/, ""),
-    apiKey: settings.apiKey,
-    model: settings.model,
-    maxSteps: clampMaxSteps(settings.maxSteps),
-    requestTimeoutSeconds: Math.min(
-      Math.max(settings.requestTimeoutSeconds, MIN_REQUEST_TIMEOUT_SECONDS),
-      MAX_REQUEST_TIMEOUT_SECONDS,
-    ),
-    promptCacheMode: normalizePromptCacheMode(settings.promptCacheMode),
-    inputTokenCostPerMillion: normalizeOptionalPrice(settings.inputTokenCostPerMillion),
-    cachedInputTokenCostPerMillion: normalizeOptionalPrice(settings.cachedInputTokenCostPerMillion),
-    outputTokenCostPerMillion: normalizeOptionalPrice(settings.outputTokenCostPerMillion),
-    createdAt: existing?.createdAt || now,
-    updatedAt: now,
-  };
+  const savedProfile = createConfigurationProfile(trimmedName, settings, existing);
 
   const nextProfiles = existing
     ? profiles.map((profile) =>
@@ -299,6 +282,79 @@ export async function saveConfigurationProfile(
     [CONFIG_PROFILES_KEY]: nextProfiles,
   });
   return nextProfiles;
+}
+
+export async function updateConfigurationProfile(
+  profileId: string,
+  settings: AgentSettings,
+): Promise<AiConfigurationProfile[]> {
+  const profiles = await loadConfigurationProfiles();
+  const existing = profiles.find((profile) => profile.id === profileId);
+  if (!existing) {
+    throw new Error("Choose a saved profile first.");
+  }
+
+  const updatedProfile = createConfigurationProfile(existing.name, settings, existing);
+  const nextProfiles = profiles.map((profile) =>
+    profile.id === profileId ? updatedProfile : profile,
+  );
+  await chrome.storage.local.set({ [CONFIG_PROFILES_KEY]: nextProfiles });
+  return nextProfiles;
+}
+
+export function serializeConfigurationProfiles(
+  profiles: AiConfigurationProfile[],
+  exportedAt = new Date().toISOString(),
+): string {
+  return JSON.stringify({
+    format: CONFIGURATION_PROFILE_EXPORT_FORMAT,
+    version: CONFIGURATION_PROFILE_EXPORT_VERSION,
+    exportedAt,
+    profiles,
+  }, null, 2);
+}
+
+export async function importConfigurationProfiles(
+  value: unknown,
+): Promise<{ profiles: AiConfigurationProfile[]; importedIds: string[] }> {
+  if (!value || typeof value !== "object") {
+    throw new Error("The profile file is not valid JSON export data.");
+  }
+
+  const imported = value as { format?: unknown; version?: unknown; profiles?: unknown };
+  if (
+    imported.format !== CONFIGURATION_PROFILE_EXPORT_FORMAT ||
+    imported.version !== CONFIGURATION_PROFILE_EXPORT_VERSION ||
+    !Array.isArray(imported.profiles)
+  ) {
+    throw new Error("The profile file format or version is not supported.");
+  }
+
+  const normalizedImports = normalizeProfiles(imported.profiles);
+  if (normalizedImports.length === 0) {
+    throw new Error("The profile file does not contain any valid profiles.");
+  }
+
+  const profiles = await loadConfigurationProfiles();
+  const usedNames = new Set(profiles.map((profile) => profile.name.toLocaleLowerCase()));
+  const now = Date.now();
+  const importedProfiles = normalizedImports.map((profile) => {
+    const name = createImportedProfileName(profile.name, usedNames);
+    usedNames.add(name.toLocaleLowerCase());
+    return {
+      ...profile,
+      id: createProfileId(),
+      name,
+      createdAt: now,
+      updatedAt: now,
+    };
+  });
+  const nextProfiles = [...profiles, ...importedProfiles];
+  await chrome.storage.local.set({ [CONFIG_PROFILES_KEY]: nextProfiles });
+  return {
+    profiles: normalizeProfiles(nextProfiles),
+    importedIds: importedProfiles.map((profile) => profile.id),
+  };
 }
 
 export async function deleteConfigurationProfile(
@@ -377,6 +433,47 @@ function normalizeProfiles(value: unknown): AiConfigurationProfile[] {
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+function createConfigurationProfile(
+  name: string,
+  settings: AgentSettings,
+  existing?: AiConfigurationProfile,
+): AiConfigurationProfile {
+  const now = Date.now();
+  return {
+    id: existing?.id || createProfileId(),
+    name: name.trim(),
+    provider: settings.provider,
+    apiBaseUrl: settings.apiBaseUrl.replace(/\/+$/, ""),
+    apiKey: settings.apiKey,
+    model: settings.model,
+    maxSteps: clampMaxSteps(settings.maxSteps),
+    requestTimeoutSeconds: Math.min(
+      Math.max(settings.requestTimeoutSeconds, MIN_REQUEST_TIMEOUT_SECONDS),
+      MAX_REQUEST_TIMEOUT_SECONDS,
+    ),
+    promptCacheMode: normalizePromptCacheMode(settings.promptCacheMode),
+    inputTokenCostPerMillion: normalizeOptionalPrice(settings.inputTokenCostPerMillion),
+    cachedInputTokenCostPerMillion: normalizeOptionalPrice(settings.cachedInputTokenCostPerMillion),
+    outputTokenCostPerMillion: normalizeOptionalPrice(settings.outputTokenCostPerMillion),
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+}
+
+function createImportedProfileName(name: string, usedNames: Set<string>): string {
+  if (!usedNames.has(name.toLocaleLowerCase())) {
+    return name;
+  }
+
+  let suffix = 1;
+  let candidate = `${name} (imported)`;
+  while (usedNames.has(candidate.toLocaleLowerCase())) {
+    suffix += 1;
+    candidate = `${name} (imported ${suffix})`;
+  }
+  return candidate;
+}
+
 function normalizeStagedUploadFile(value: unknown): StagedUploadFile | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
@@ -431,10 +528,16 @@ function normalizeChatMessages(value: unknown): AgentChatMessage[] {
         kind,
         timestamp: finiteNumber(raw.timestamp, Date.now()),
         runId: optionalString(raw.runId)?.slice(0, 120),
+        responseTimeMs: normalizeResponseTimeMs(raw.responseTimeMs),
       };
     })
     .filter((message): message is AgentChatMessage => Boolean(message))
     .slice(-MAX_CHAT_MESSAGES);
+}
+
+function normalizeResponseTimeMs(value: unknown): number | undefined {
+  const responseTimeMs = optionalFiniteNumber(value);
+  return responseTimeMs === undefined ? undefined : Math.max(0, responseTimeMs);
 }
 
 function normalizeChatSuggestions(value: unknown): string[] {

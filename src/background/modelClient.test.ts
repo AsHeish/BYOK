@@ -5,6 +5,7 @@ import {
   ModelRequestCancelledError,
   requestAgentStep,
   sanitizeMessagesForLogging,
+  testModelConnection,
   type ChatMessage,
   type ModelRequestNotice,
 } from "./modelClient";
@@ -230,6 +231,30 @@ describe("model request retries", () => {
     expect(bodies[4]).not.toHaveProperty("response_format");
     expect(notices.at(-1)?.kind).toBe("response-format-retry");
     expect(outcome.value?.usage.attempts).toBe(5);
+  });
+});
+
+describe("model connection test", () => {
+  it("checks the configured model without requesting agent JSON", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(okResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await testModelConnection(SETTINGS);
+    const body = requestBodies(fetchMock)[0];
+
+    expect(result).toMatchObject({ ok: true });
+    expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+    expect(body).not.toHaveProperty("response_format");
+    expect(body).toMatchObject({ model: "test-model" });
+  });
+
+  it("surfaces provider authentication failures", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(errorResponse(401, "Invalid API key")));
+
+    await expect(testModelConnection(SETTINGS)).rejects.toMatchObject({
+      name: "ModelClientError",
+      status: 401,
+    });
   });
 });
 

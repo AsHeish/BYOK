@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AgentAction, AgentModelResponse } from "../shared/types";
-import { buildContinuationInstruction, getConsolePlanSummary, getDirectChatAnswer } from "./chatRouting";
+import type { AgentAction, AgentChatMessage, AgentModelResponse } from "../shared/types";
+import { buildContinuationInstruction, getChatResponseTimeMs, getConsolePlanSummary, getDirectChatAnswer } from "./chatRouting";
 
 function response(thoughtSummary: string, action: AgentAction): AgentModelResponse {
   return {
@@ -12,6 +12,16 @@ function response(thoughtSummary: string, action: AgentAction): AgentModelRespon
 }
 
 describe("chat output routing", () => {
+  it("measures an assistant response from its matching user turn", () => {
+    const messages: AgentChatMessage[] = [
+      { id: "user-old", role: "user", kind: "message", content: "Old", timestamp: 100, runId: "run-old" },
+      { id: "user-new", role: "user", kind: "message", content: "New", timestamp: 1_000, runId: "run-new" },
+    ];
+
+    expect(getChatResponseTimeMs(messages, "run-new", 4_250)).toBe(3_250);
+    expect(getChatResponseTimeMs(messages, "missing", 4_250)).toBeUndefined();
+  });
+
   it("returns a direct answer when the first model response selects chat mode", () => {
     const action: AgentAction = {
       type: "done",

@@ -227,6 +227,71 @@ export async function requestAgentStep(
   };
 }
 
+export async function testModelConnection(
+  settings: AgentSettings,
+  signal?: AbortSignal,
+): Promise<{ ok: true; latencyMs: number }> {
+  if (!settings.apiKey.trim()) {
+    throw new ModelClientError("API key is required.");
+  }
+  if (!settings.model.trim()) {
+    throw new ModelClientError("Model name is required.");
+  }
+
+  const endpoint = buildChatCompletionsUrl(settings.apiBaseUrl);
+  const requestTimeoutMs = getRequestTimeoutMs(settings);
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const cancelRequest = () => controller.abort();
+  signal?.addEventListener("abort", cancelRequest, { once: true });
+  const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+
+  try {
+    const result = await postChatCompletion({
+      endpoint,
+      settings,
+      messages: [{ role: "user", content: "Reply with OK." }],
+      signal: controller.signal,
+      includeResponseFormat: false,
+      promptCacheStrategy: "none",
+    });
+    if (signal?.aborted) {
+      throw new ModelRequestCancelledError();
+    }
+    if (!result.response.ok) {
+      throw new ModelClientError(
+        formatHttpError(result.response.status, result.responseText),
+        result.response.status,
+      );
+    }
+
+    let data: OpenAiChatCompletionResponse;
+    try {
+      data = JSON.parse(result.responseText) as OpenAiChatCompletionResponse;
+    } catch {
+      throw new ModelClientError("The model provider returned a non-JSON HTTP response.");
+    }
+    if (!data.choices?.length) {
+      throw new ModelClientError(data.error?.message || "The model response did not include a choice.");
+    }
+
+    return { ok: true, latencyMs: Date.now() - startedAt };
+  } catch (error) {
+    if (error instanceof ModelRequestCancelledError || signal?.aborted) {
+      throw new ModelRequestCancelledError();
+    }
+    if (isAbortError(error)) {
+      throw new ModelClientError(
+        `The connection test timed out after ${Math.round(requestTimeoutMs / 1000)} seconds.`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    signal?.removeEventListener("abort", cancelRequest);
+  }
+}
+
 async function postChatCompletion(args: {
   endpoint: string;
   settings: AgentSettings;

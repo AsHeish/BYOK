@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, Download, LoaderCircle, RefreshCw, Save, Trash2, Upload, Wifi } from "lucide-react";
 import {
   PROVIDER_DEFAULT_BASE_URLS,
   PROVIDER_DEFAULT_MODELS,
@@ -6,9 +7,12 @@ import {
 import {
   applyConfigurationProfile,
   deleteConfigurationProfile,
+  importConfigurationProfiles,
   loadConfigurationProfiles,
   saveConfigurationProfile,
   saveSettings,
+  serializeConfigurationProfiles,
+  updateConfigurationProfile,
 } from "../../shared/storage";
 import type {
   AgentSettings,
@@ -20,17 +24,22 @@ interface SettingsPanelProps {
   settings: AgentSettings;
   onChange: (settings: AgentSettings) => void;
   onSave: () => Promise<void>;
+  onTestConnection: (settings: AgentSettings) => Promise<{ latencyMs: number }>;
 }
 
 export function SettingsPanel({
   settings,
   onChange,
   onSave,
+  onTestConnection,
 }: SettingsPanelProps) {
   const [profileName, setProfileName] = useState("");
   const [profiles, setProfiles] = useState<AiConfigurationProfile[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState("");
   const [profileNotice, setProfileNotice] = useState<string | undefined>();
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [importingProfiles, setImportingProfiles] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     void refreshProfiles();
@@ -83,6 +92,7 @@ export function SettingsPanel({
       setProfiles(nextProfiles);
       setSelectedProfileId(saved?.id || nextProfiles[0]?.id || "");
       setProfileNotice(`Saved "${profileName.trim()}".`);
+      setProfileName("");
     } catch (error) {
       setProfileNotice(error instanceof Error ? error.message : String(error));
     }
@@ -98,6 +108,70 @@ export function SettingsPanel({
     onChange(nextSettings);
     await saveSettings(nextSettings);
     setProfileNotice(`Applied "${selectedProfile.name}".`);
+  }
+
+  async function handleUpdateProfile() {
+    if (!selectedProfile) {
+      setProfileNotice("Choose a saved profile first.");
+      return;
+    }
+
+    try {
+      const nextProfiles = await updateConfigurationProfile(selectedProfile.id, settings);
+      setProfiles(nextProfiles);
+      setProfileNotice(`Updated "${selectedProfile.name}".`);
+    } catch (error) {
+      setProfileNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function handleTestConnection() {
+    setTestingConnection(true);
+    setProfileNotice("Testing connection...");
+    try {
+      const result = await onTestConnection(settings);
+      setProfileNotice(`Connection successful (${result.latencyMs.toLocaleString()} ms).`);
+    } catch (error) {
+      setProfileNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTestingConnection(false);
+    }
+  }
+
+  function handleExportProfiles() {
+    try {
+      const blob = new Blob([serializeConfigurationProfiles(profiles)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `byok-ai-profiles-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setProfileNotice(`Exported ${profiles.length} profile${profiles.length === 1 ? "" : "s"} with API keys.`);
+    } catch (error) {
+      setProfileNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function handleImportProfiles(file?: File) {
+    if (!file) {
+      return;
+    }
+
+    setImportingProfiles(true);
+    setProfileNotice("Importing profiles...");
+    try {
+      const imported = await importConfigurationProfiles(JSON.parse(await file.text()));
+      setProfiles(imported.profiles);
+      setSelectedProfileId(imported.importedIds[0] || imported.profiles[0]?.id || "");
+      setProfileNotice(`Imported ${imported.importedIds.length} profile${imported.importedIds.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setProfileNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setImportingProfiles(false);
+    }
   }
 
   async function handleDeleteProfile() {
@@ -121,23 +195,33 @@ export function SettingsPanel({
         </div>
 
         <label>
-          Save current as
-          <div className="inline-control">
-            <input
-              value={profileName}
-              onChange={(event) => setProfileName(event.target.value)}
-              placeholder="Work Groq, Personal OpenAI..."
-              spellCheck={false}
-            />
-            <button
-              className="secondary-button"
-              disabled={!profileName.trim()}
-              onClick={() => void handleSaveProfile()}
-            >
-              Save
-            </button>
-          </div>
+          New profile name
+          <input
+            value={profileName}
+            onChange={(event) => setProfileName(event.target.value)}
+            placeholder="Work Groq, Personal OpenAI..."
+            spellCheck={false}
+          />
         </label>
+
+        <div className="button-row profile-create-actions">
+          <button
+            className="secondary-button button-with-icon"
+            disabled={testingConnection || !settings.apiBaseUrl.trim() || !settings.apiKey.trim() || !settings.model.trim()}
+            onClick={() => void handleTestConnection()}
+          >
+            {testingConnection ? <LoaderCircle className="spin" aria-hidden="true" /> : <Wifi aria-hidden="true" />}
+            {testingConnection ? "Testing..." : "Test Connection"}
+          </button>
+          <button
+            className="primary-button button-with-icon"
+            disabled={!profileName.trim()}
+            onClick={() => void handleSaveProfile()}
+          >
+            <Save aria-hidden="true" />
+            Save Profile
+          </button>
+        </div>
 
         <label>
           Saved profiles
@@ -157,20 +241,60 @@ export function SettingsPanel({
           </select>
         </label>
 
-        <div className="button-row">
+        <div className="button-row profile-record-actions">
           <button
-            className="primary-button"
+            className="primary-button button-with-icon"
             disabled={!selectedProfile}
             onClick={() => void handleApplyProfile()}
           >
+            <Check aria-hidden="true" />
             Apply
           </button>
           <button
-            className="danger-button subtle-danger"
+            className="secondary-button button-with-icon"
+            disabled={!selectedProfile}
+            onClick={() => void handleUpdateProfile()}
+          >
+            <RefreshCw aria-hidden="true" />
+            Update
+          </button>
+          <button
+            className="danger-button subtle-danger button-with-icon"
             disabled={!selectedProfile}
             onClick={() => void handleDeleteProfile()}
           >
+            <Trash2 aria-hidden="true" />
             Delete
+          </button>
+        </div>
+
+        <input
+          ref={importInputRef}
+          className="sr-only"
+          type="file"
+          accept="application/json,.json"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            void handleImportProfiles(file);
+          }}
+        />
+        <div className="button-row profile-transfer-actions">
+          <button
+            className="secondary-button button-with-icon"
+            disabled={importingProfiles}
+            onClick={() => importInputRef.current?.click()}
+          >
+            {importingProfiles ? <LoaderCircle className="spin" aria-hidden="true" /> : <Upload aria-hidden="true" />}
+            {importingProfiles ? "Importing..." : "Import"}
+          </button>
+          <button
+            className="secondary-button button-with-icon"
+            disabled={profiles.length === 0}
+            onClick={handleExportProfiles}
+          >
+            <Download aria-hidden="true" />
+            Export
           </button>
         </div>
 

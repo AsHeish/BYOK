@@ -77,7 +77,7 @@ The side-panel settings support:
 - `promptCacheMode`: `auto` selects cache hints by provider and model, `on` forces cache hints, and `off` disables them.
 - Optional token pricing rates: input, cached input, and output USD per 1M tokens for the dashboard cost estimate.
 - `saveRunHistory`: stores sanitized run reports locally; screenshots, uploaded files, form values, and API keys are never included in reports.
-- Named AI profiles: save the current provider/base URL/API key/model/max steps/timeout/cache mode/pricing under a name, then apply or delete profiles from Settings.
+- Named AI profiles: test the current connection, save new profiles, apply or update a selected profile, and delete profiles from Settings. Profiles can be exported and imported as versioned JSON. Exports include API keys in plaintext; imported name conflicts are retained as renamed copies such as `Work (imported)`.
 
 The extension uses `fetch` against `POST {apiBaseUrl}/chat/completions` with OpenAI-compatible chat-completions JSON. No paid SDK is used.
 Each AI request uses the configured timeout. A timed-out step gets up to four attempts. Provider compatibility downgrades for rejected prompt-cache fields and JSON response-format fields use separate bounded retries, so earlier timeouts cannot consume a promised compatibility fallback. Authentication and other non-compatible HTTP failures are returned immediately. The action log reports every retry.
@@ -127,7 +127,7 @@ The History view stores up to 50 sanitized reports with task status, requirement
 
 ## Chat
 
-The Chat view shows user requests, final Markdown answers, page and PDF summaries, and questions that need user input. Replies to those questions retain the paused task context. Each prior user message has a rerun action that submits the same prompt as a new turn. Up to 100 chat messages are stored locally and can be cleared from the Chat header. Suggestions can be edited, added, deleted, or reset and are stored locally in the browser profile. They fold after the first message but remain available from the Suggestions chevron.
+The Chat view shows user requests, final Markdown answers, page and PDF summaries, and questions that need user input. Each assistant message includes its persisted end-to-end response duration as an unlabeled compact value. Replies to questions retain the paused task context. Each prior user message has a rerun action that submits the same prompt as a new turn. Up to 100 chat messages are stored locally and can be cleared from the Chat header. Suggestions can be edited, added, deleted, or reset and are stored locally in the browser profile. They fold after the first message but remain available from the Suggestions chevron.
 
 On the first request, one model call receives the recent conversation and current browser observation, then returns `mode: "chat"` with a direct answer or `mode: "browser"` with the first browser action. This avoids a separate classification request. Browser-task continuations and later agent steps stay in browser mode. Chat shows only the latest timed action while work is running; the full operational log remains in Console. During a model request, Chat displays a short thinking status. The composer Send button becomes Stop for the full active task; Stop aborts the model HTTP request immediately and cancels the remaining task without creating an error reply.
 

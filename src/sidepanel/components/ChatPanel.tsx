@@ -417,6 +417,9 @@ function ChatMessage({
         </div>
         <div className="chat-message-footer">
           <time>{formatMessageTime(message.timestamp)}</time>
+          {!isUser && message.responseTimeMs !== undefined ? (
+            <span className="chat-response-time">{formatResponseTime(message.responseTimeMs)}</span>
+          ) : null}
           {isUser ? (
             <button
               type="button"
@@ -441,6 +444,21 @@ function formatMessageTime(timestamp: number): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(timestamp);
+}
+
+function formatResponseTime(responseTimeMs: number): string {
+  const totalSeconds = Math.max(0.1, responseTimeMs / 1_000);
+  if (totalSeconds < 10) {
+    return `${totalSeconds.toFixed(1)}s`;
+  }
+  if (totalSeconds < 60) {
+    return `${Math.round(totalSeconds)}s`;
+  }
+
+  const roundedSeconds = Math.round(totalSeconds);
+  const minutes = Math.floor(roundedSeconds / 60);
+  const seconds = roundedSeconds % 60;
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
 }
 
 function formatLogTime(timestamp: number): string {
