@@ -5,6 +5,7 @@ import {
   ModelRequestCancelledError,
   requestAgentStep,
   sanitizeMessagesForLogging,
+  setModelRequestTransport,
   testModelConnection,
   type ChatMessage,
   type ModelRequestNotice,
@@ -25,6 +26,7 @@ const SETTINGS: AgentSettings = {
 const MESSAGES: ChatMessage[] = [{ role: "user", content: "Do the next step" }];
 
 afterEach(() => {
+  setModelRequestTransport(undefined);
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -90,6 +92,35 @@ describe("model request retries", () => {
     expect(notices).toMatchObject([{ kind: "timeout-retry", attempt: 1, maxAttempts: 4 }]);
     expect(result.usage.attempts).toBe(2);
     expect(result.response.actions?.[0]?.type).toBe("done");
+  });
+
+  it("keeps a configured 60-second timeout with an external transport", async () => {
+    vi.useFakeTimers();
+    const notices: ModelRequestNotice[] = [];
+    const transport = vi.fn()
+      .mockImplementationOnce(({ signal }: { signal: AbortSignal }) => rejectWhenAborted(signal))
+      .mockResolvedValueOnce(await toModelHttpResponse(okResponse()));
+    setModelRequestTransport(transport);
+
+    const resultPromise = requestAgentStep(
+      { ...SETTINGS, requestTimeoutSeconds: 60 },
+      MESSAGES,
+      (notice) => notices.push(notice),
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(notices).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await resultPromise;
+
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(notices).toMatchObject([{
+      kind: "timeout-retry",
+      attempt: 1,
+      message: expect.stringContaining("within 60s"),
+    }]);
+    expect(result.usage.attempts).toBe(2);
   });
 
   it("fails with usage after all timeout attempts are exhausted", async () => {
@@ -291,6 +322,15 @@ function errorResponse(status: number, message: string): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+async function toModelHttpResponse(response: Response) {
+  return {
+    ok: response.ok,
+    status: response.status,
+    statusText: response.statusText,
+    responseText: await response.text(),
+  };
 }
 
 function requestBodies(fetchMock: ReturnType<typeof vi.fn>): Array<Record<string, unknown>> {

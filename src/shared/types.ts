@@ -344,6 +344,12 @@ export interface AgentLogEntry {
   timestamp: number;
 }
 
+export interface ModelRetryStatus {
+  message: string;
+  attempt: number;
+  maxAttempts: number;
+}
+
 export interface AgentChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -374,6 +380,7 @@ export type BackgroundToSidePanelMessage =
   | { type: "AGENT_CHAT_CLEARED" }
   | { type: "AGENT_STATUS"; running: boolean; taskId?: string }
   | { type: "AGENT_MODEL_STATUS"; waiting: boolean }
+  | { type: "AGENT_MODEL_RETRY_STATUS"; status: ModelRetryStatus | null }
   | { type: "USAGE_UPDATE"; usage: AgentUsageSnapshot };
 
 export type BackgroundToContentMessage =

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Download, LoaderCircle, RefreshCw, Save, Trash2, Upload, Wifi } from "lucide-react";
 import {
+  MAX_REQUEST_TIMEOUT_SECONDS,
+  MIN_REQUEST_TIMEOUT_SECONDS,
   PROVIDER_DEFAULT_BASE_URLS,
   PROVIDER_DEFAULT_MODELS,
 } from "../../shared/defaults";
@@ -378,8 +380,8 @@ export function SettingsPanel({
           AI timeout seconds
           <input
             value={settings.requestTimeoutSeconds}
-            min={10}
-            max={300}
+            min={MIN_REQUEST_TIMEOUT_SECONDS}
+            max={MAX_REQUEST_TIMEOUT_SECONDS}
             type="number"
             onChange={(event) =>
               onChange({

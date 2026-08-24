@@ -7,12 +7,14 @@ import {
   loadChatMessages,
   loadConfigurationProfiles,
   loadRunReports,
+  loadSettings,
   markInterruptedRunReports,
   resetChatSuggestions,
   saveChatSuggestions,
   saveChatMessages,
   saveConfigurationProfile,
   saveRunReport,
+  saveSettings,
   serializeConfigurationProfiles,
   updateConfigurationProfile,
 } from "./storage";
@@ -58,6 +60,14 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("settings persistence", () => {
+  it("preserves a 60-second model timeout", async () => {
+    await saveSettings({ ...PROFILE_SETTINGS, requestTimeoutSeconds: 60 });
+
+    expect((await loadSettings()).requestTimeoutSeconds).toBe(60);
+  });
 });
 
 describe("run report persistence", () => {

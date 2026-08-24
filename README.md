@@ -73,14 +73,14 @@ The side-panel settings support:
 - `apiKey`: stored with `chrome.storage.local`.
 - `model`: any model name accepted by the configured compatible endpoint.
 - `maxSteps`: maximum observe/act loop iterations, default `60`.
-- `requestTimeoutSeconds`: AI request timeout per attempt, default `60`.
+- `requestTimeoutSeconds`: AI request timeout per attempt, default `60` seconds.
 - `promptCacheMode`: `auto` selects cache hints by provider and model, `on` forces cache hints, and `off` disables them.
 - Optional token pricing rates: input, cached input, and output USD per 1M tokens for the dashboard cost estimate.
 - `saveRunHistory`: stores sanitized run reports locally; screenshots, uploaded files, form values, and API keys are never included in reports.
 - Named AI profiles: test the current connection, save new profiles, apply or update a selected profile, and delete profiles from Settings. Profiles can be exported and imported as versioned JSON. Exports include API keys in plaintext; imported name conflicts are retained as renamed copies such as `Work (imported)`.
 
-The extension uses `fetch` against `POST {apiBaseUrl}/chat/completions` with OpenAI-compatible chat-completions JSON. No paid SDK is used.
-Each AI request uses the configured timeout. A timed-out step gets up to four attempts. Provider compatibility downgrades for rejected prompt-cache fields and JSON response-format fields use separate bounded retries, so earlier timeouts cannot consume a promised compatibility fallback. Authentication and other non-compatible HTTP failures are returned immediately. The action log reports every retry.
+The extension uses `fetch` from the open side-panel document against `POST {apiBaseUrl}/chat/completions` with OpenAI-compatible chat-completions JSON. Keeping model HTTP outside the Manifest V3 service worker avoids Chrome's 30-second service-worker fetch-response limit. No paid SDK is used.
+Each AI request uses the configured timeout. A timed-out step gets up to four attempts. Provider compatibility downgrades for rejected prompt-cache fields and JSON response-format fields use separate bounded retries, so earlier timeouts cannot consume a promised compatibility fallback. Authentication and other non-compatible HTTP failures are returned immediately. Chat shows the active timeout retry and next attempt number, while the action log retains every retry.
 
 ## Prompt Caching
 

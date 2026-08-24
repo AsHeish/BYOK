@@ -1,5 +1,8 @@
 import type { AgentSettings } from "./types";
 
+export const MIN_REQUEST_TIMEOUT_SECONDS = 10;
+export const MAX_REQUEST_TIMEOUT_SECONDS = 300;
+
 export const DEFAULT_SETTINGS: AgentSettings = {
   provider: "openai",
   apiBaseUrl: "https://api.openai.com/v1",

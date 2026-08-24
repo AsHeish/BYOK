@@ -8,7 +8,7 @@ import {
   saveChatSuggestions,
   saveTaskDraft,
 } from "../../shared/storage";
-import type { AgentChatMessage, AgentLogEntry } from "../../shared/types";
+import type { AgentChatMessage, AgentLogEntry, ModelRetryStatus } from "../../shared/types";
 import { FileStagingPanel } from "./FileStagingPanel";
 import { Markdown } from "./Markdown";
 
@@ -17,6 +17,7 @@ interface ChatPanelProps {
   currentLog?: AgentLogEntry;
   running: boolean;
   waitingForModel: boolean;
+  modelRetryStatus?: ModelRetryStatus;
   disabled: boolean;
   model: string;
   onSend: (message: string) => Promise<void>;
@@ -25,7 +26,7 @@ interface ChatPanelProps {
   onClear: () => Promise<void>;
 }
 
-export function ChatPanel({ messages, currentLog, running, waitingForModel, disabled, model, onSend, onRerun, onStop, onClear }: ChatPanelProps) {
+export function ChatPanel({ messages, currentLog, running, waitingForModel, modelRetryStatus, disabled, model, onSend, onRerun, onStop, onClear }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
@@ -51,7 +52,7 @@ export function ChatPanel({ messages, currentLog, running, waitingForModel, disa
       top: threadRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [messages.length, currentLog?.id, running, waitingForModel]);
+  }, [messages.length, currentLog?.id, running, waitingForModel, modelRetryStatus?.attempt]);
 
   function updateDraft(value: string) {
     draftChangedRef.current = true;
@@ -118,14 +119,16 @@ export function ChatPanel({ messages, currentLog, running, waitingForModel, disa
             onRerun={onRerun}
           />
         ))}
-        {running && currentLog ? (
+        {running && currentLog && currentLog.message !== modelRetryStatus?.message ? (
           <div className={`chat-action-log ${currentLog.level}`} role="status" aria-label="Current action">
             <span className="chat-action-dot" aria-hidden="true" />
             <span className="chat-action-message">{currentLog.message}</span>
             <time>{formatLogTime(currentLog.timestamp)}</time>
           </div>
         ) : null}
-        {running && waitingForModel ? (
+        {running && modelRetryStatus ? (
+          <ModelRetryIndicator status={modelRetryStatus} />
+        ) : running && waitingForModel ? (
           <div className="model-waiting-status" role="status">
             <Sparkles aria-hidden="true" />
             <span>Polishing the next thought...</span>
@@ -165,6 +168,20 @@ export function ChatPanel({ messages, currentLog, running, waitingForModel, disa
 
       {disabled ? <p className="inline-warning">Add an API key in Settings.</p> : null}
     </section>
+  );
+}
+
+export function ModelRetryIndicator({ status }: { status: ModelRetryStatus }) {
+  const nextAttempt = Math.min(status.attempt + 1, status.maxAttempts);
+  return (
+    <div className="model-retry-status" role="status" aria-label="Model request retry">
+      <RotateCcw aria-hidden="true" />
+      <span>
+        <strong>Model timed out. Retrying request...</strong>
+        <small>{status.message}</small>
+      </span>
+      <b>{nextAttempt}/{status.maxAttempts}</b>
+    </div>
   );
 }
 

@@ -10,13 +10,15 @@ import type {
   RiskLevel,
   WaitCondition,
 } from "../shared/types";
+import {
+  MAX_REQUEST_TIMEOUT_SECONDS,
+  MIN_REQUEST_TIMEOUT_SECONDS,
+} from "../shared/defaults";
 
 const MAX_ACTIONS_PER_MODEL_RESPONSE = 10;
 const MAX_TIMEOUT_ATTEMPTS = 4;
 const MAX_PROVIDER_COMPATIBILITY_RETRIES = 2;
 const MAX_TOTAL_MODEL_REQUEST_ATTEMPTS = MAX_TIMEOUT_ATTEMPTS + MAX_PROVIDER_COMPATIBILITY_RETRIES;
-const MIN_REQUEST_TIMEOUT_SECONDS = 10;
-const MAX_REQUEST_TIMEOUT_SECONDS = 300;
 const AUTOMATIC_PREFIX_CACHE_MODELS = new Set(["qwen-3.6-27b", "gemma-4-31b"]);
 
 type PromptCacheStrategy = "none" | "openai" | "automatic-prefix";
@@ -86,6 +88,28 @@ export interface ModelRequestNotice {
   message: string;
 }
 
+export interface ModelHttpRequest {
+  endpoint: string;
+  headers: Record<string, string>;
+  body: string;
+  signal: AbortSignal;
+}
+
+export interface ModelHttpResponse {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  responseText: string;
+}
+
+export type ModelRequestTransport = (request: ModelHttpRequest) => Promise<ModelHttpResponse>;
+
+let modelRequestTransport: ModelRequestTransport | undefined;
+
+export function setModelRequestTransport(transport: ModelRequestTransport | undefined): void {
+  modelRequestTransport = transport;
+}
+
 export async function requestAgentStep(
   settings: AgentSettings,
   messages: ChatMessage[],
@@ -100,7 +124,7 @@ export async function requestAgentStep(
 
   let includeResponseFormat = true;
   let promptCacheStrategy = getPromptCacheStrategy(settings);
-  let result: { response: Response; responseText: string } | undefined;
+  let result: ModelHttpResponse | undefined;
 
   for (let attempt = 0; attempt < MAX_TOTAL_MODEL_REQUEST_ATTEMPTS; attempt += 1) {
     if (signal?.aborted) {
@@ -160,11 +184,11 @@ export async function requestAgentStep(
       signal?.removeEventListener("abort", cancelRequest);
     }
 
-    if (result.response.ok) {
+    if (result.ok) {
       break;
     }
 
-    if (promptCacheStrategy !== "none" && shouldRetryWithoutPromptCacheFields(result.response.status, result.responseText)) {
+    if (promptCacheStrategy !== "none" && shouldRetryWithoutPromptCacheFields(result.status, result.responseText)) {
       promptCacheStrategy = "none";
       onNotice?.({
         kind: "prompt-cache-retry",
@@ -175,7 +199,7 @@ export async function requestAgentStep(
       continue;
     }
 
-    if (includeResponseFormat && shouldRetryWithoutResponseFormat(result.response.status, result.responseText)) {
+    if (includeResponseFormat && shouldRetryWithoutResponseFormat(result.status, result.responseText)) {
       includeResponseFormat = false;
       onNotice?.({
         kind: "response-format-retry",
@@ -193,13 +217,13 @@ export async function requestAgentStep(
     throw new ModelClientError("The model request could not be started.");
   }
 
-  const { response, responseText } = result;
-  logAiResponseTiming(settings, requestStartedAt, attempts, response.status, response.ok);
-  if (!response.ok) {
+  const { status, responseText } = result;
+  logAiResponseTiming(settings, requestStartedAt, attempts, status, result.ok);
+  if (!result.ok) {
     throw new ModelClientError(
-      formatHttpError(response.status, responseText),
-      response.status,
-      buildUsageEvent(settings, undefined, requestStartedAt, attempts, response.status, false)
+      formatHttpError(status, responseText),
+      status,
+      buildUsageEvent(settings, undefined, requestStartedAt, attempts, status, false)
     );
   }
 
@@ -210,11 +234,11 @@ export async function requestAgentStep(
     throw new ModelClientError(
       "The model provider returned a non-JSON HTTP response.",
       undefined,
-      buildUsageEvent(settings, undefined, requestStartedAt, attempts, response.status, false)
+      buildUsageEvent(settings, undefined, requestStartedAt, attempts, status, false)
     );
   }
 
-  const usage = buildUsageEvent(settings, data.usage, requestStartedAt, attempts, response.status, true);
+  const usage = buildUsageEvent(settings, data.usage, requestStartedAt, attempts, status, true);
   const content = data.choices?.[0]?.message?.content;
   if (!content) {
     throw new ModelClientError(data.error?.message || "The model response did not include content.", undefined, usage);
@@ -258,10 +282,10 @@ export async function testModelConnection(
     if (signal?.aborted) {
       throw new ModelRequestCancelledError();
     }
-    if (!result.response.ok) {
+    if (!result.ok) {
       throw new ModelClientError(
-        formatHttpError(result.response.status, result.responseText),
-        result.response.status,
+        formatHttpError(result.status, result.responseText),
+        result.status,
       );
     }
 
@@ -299,7 +323,7 @@ async function postChatCompletion(args: {
   signal: AbortSignal;
   includeResponseFormat: boolean;
   promptCacheStrategy: PromptCacheStrategy;
-}): Promise<{ response: Response; responseText: string }> {
+}): Promise<ModelHttpResponse> {
   const body: Record<string, unknown> = {
     model: args.settings.model,
     messages: args.messages,
@@ -327,18 +351,32 @@ async function postChatCompletion(args: {
     includeResponseFormat: args.includeResponseFormat
   });
 
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${args.settings.apiKey}`
+  };
+  const requestBody = JSON.stringify(body);
+
+  if (modelRequestTransport) {
+    return modelRequestTransport({
+      endpoint: args.endpoint,
+      headers,
+      body: requestBody,
+      signal: args.signal,
+    });
+  }
+
   const response = await fetch(args.endpoint, {
     method: "POST",
     signal: args.signal,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${args.settings.apiKey}`
-    },
-    body: JSON.stringify(body)
+    headers,
+    body: requestBody
   });
 
   return {
-    response,
+    ok: response.ok,
+    status: response.status,
+    statusText: response.statusText,
     responseText: await response.text()
   };
 }

@@ -10,10 +10,12 @@ import {
   ModelRequestCancelledError,
   requestAgentStep,
   sanitizeMessagesForLogging,
+  setModelRequestTransport,
   testModelConnection,
   type ChatMessage,
   type ModelRequestNotice,
 } from "./modelClient";
+import { registerModelTransportBroker, requestModelThroughSidePanel } from "./modelTransport";
 import { extractPdfText } from "./pdfText";
 import { captureAndResizeVisibleTab, isVisibleOwnedTab } from "./screenshot";
 import {
@@ -60,6 +62,7 @@ import type {
   ContentWaitCheckResult,
   ContentActionResult,
   FullPageDocument,
+  ModelRetryStatus,
   ModelUsageEvent,
   PageObservation,
   RunFinding,
@@ -114,6 +117,7 @@ let usageSnapshot: AgentUsageSnapshot = createEmptyUsageSnapshot();
 let runReportWriteQueue: Promise<void> = Promise.resolve();
 let chatMessageWriteQueue: Promise<void> = Promise.resolve();
 let pendingModelRequestCount = 0;
+let modelRetryStatus: ModelRetryStatus | undefined;
 const historyDisabledRunIds = new Set<string>();
 const chatMessagesReady = loadChatMessages()
   .then((messages) => {
@@ -139,6 +143,8 @@ const DOM_STABLE_SAMPLE_COUNT = 3;
 const AGENT_TAB_GROUP_TITLE = "AI Agent";
 const AGENT_TAB_GROUP_COLOR: chrome.tabGroups.ColorEnum = "blue";
 
+registerModelTransportBroker();
+setModelRequestTransport(requestModelThroughSidePanel);
 configureSidePanelSafely();
 void markInterruptedRunReports().catch((error: unknown) => {
   console.warn("Could not mark interrupted run reports.", error);
@@ -272,6 +278,7 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
       return {
         running: Boolean((runningSession && !runningSession.stopped) || directChatTaskId),
         waitingForModel: pendingModelRequestCount > 0,
+        modelRetryStatus,
         logs: logs.filter((entry) => !isHiddenActionLog(entry.message)),
         chatMessages,
         usage: usageSnapshot
@@ -1756,6 +1763,13 @@ async function summarizeTextWithModel(args: {
 
 function reportModelNotice(notice: ModelRequestNotice): void {
   appendLog(notice.kind === "timeout-retry" ? "warning" : "info", notice.message);
+  if (notice.kind === "timeout-retry") {
+    setModelRetryStatus({
+      message: notice.message,
+      attempt: notice.attempt,
+      maxAttempts: notice.maxAttempts,
+    });
+  }
 }
 
 async function requestModelStep(
@@ -1764,13 +1778,28 @@ async function requestModelStep(
   signal: AbortSignal,
 ): ReturnType<typeof requestAgentStep> {
   pendingModelRequestCount += 1;
+  setModelRetryStatus(undefined);
   emitModelStatus();
   try {
     return await requestAgentStep(settings, messages, reportModelNotice, signal);
   } finally {
     pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
+    if (pendingModelRequestCount === 0) {
+      setModelRetryStatus(undefined);
+    }
     emitModelStatus();
   }
+}
+
+function setModelRetryStatus(status: ModelRetryStatus | undefined): void {
+  if (modelRetryStatus === status || (!modelRetryStatus && !status)) {
+    return;
+  }
+  modelRetryStatus = status;
+  notifySidePanel({
+    type: "AGENT_MODEL_RETRY_STATUS",
+    status: status || null,
+  } satisfies BackgroundToSidePanelMessage);
 }
 
 async function resolvePdfSource(

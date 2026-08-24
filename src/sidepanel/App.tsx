@@ -23,6 +23,7 @@ import type {
   AgentSettings,
   AgentUsageSnapshot,
   BackgroundToSidePanelMessage,
+  ModelRetryStatus,
   RunReport,
   SidePanelToBackgroundMessage
 } from "../shared/types";
@@ -31,8 +32,10 @@ import { ChatPanel } from "./components/ChatPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { UsageDashboard } from "./components/UsageDashboard";
 import { RunHistory } from "./components/RunHistory";
+import { connectModelTransport } from "./modelTransport";
 
 type View = "chat" | "history" | "console" | "settings";
+const AGENT_STATE_RECONCILE_INTERVAL_MS = 10_000;
 
 export function App() {
   const [view, setView] = useState<View>("chat");
@@ -43,7 +46,10 @@ export function App() {
   const [reports, setReports] = useState<RunReport[]>([]);
   const [running, setRunning] = useState(false);
   const [waitingForModel, setWaitingForModel] = useState(false);
+  const [modelRetryStatus, setModelRetryStatus] = useState<ModelRetryStatus>();
   const [notice, setNotice] = useState<string | undefined>();
+
+  useEffect(() => connectModelTransport(), []);
 
   useEffect(() => {
     void loadSettings().then(setSettings);
@@ -52,6 +58,7 @@ export function App() {
       if (isAgentState(state)) {
         setRunning(state.running);
         setWaitingForModel(state.waitingForModel || false);
+        setModelRetryStatus(state.modelRetryStatus);
         setLogs(filterHiddenActionLogs(state.logs));
         setChatMessages(state.chatMessages || []);
         setUsage(state.usage || createEmptyUsageSnapshot());
@@ -74,10 +81,14 @@ export function App() {
         setRunning(message.running);
         if (!message.running) {
           setWaitingForModel(false);
+          setModelRetryStatus(undefined);
         }
       }
       if (message.type === "AGENT_MODEL_STATUS") {
         setWaitingForModel(message.waiting);
+      }
+      if (message.type === "AGENT_MODEL_RETRY_STATUS") {
+        setModelRetryStatus(message.status || undefined);
       }
       if (message.type === "USAGE_UPDATE") {
         setUsage(message.usage);
@@ -96,6 +107,32 @@ export function App() {
       chrome.storage.onChanged.removeListener(storageListener);
     };
   }, []);
+
+  useEffect(() => {
+    if (!running) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void sendBackgroundMessage({ type: "SIDEPANEL_GET_STATE" })
+        .then((state) => {
+          if (!isAgentState(state)) {
+            return;
+          }
+          setWaitingForModel(state.waitingForModel || false);
+          setModelRetryStatus(state.modelRetryStatus);
+          setLogs(filterHiddenActionLogs(state.logs));
+          setChatMessages(state.chatMessages || []);
+          setUsage(state.usage || createEmptyUsageSnapshot());
+          if (!state.running) {
+            setRunning(false);
+          }
+        })
+        .catch(() => undefined);
+    }, AGENT_STATE_RECONCILE_INTERVAL_MS);
+
+    return () => window.clearInterval(intervalId);
+  }, [running]);
 
   const hasApiKey = useMemo(() => settings.apiKey.trim().length > 0, [settings.apiKey]);
   const theme = settings.theme;
@@ -226,6 +263,7 @@ export function App() {
             currentLog={logs[logs.length - 1]}
             running={running}
             waitingForModel={waitingForModel}
+            modelRetryStatus={modelRetryStatus}
             disabled={!hasApiKey}
             model={settings.model}
             onSend={handleChat}
@@ -275,6 +313,7 @@ function sendBackgroundMessage(message: SidePanelToBackgroundMessage): Promise<u
 function isAgentState(value: unknown): value is {
   running: boolean;
   waitingForModel?: boolean;
+  modelRetryStatus?: ModelRetryStatus;
   logs: AgentLogEntry[];
   chatMessages?: AgentChatMessage[];
   usage?: AgentUsageSnapshot;
