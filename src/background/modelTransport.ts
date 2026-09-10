@@ -18,8 +18,10 @@ interface PendingModelRequest {
   reject: (error: Error) => void;
 }
 
+const MODEL_TRANSPORT_CONNECT_TIMEOUT_MS = 2_000;
 const connectedPorts: chrome.runtime.Port[] = [];
 const pendingRequests = new Map<string, PendingModelRequest>();
+const pendingPortConnections = new Set<(port: chrome.runtime.Port) => void>();
 
 export function registerModelTransportBroker(): void {
   chrome.runtime.onConnect.addListener((port) => {
@@ -28,6 +30,9 @@ export function registerModelTransportBroker(): void {
     }
 
     connectedPorts.push(port);
+    for (const handleConnection of [...pendingPortConnections]) {
+      handleConnection(port);
+    }
     port.onMessage.addListener((message: ModelTransportToBackgroundMessage) => {
       handleTransportMessage(port, message);
     });
@@ -50,7 +55,19 @@ export const requestModelThroughSidePanel: ModelRequestTransport = (
 
   const port = connectedPorts.at(-1);
   if (!port) {
-    return Promise.reject(new Error("The side-panel model transport is not connected. Reopen the side panel and rerun the message."));
+    return waitForConnectedPort(request.signal)
+      .then((connectedPort) => requestModelThroughPort(connectedPort, request));
+  }
+
+  return requestModelThroughPort(port, request);
+};
+
+function requestModelThroughPort(
+  port: chrome.runtime.Port,
+  request: ModelHttpRequest,
+): Promise<ModelHttpResponse> {
+  if (request.signal.aborted) {
+    return Promise.reject(createAbortError());
   }
 
   const requestId = createId("model-request");
@@ -87,7 +104,41 @@ export const requestModelThroughSidePanel: ModelRequestTransport = (
       reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
-};
+}
+
+function waitForConnectedPort(signal: AbortSignal): Promise<chrome.runtime.Port> {
+  return new Promise((resolve, reject) => {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+
+    const settle = (result: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      pendingPortConnections.delete(handleConnection);
+      signal.removeEventListener("abort", handleAbort);
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+      result();
+    };
+    const handleConnection = (port: chrome.runtime.Port) => settle(() => resolve(port));
+    const handleAbort = () => settle(() => reject(createAbortError()));
+
+    pendingPortConnections.add(handleConnection);
+    signal.addEventListener("abort", handleAbort, { once: true });
+    timeoutId = setTimeout(() => {
+      settle(() => reject(new Error(
+        "The side-panel model transport is not connected. Reopen the side panel and rerun the message.",
+      )));
+    }, MODEL_TRANSPORT_CONNECT_TIMEOUT_MS);
+
+    if (signal.aborted) {
+      handleAbort();
+    }
+  });
+}
 
 function handleTransportMessage(
   port: chrome.runtime.Port,

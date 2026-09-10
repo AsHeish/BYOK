@@ -29,6 +29,7 @@ beforeAll(() => {
 afterEach(() => {
   currentPort?.disconnects.emit();
   currentPort = undefined;
+  vi.useRealTimers();
 });
 
 afterAll(() => {
@@ -83,6 +84,51 @@ describe("side-panel model transport broker", () => {
 
     await expect(requestPromise).rejects.toThrow("side panel closed");
     currentPort = undefined;
+  });
+
+  it("waits for the side-panel transport to reconnect before starting a request", async () => {
+    const requestPromise = requestModelThroughSidePanel(createRequest());
+
+    currentPort = connectPort();
+    await Promise.resolve();
+    const request = getFetchRequest(currentPort);
+    currentPort.messages.emit({
+      type: "MODEL_TRANSPORT_RESULT",
+      requestId: request.requestId,
+      response: {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        responseText: "response after reconnect",
+      },
+    });
+
+    await expect(requestPromise).resolves.toMatchObject({
+      ok: true,
+      responseText: "response after reconnect",
+    });
+  });
+
+  it("cancels a request while waiting for the transport to reconnect", async () => {
+    const controller = new AbortController();
+    const requestPromise = requestModelThroughSidePanel(createRequest(controller.signal));
+
+    controller.abort();
+
+    await expect(requestPromise).rejects.toMatchObject({ name: "AbortError" });
+    currentPort = connectPort();
+    await Promise.resolve();
+    expect(currentPort.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects when the transport does not reconnect promptly", async () => {
+    vi.useFakeTimers();
+    const requestPromise = requestModelThroughSidePanel(createRequest());
+    const rejection = expect(requestPromise).rejects.toThrow("model transport is not connected");
+
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await rejection;
   });
 });
 

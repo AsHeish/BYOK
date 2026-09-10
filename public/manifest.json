@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "BYOK AI Browser Agent",
   "description": "A bring-your-own-key browser agent that can summarize, extract, and safely interact with webpages.",
-  "version": "0.2.16",
+  "version": "0.2.17",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "downloads", "scripting", "sidePanel", "storage", "tabGroups", "tabs", "unlimitedStorage"],
   "host_permissions": ["<all_urls>"],
