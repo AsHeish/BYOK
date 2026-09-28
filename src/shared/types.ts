@@ -1,6 +1,30 @@
 export type Provider = "openai" | "gemini" | "groq" | "custom";
 export type PromptCacheMode = "auto" | "on" | "off";
 
+export interface JevSettings {
+  mode: "off" | "shadow" | "fast" | "only";
+  apiKey: string;
+}
+
+export interface JevUsageSnapshot {
+  requests: number;
+  onlyRequests?: number;
+  helperRequests?: number;
+  lastDecision?: Array<{
+    question: string;
+    choice: string;
+    confidence: number;
+    probabilities: Array<{ option: string; probability: number }>;
+  }>;
+  fastDecisions: number;
+  shadowDecisions: number;
+  fallbacks: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalLatencyMs: number;
+  estimatedCostUsd: number;
+}
+
 export interface AgentSettings {
   provider: Provider;
   apiBaseUrl: string;
@@ -9,11 +33,13 @@ export interface AgentSettings {
   maxSteps: number;
   requestTimeoutSeconds: number;
   promptCacheMode: PromptCacheMode;
+  disableThinking?: boolean;
   inputTokenCostPerMillion?: number;
   cachedInputTokenCostPerMillion?: number;
   outputTokenCostPerMillion?: number;
   saveRunHistory: boolean;
   theme: "light" | "dark";
+  jev?: JevSettings;
 }
 
 export interface AiConfigurationProfile {
@@ -26,9 +52,11 @@ export interface AiConfigurationProfile {
   maxSteps: number;
   requestTimeoutSeconds: number;
   promptCacheMode: PromptCacheMode;
+  disableThinking?: boolean;
   inputTokenCostPerMillion?: number;
   cachedInputTokenCostPerMillion?: number;
   outputTokenCostPerMillion?: number;
+  jev?: JevSettings;
   createdAt: number;
   updatedAt: number;
 }
@@ -68,8 +96,17 @@ export interface AgentDragPair {
   targetElementId: string;
 }
 
+export interface AgentActionGuard {
+  id: string;
+  documentId: string;
+  formState?: string;
+  url: string;
+  targets: Record<string, string>;
+}
+
 export interface AgentAction {
   type: AgentActionType;
+  guard?: AgentActionGuard;
   elementId?: string;
   elementIds?: string[];
   targetElementId?: string;
@@ -78,7 +115,7 @@ export interface AgentAction {
   downloadId?: number;
   maxItems?: number;
   text?: string;
-  key?: "Tab" | "Shift+Tab";
+  key?: "Tab" | "Shift+Tab" | "PageUp" | "PageDown";
   url?: string;
   tabAlias?: string;
   direction?: "up" | "down" | "left" | "right";
@@ -127,6 +164,7 @@ export interface AgentModelResponse {
   mode: "chat" | "browser";
   thought_summary: string;
   risk_level: RiskLevel;
+  navigationGoal?: string;
   action?: AgentAction;
   actions?: AgentAction[];
   requirements?: AgentRequirementProposal[];
@@ -148,6 +186,7 @@ export interface ModelUsageEvent {
 }
 
 export interface AgentUsageSnapshot {
+  jev?: JevUsageSnapshot;
   requestCount: number;
   successfulRequestCount: number;
   cacheHitRequestCount: number;
@@ -235,6 +274,7 @@ export interface RunReport {
 
 export interface DomElementInfo {
   id: string;
+  fingerprint?: string;
   tag: string;
   frameContext?: string;
   rootContext?: string;
@@ -254,11 +294,17 @@ export interface DomElementInfo {
   isDraggable?: boolean;
   isDropTarget?: boolean;
   isFocused?: boolean;
+  isExpanded?: boolean;
+  isSelected?: boolean;
+  isReadOnly?: boolean;
   isDisabled: boolean;
   isSensitive: boolean;
 }
 
 export interface PageObservation {
+  documentId?: string;
+  formState?: string;
+  isLoading?: boolean;
   url: string;
   title: string;
   text: string;
@@ -269,6 +315,8 @@ export interface PageObservation {
 }
 
 export interface PageViewportInfo {
+  scrollContainerId?: string;
+  scrollContainerLabel?: string;
   scrollX: number;
   scrollY: number;
   viewportWidth: number;
@@ -323,6 +371,7 @@ export interface ContentActionResult {
   ok: boolean;
   message: string;
   recoverable?: boolean;
+  notExecuted?: boolean;
   observation?: PageObservation;
   data?: unknown;
 }
@@ -362,14 +411,15 @@ export interface AgentChatMessage {
 
 export interface SafetyDecision {
   allowed: boolean;
+  recoverable?: boolean;
   riskLevel: RiskLevel;
   reason: string;
 }
 
 export type SidePanelToBackgroundMessage =
-  | { type: "SIDEPANEL_SEND_CHAT"; message: string }
-  | { type: "SIDEPANEL_RUN_TASK"; task: string }
-  | { type: "SIDEPANEL_TEST_MODEL_CONNECTION"; settings: AgentSettings }
+  | { type: "SIDEPANEL_SEND_CHAT"; message: string; settings: AgentSettings }
+  | { type: "SIDEPANEL_RUN_TASK"; task: string; settings: AgentSettings }
+  | { type: "SIDEPANEL_TEST_MODEL_CONNECTION"; settings: AgentSettings; target?: "jev" }
   | { type: "SIDEPANEL_STOP_TASK" }
   | { type: "SIDEPANEL_CLEAR_CHAT" }
   | { type: "SIDEPANEL_GET_STATE" };

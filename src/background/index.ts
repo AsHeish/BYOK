@@ -9,6 +9,7 @@ import {
   ModelClientError,
   ModelRequestCancelledError,
   requestAgentStep,
+  requestFieldText,
   sanitizeMessagesForLogging,
   setModelRequestTransport,
   testModelConnection,
@@ -16,6 +17,10 @@ import {
   type ModelRequestNotice,
 } from "./modelClient";
 import { registerModelTransportBroker, requestModelThroughSidePanel } from "./modelTransport";
+import { addJevUsage } from "./jevNavigation";
+import { JevDecisionError, JEV_MODEL, testJevConnection } from "./jevClient";
+import { jevFieldContext, progressKey, requestJevAction, semanticPageKey, type JevActionDecision, type JevHistoryEntry } from "./jevActions";
+import { guardObservedAction, validateAgentAction } from "./safety";
 import { extractPdfText } from "./pdfText";
 import { captureAndResizeVisibleTab, isVisibleOwnedTab } from "./screenshot";
 import {
@@ -43,7 +48,6 @@ import { createId } from "../shared/ids";
 import {
   clearChatMessages,
   loadChatMessages,
-  loadSettings,
   loadStagedUploadFile,
   markInterruptedRunReports,
   saveChatMessages,
@@ -76,6 +80,7 @@ import type {
 
 interface RunningSession {
   taskId: string;
+  settings: AgentSettings;
   instruction: string;
   activeTabId: number;
   activeTabAlias: string;
@@ -253,15 +258,23 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
   await chatMessagesReady;
   switch (message.type) {
     case "SIDEPANEL_SEND_CHAT":
-      void startTask(message.message, "chat");
+      if (!message.settings) {
+        return { ok: false, error: "The request has no selected configuration. Reload the extension and side panel before retrying." };
+      }
+      void startTask(message.message, "chat", message.settings);
       return { ok: true };
 
     case "SIDEPANEL_RUN_TASK":
-      void startTask(message.task, "run");
+      if (!message.settings) {
+        return { ok: false, error: "The request has no selected configuration. Reload the extension and side panel before retrying." };
+      }
+      void startTask(message.task, "run", message.settings);
       return { ok: true };
 
     case "SIDEPANEL_TEST_MODEL_CONNECTION":
-      return testModelConnection(message.settings);
+      return message.target === "jev" || message.settings.jev?.mode === "only"
+        ? testJevConnection(message.settings.jev?.apiKey || "", requestModelThroughSidePanel)
+        : testModelConnection(message.settings);
 
     case "SIDEPANEL_STOP_TASK":
       stopCurrentTask("Stopped by user.", "stopped");
@@ -289,7 +302,7 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
   }
 }
 
-async function startTask(task: string, source: "chat" | "run"): Promise<void> {
+async function startTask(task: string, source: "chat" | "run", settings: AgentSettings): Promise<void> {
   const submittedTask = task.trim();
   if (!submittedTask) {
     appendLog("warning", "Enter a task first.");
@@ -316,12 +329,16 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
   }
   appendChatMessage("user", submittedTask, "message", taskId);
   try {
-    const settings = await loadSettings();
-    if (!settings.apiKey.trim()) {
+    const jevOnly = settings.jev?.mode === "only";
+    if (jevOnly && !settings.jev?.apiKey.trim()) {
+      reportTaskError(taskId, "Add a TypeSafe API key in Settings for Jev Only. No LLM was called.");
+      return;
+    }
+    if (!jevOnly && !settings.apiKey.trim()) {
       reportTaskError(taskId, "Add an API key in Settings before running a task.");
       return;
     }
-    if (!settings.model.trim()) {
+    if (!jevOnly && !settings.model.trim()) {
       reportTaskError(taskId, "Add a model name in Settings before running a task.");
       return;
     }
@@ -333,23 +350,26 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
 
     const tab = await getActiveTab();
     if (!tab?.id || !isSupportedTabUrl(tab.url)) {
-      if (source === "chat" && !continuation) {
+      if (!jevOnly && source === "chat" && !continuation) {
         await answerDirectChat(submittedTask, priorChatMessages, taskId, settings, taskAbortController.signal);
         return;
       }
-      reportTaskError(taskId, "Open an http(s) webpage before running the agent. Browser internal pages are blocked.");
+      reportTaskError(taskId, jevOnly
+        ? "Open an http(s) webpage before using Jev Only. No LLM was called."
+        : "Open an http(s) webpage before running the agent. Browser internal pages are blocked.");
       return;
     }
 
-    usageSnapshot = createEmptyUsageSnapshot(settings);
+    usageSnapshot = createEmptyUsageSnapshot(jevOnly ? { provider: undefined, model: JEV_MODEL } : settings);
     runningSession = createRunningSession(
       taskId,
       submittedTask,
-      agentInstruction,
+      jevOnly ? submittedTask : agentInstruction,
       tab,
       usageSnapshot,
-      !allowChatMode,
+      jevOnly || !allowChatMode,
       taskAbortController.signal,
+      settings,
     );
     await persistRunReport(runningSession.run);
     emitUsage();
@@ -357,6 +377,18 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
     appendLog("info", `Task started on ${new URL(tab.url).hostname} as tab-1.`);
 
     let previousResult: string | undefined;
+    let jevProgress = false;
+    let resumeJev = false;
+    let unsuccessfulJevReturns = 0;
+    const jevHistory: JevHistoryEntry[] = [];
+    if ((jevOnly || settings.jev?.mode === "fast") && settings.jev?.apiKey.trim()) {
+      const outcome = await runJevActionTask(runningSession, settings, jevHistory);
+      if (!outcome.fallback || isStopped(taskId)) return;
+      previousResult = outcome.fallback;
+      jevProgress = outcome.madeProgress;
+      resumeJev = settings.jev?.mode === "fast" && outcome.resumeAllowed !== false;
+      appendLog("info", "Jev returned control to the configured LLM planner.");
+    }
     const completedInputActions = new Set<string>();
     for (let step = 1; step <= settings.maxSteps; step += 1) {
       if (isStopped(taskId)) {
@@ -373,7 +405,7 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
         break;
       }
       assertOwnedTabId(session, session.activeTabId);
-      const observation = await observePage(session.activeTabId);
+      let observation = await observePage(session.activeTabId);
       updateTrackedTabFromObservation(session, session.activeTabId, observation);
       recordObservationEvidence(session, observation);
       appendLog("info", `Observed ${session.activeTabAlias}: ${observation.title || observation.url}`);
@@ -381,6 +413,25 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
       const recentDownloads = await getRecentDownloadsForPrompt(MAX_DOWNLOADS_FOR_PROMPT);
       const documentContext = session.pendingDocument;
       const screenshotContext = session.visionDisabled ? undefined : session.pendingScreenshot;
+
+      if (settings.jev?.mode === "shadow" && settings.jev.apiKey.trim() && !documentContext && !screenshotContext && !stagedFile) {
+        pendingModelRequestCount += 1;
+        emitModelStatus();
+        try {
+          const decision = await requestJevAction({ apiKey: settings.jev.apiKey, goal: agentInstruction, observation, history: [], allowTextHelper: true, signal: session.abortSignal }, requestModelThroughSidePanel);
+          recordJevDecision(session, decision, "shadow");
+        } catch (error) {
+          if (session.abortSignal.aborted) throw new ModelRequestCancelledError();
+          appendLog("warning", "Jev shadow decision unavailable; the LLM remains in control.");
+        } finally {
+          pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
+          emitModelStatus();
+        }
+        observation = await observePage(session.activeTabId);
+      }
+      if (isStopped(taskId)) {
+        break;
+      }
 
       const promptArgs = {
         task: agentInstruction,
@@ -398,55 +449,57 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
         screenshot: screenshotContext,
         stagedFile: stagedFile ? toPromptStagedFile(stagedFile) : undefined,
         downloads: recentDownloads,
-        allowChatMode: allowChatMode && step === 1,
+        allowChatMode: allowChatMode && step === 1 && !jevProgress,
       };
-      let messages = buildAgentMessages(promptArgs);
-      logPromptBeforeModelCall(step, messages);
 
       let modelResponse: AgentModelResponse;
-      try {
-        let modelResult;
+      {
+        let messages = buildAgentMessages(promptArgs);
+        logPromptBeforeModelCall(step, messages);
         try {
-          modelResult = await requestModelStep(settings, messages, session.abortSignal);
-        } catch (error) {
-          if (!screenshotContext || !isVisionUnsupportedError(error)) {
-            throw error;
+          let modelResult;
+          try {
+            modelResult = await requestModelStep(settings, messages, session.abortSignal);
+          } catch (error) {
+            if (!screenshotContext || !isVisionUnsupportedError(error)) {
+              throw error;
+            }
+            if (error instanceof ModelClientError && error.usage) {
+              recordUsageEvent(error.usage, settings);
+            }
+            session.visionDisabled = true;
+            session.pendingScreenshot = undefined;
+            appendLog("warning", "The configured model rejected screenshot input. Retrying this step with text-only context; visual inspection is disabled for this run.");
+            messages = buildAgentMessages({ ...promptArgs, screenshot: undefined });
+            logPromptBeforeModelCall(step, messages);
+            modelResult = await requestModelStep(settings, messages, session.abortSignal);
           }
+          if (session.pendingDocument === documentContext) {
+            session.pendingDocument = undefined;
+          }
+          if (screenshotContext && session.pendingScreenshot === screenshotContext) {
+            session.pendingScreenshot = undefined;
+            recordVisualEvidence(session, screenshotContext, modelResult.response.thought_summary);
+          }
+          recordUsageEvent(modelResult.usage, settings);
+          modelResponse = modelResult.response;
+        } catch (error) {
           if (error instanceof ModelClientError && error.usage) {
             recordUsageEvent(error.usage, settings);
           }
-          session.visionDisabled = true;
-          session.pendingScreenshot = undefined;
-          appendLog("warning", "The configured model rejected screenshot input. Retrying this step with text-only context; visual inspection is disabled for this run.");
-          messages = buildAgentMessages({ ...promptArgs, screenshot: undefined });
-          logPromptBeforeModelCall(step, messages);
-          modelResult = await requestModelStep(settings, messages, session.abortSignal);
+          if (error instanceof ModelClientError && /JSON|schema/i.test(error.message)) {
+            previousResult = buildModelErrorProgress(previousResult, error.message);
+            appendLog("warning", `${error.message} Asking the model to continue with valid action JSON.`);
+            await sleep(450);
+            continue;
+          }
+          throw error;
         }
-        if (session.pendingDocument === documentContext) {
-          session.pendingDocument = undefined;
-        }
-        if (screenshotContext && session.pendingScreenshot === screenshotContext) {
-          session.pendingScreenshot = undefined;
-          recordVisualEvidence(session, screenshotContext, modelResult.response.thought_summary);
-        }
-        recordUsageEvent(modelResult.usage, settings);
-        modelResponse = modelResult.response;
-      } catch (error) {
-        if (error instanceof ModelClientError && error.usage) {
-          recordUsageEvent(error.usage, settings);
-        }
-        if (error instanceof ModelClientError && /JSON|schema/i.test(error.message)) {
-          previousResult = buildModelErrorProgress(previousResult, error.message);
-          appendLog("warning", `${error.message} Asking the model to continue with valid action JSON.`);
-          await sleep(450);
-          continue;
-        }
-        throw error;
       }
 
       const plannedActions = getPlannedActions(modelResponse);
-      const directChatAnswer = getDirectChatAnswer(modelResponse, plannedActions, allowChatMode && step === 1);
-      if (modelResponse.mode === "chat" && allowChatMode && step === 1) {
+      const directChatAnswer = getDirectChatAnswer(modelResponse, plannedActions, promptArgs.allowChatMode);
+      if (modelResponse.mode === "chat" && promptArgs.allowChatMode) {
         if (!directChatAnswer) {
           throw new Error("The model selected chat mode without returning one done action containing a direct answer.");
         }
@@ -466,9 +519,18 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
 
       appendLog("info", `${getConsolePlanSummary(modelResponse, plannedActions)} Next: ${formatActions(plannedActions)}.`);
 
-      // Safety checks removed — all actions proceed unconditionally.
-
-      const loopResult = await handlePlannedActions(modelResponse, plannedActions, completedInputActions, taskId);
+      const safety = validateAgentAction({ modelResponse, task: submittedTask, observation });
+      if (!safety.allowed) {
+        if (safety.recoverable) {
+          previousResult = safety.reason;
+          appendLog("warning", safety.reason);
+          continue;
+        }
+        finishRun(session, "blocked", safety.reason, safety.reason);
+        appendChatMessage("assistant", safety.reason, "question", taskId);
+        break;
+      }
+      const loopResult = await handlePlannedActions(modelResponse, plannedActions, completedInputActions, taskId, observation);
       previousResult = buildPreviousResultForModel(loopResult);
       appendLog(loopResult.ok ? "success" : loopResult.recoverable ? "warning" : "error", loopResult.message);
       queueRunReportSave(session.run);
@@ -496,6 +558,31 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
         }
       } else {
         await sleep(getPostBatchDelay(plannedActions));
+      }
+
+      if (resumeJev && loopResult.ok && !loopResult.recoverable && loopResult.completedActions.length > 0
+        && !session.pendingDocument && !session.pendingScreenshot && !stagedFile && !isStopped(taskId)) {
+        await refreshTrackedTabs(session);
+        if (isStopped(taskId)) break;
+        assertOwnedTabId(session, session.activeTabId);
+        const fresh = await observePage(session.activeTabId);
+        if (isStopped(taskId)) break;
+        if (semanticPageKey(fresh) !== semanticPageKey(observation)) {
+          jevHistory.push({ action: "LLM recovery batch", url: fresh.url, result: loopResult.completedActions.join(" ").slice(0, 1_200) });
+          appendLog("info", "LLM recovery batch completed and the page changed. Returning control to Jev.");
+          const outcome = await runJevActionTask(session, settings, jevHistory, fresh);
+          if (!outcome.fallback || isStopped(taskId)) break;
+          previousResult = outcome.fallback;
+          jevProgress ||= outcome.madeProgress;
+          unsuccessfulJevReturns = outcome.madeProgress ? 0 : unsuccessfulJevReturns + 1;
+          resumeJev = outcome.resumeAllowed !== false && unsuccessfulJevReturns < 2;
+          appendLog("info", "Jev returned control to the configured LLM planner.");
+          if (!resumeJev) {
+            appendLog("info", outcome.resumeAllowed === false
+              ? "Jev cannot resume for this run. The LLM will continue."
+              : "Jev returned without executing actions twice. The LLM will continue to avoid repeated handoffs.");
+          }
+        }
       }
     }
 
@@ -527,6 +614,210 @@ async function startTask(task: string, source: "chat" | "run"): Promise<void> {
   }
 }
 
+async function runJevActionTask(
+  session: RunningSession,
+  settings: AgentSettings,
+  history: JevHistoryEntry[] = [],
+  initialObservation?: PageObservation,
+): Promise<{ fallback?: string; madeProgress: boolean; resumeAllowed?: boolean }> {
+  const only = settings.jev?.mode === "only";
+  const tabId = session.activeTabId;
+  const initialHistoryLength = history.length;
+  const repetitions = new Map<string, number>();
+  let nextObservation = initialObservation;
+  let staleRetries = 0;
+  let waitingSteps = 0;
+  let pendingText: { key: string; text: string } | undefined;
+  const stop = (message: string) => {
+    applyRequirementUpdates(session, session.run.requirements.map((requirement) => ({
+      requirementId: requirement.id, status: "blocked", blockedReason: message,
+    })));
+    finishRun(session, "blocked", message, message);
+    appendChatMessage("assistant", message, "answer", session.taskId);
+    appendLog("warning", message);
+  };
+  const defer = (reason: string, resumeAllowed = true) => {
+    if (only) {
+      stop(`${reason} No LLM was called.`);
+      return { madeProgress: history.length > initialHistoryLength };
+    }
+    return { fallback: `${reason}\nActions already completed (do not repeat): ${JSON.stringify(history.slice(-15))}`, madeProgress: history.length > initialHistoryLength, resumeAllowed };
+  };
+  const readOwnedPage = async () => {
+    await refreshTrackedTabs(session);
+    if (isStopped(session.taskId)) {
+      throw new ModelRequestCancelledError();
+    }
+    assertOwnedTabId(session, tabId);
+    if (session.activeTabId !== tabId) {
+      throw new Error("The Jev starting tab is no longer active for this run.");
+    }
+    return observePage(tabId);
+  };
+  const decide = async (observation: PageObservation) => {
+    pendingModelRequestCount += 1;
+    emitModelStatus();
+    try {
+      const decision = await requestJevAction({ apiKey: settings.jev!.apiKey, goal: session.instruction, observation, history, allowTextHelper: !only, signal: session.abortSignal }, requestModelThroughSidePanel);
+      recordJevDecision(session, decision, only ? "only" : decision.kind === "fallback" ? "fallback" : "fast");
+      return decision;
+    } finally {
+      pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
+      emitModelStatus();
+    }
+  };
+
+  if (await loadStagedUploadFile()) {
+    if (isStopped(session.taskId)) return { madeProgress: false };
+    return defer("Jev cannot operate on staged uploads. Use the LLM planner for this task.", false);
+  }
+  while (!isStopped(session.taskId)) {
+    await refreshTrackedTabs(session);
+    if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+    assertOwnedTabId(session, tabId);
+    if (session.activeTabId !== tabId) return defer("The active owned tab changed.");
+    const observation = nextObservation || await readOwnedPage();
+    nextObservation = undefined;
+    updateTrackedTabFromObservation(session, tabId, observation);
+    recordObservationEvidence(session, observation);
+    let result: JevActionDecision;
+    try {
+      result = await decide(observation);
+    } catch (error) {
+      if (session.abortSignal.aborted) throw new ModelRequestCancelledError();
+      if (error instanceof JevDecisionError) {
+        recordJevDecision(session, { kind: "fallback", operation: "fallback", reason: error.message }, only ? "only" : "fallback", error.elapsedMs);
+      }
+      return defer(error instanceof Error ? error.message : "Jev request failed.", false);
+    }
+    if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+    if (result.kind === "fallback") return defer(result.reason);
+    if (!session.runPersistenceEnabled) session.runPersistenceEnabled = true;
+    initializeRequirements(session, session.instruction, [{ text: session.instruction }]);
+    if (result.kind === "done") {
+      const fresh = await readOwnedPage();
+      if (semanticPageKey(fresh) !== semanticPageKey(observation)) {
+        if (++staleRetries > 2) return defer("The page kept changing during completion verification.");
+        nextObservation = fresh;
+        continue;
+      }
+      recordObservationEvidence(session, fresh);
+      const evidence = session.run.evidence.at(-1);
+      applyRequirementUpdates(session, session.run.requirements.map((requirement) => ({
+        requirementId: requirement.id, status: "satisfied", evidenceIds: evidence ? [evidence.id] : [],
+      })));
+      if (getCompletionLedgerIssues(session.run, "completed").length) {
+        return defer("The observation ledger did not verify completion.");
+      }
+      const report = `Jev verified the requested browser outcome on: ${observation.title.slice(0, 180) || "Page"}\n\n${observation.url}${only ? "\n\nNo LLM was called." : ""}`;
+      finishRun(session, "completed", undefined, report);
+      appendChatMessage("assistant", report, "answer", session.taskId);
+      appendLog("success", "Jev browser task completed.");
+      return { madeProgress: history.length > initialHistoryLength };
+    }
+    if (result.kind === "wait") {
+      if (++waitingSteps > 10) return defer("The page did not become ready after repeated waits.");
+      await sleep(200);
+      if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+      const fresh = await readOwnedPage();
+      if (semanticPageKey(fresh) !== semanticPageKey(observation)) waitingSteps = 0;
+      nextObservation = fresh;
+      continue;
+    }
+    waitingSteps = 0;
+    const action = result.action!;
+    const repeatKey = progressKey(observation, action);
+    const attempts = (repetitions.get(repeatKey) || 0) + 1;
+    repetitions.set(repeatKey, attempts);
+    if (attempts > 2) {
+      let fresh = observation;
+      for (let sample = 0; sample < 4 && semanticPageKey(fresh) === semanticPageKey(observation); sample += 1) {
+        await sleep(200);
+        if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+        fresh = await readOwnedPage();
+      }
+      if (semanticPageKey(fresh) !== semanticPageKey(observation)) { nextObservation = fresh; continue; }
+      return defer(`No progress after repeated ${action.type} actions. Inspect the page before retrying.`);
+    }
+    if (result.kind === "text") {
+      const context = jevFieldContext(session.instruction, action, observation, history);
+      const key = JSON.stringify(context);
+      if (pendingText?.key !== key) {
+        pendingModelRequestCount += 1;
+        emitModelStatus();
+        try {
+          if (usageSnapshot.jev) usageSnapshot.jev.helperRequests = (usageSnapshot.jev.helperRequests || 0) + 1;
+          const helper = await requestFieldText(settings, context, session.abortSignal);
+          recordUsageEvent(helper.usage, settings);
+          pendingText = { key, text: helper.text };
+        } catch (error) {
+          if (session.abortSignal.aborted) throw new ModelRequestCancelledError();
+          if (error instanceof ModelClientError && error.usage) recordUsageEvent(error.usage, settings);
+          return defer(error instanceof Error ? error.message : "Field text generation failed.", false);
+        } finally {
+          pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
+          emitModelStatus();
+        }
+      }
+      action.text = pendingText.text;
+      const fresh = await readOwnedPage();
+      if (JSON.stringify(jevFieldContext(session.instruction, action, fresh, history)) !== key) {
+        pendingText = undefined;
+        if (++staleRetries > 2) return defer("The field context kept changing during text generation. Nothing was typed.");
+        nextObservation = fresh;
+        continue;
+      }
+    }
+    if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+    assertOwnedTabId(session, tabId);
+    const executed = await executeAction(tabId, action);
+    if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+    if (!executed.ok || executed.recoverable) {
+      if (executed.notExecuted && ++staleRetries <= 2) { nextObservation = executed.observation; continue; }
+      stop(`Jev stopped after an unverified action: ${executed.message}${only ? " No LLM was called." : ""}`);
+      return { madeProgress: history.length > initialHistoryLength };
+    }
+    staleRetries = 0;
+    pendingText = undefined;
+    history.push({ action: action.type, target: action.elementId, url: observation.url, result: executed.message.slice(0, 300) });
+    if (executed.observation) {
+      updateTrackedTabFromObservation(session, tabId, executed.observation);
+    }
+    recordActionEvidence(session, action, executed.message);
+    queueRunReportSave(session.run);
+    nextObservation = executed.observation;
+  }
+  return { madeProgress: history.length > initialHistoryLength };
+}
+
+function recordJevDecision(session: RunningSession, decision: JevActionDecision, outcome: "fast" | "shadow" | "only" | "fallback", elapsedMs?: number): void {
+  const answer = decision.result?.answers.operation;
+  if (answer || elapsedMs !== undefined) {
+    usageSnapshot = { ...usageSnapshot, jev: addJevUsage(usageSnapshot.jev, {
+      outcome, message: decision.reason, elapsedMs,
+      decision: answer && decision.result ? { ...answer, elapsedMs: decision.result.elapsedMs, inputTokens: decision.result.inputTokens, outputTokens: decision.result.outputTokens } : undefined,
+    }), updatedAt: Date.now() };
+    if (usageSnapshot.jev && decision.result) {
+      usageSnapshot.jev.lastDecision = Object.entries(decision.result.answers).map(([question, choice]) => ({
+        question, choice: choice.choice, confidence: choice.confidence,
+        probabilities: Object.entries(choice.probabilities).sort((first, second) => second[1] - first[1]).slice(0, 3).map(([option, probability]) => ({ option, probability })),
+      }));
+    }
+    session.run.usage = usageSnapshot;
+    queueRunReportSave(session.run);
+    emitUsage();
+  }
+  const confidence = answer ? ` (${Math.round(answer.confidence * 100)}%, ${decision.result!.elapsedMs} ms)` : "";
+  appendLog(decision.kind === "fallback" ? "warning" : "info", `Jev ${outcome}: ${decision.operation}${decision.action?.elementId ? ` ${decision.action.elementId}` : ""}${confidence}. ${decision.reason}`);
+  if (decision.result) {
+    if (decision.result.ignoredAnswers?.length) {
+      appendLog("info", `Jev ignored invalid unused answers: ${decision.result.ignoredAnswers.join(", ")}. The selected operation and required answers were validated.`);
+    }
+    const distributions = Object.entries(decision.result.answers).map(([name, choice]) => `${name}: ${choice.choice} (${Math.round(choice.confidence * 100)}%); ${Object.entries(choice.probabilities).sort((first, second) => second[1] - first[1]).slice(0, 3).map(([option, probability]) => `${option}=${probability.toFixed(2)}`).join(", ")}`).join(" | ");
+    appendLog("info", `Jev decision details: ${distributions}`);
+  }
+}
+
 interface ActionLoopResult {
   ok: boolean;
   message: string;
@@ -541,7 +832,8 @@ async function handlePlannedActions(
   modelResponse: AgentModelResponse,
   actions: AgentAction[],
   completedInputActions: Set<string>,
-  taskId: string
+  taskId: string,
+  observation: PageObservation,
 ): Promise<ActionLoopResult> {
   const messages: string[] = [];
   const completedActions: string[] = [];
@@ -569,7 +861,7 @@ async function handlePlannedActions(
       };
     }
 
-    const action = actions[index];
+    let action = actions[index];
     const session = runningSession;
     if (!session || session.taskId !== taskId) {
       return {
@@ -581,25 +873,15 @@ async function handlePlannedActions(
       };
     }
 
+    if (["click", "multi_click", "drag", "multi_drag", "fill", "type", "select", "press_key", "scroll", "navigate"].includes(action.type)) {
+      const guarded = guardObservedAction(action, lastObservation || observation);
+      if (!guarded) return { ok: false, recoverable: true, message: "The action could not be bound to the observed page. Re-observe before acting.", shouldStop: false, completedActions, lastObservation };
+      action = guarded;
+    }
     const duplicateInputAction = getDuplicateInputAction(action, completedInputActions, session.activeTabAlias);
     if (duplicateInputAction) {
-      const duplicateResult = await handleDuplicateInputAction(session.activeTabId, action, duplicateInputAction);
-      messages.push(formatActionResult(index, actions.length, duplicateResult.message));
-      if (duplicateResult.ok && !duplicateResult.recoverable) {
-        completedActions.push(formatCompletedAction(index, action, duplicateResult.message, "skipped"));
-      }
-      if (!duplicateResult.ok || duplicateResult.recoverable) {
-        return {
-          ok: duplicateResult.ok,
-          recoverable: duplicateResult.recoverable,
-          message: messages.join(" "),
-          shouldStop: false,
-          completedActions,
-          failedAction: formatActionFailure(index, action, duplicateResult.message),
-          lastObservation
-        };
-      }
-      await sleep(160);
+      messages.push(formatActionResult(index, actions.length, duplicateInputAction.message));
+      completedActions.push(formatCompletedAction(index, action, duplicateInputAction.message, "skipped"));
       continue;
     }
 
@@ -1010,6 +1292,7 @@ function createRunningSession(
   usage: AgentUsageSnapshot,
   runPersistenceEnabled: boolean,
   abortSignal: AbortSignal,
+  settings: AgentSettings,
 ): RunningSession {
   if (typeof tab.id !== "number") {
     throw new Error("The active tab does not have an id.");
@@ -1029,6 +1312,7 @@ function createRunningSession(
 
   return {
     taskId,
+    settings,
     instruction,
     activeTabId: tab.id,
     activeTabAlias: initialTab.alias,
@@ -1544,6 +1828,7 @@ async function summarizeCurrentPage(session: RunningSession, instruction?: strin
   }
 
   const summary = await summarizeTextWithModel({
+    settings: session.settings,
     title: document.title || observation.title || observation.url,
     sourceLabel: document.url,
     text: pageText,
@@ -1594,6 +1879,7 @@ async function summarizePdf(session: RunningSession, action: AgentAction): Promi
   ].filter(Boolean).join(", ");
 
   const summary = await summarizeTextWithModel({
+    settings: session.settings,
     title: source.label,
     sourceLabel: sourceDetails,
     text: truncateForSummary(extraction.text),
@@ -1689,7 +1975,7 @@ async function validateCompletionWithModel(
   observation: PageObservation,
   proposedReport: string,
 ): Promise<{ accepted: boolean; message: string }> {
-  const settings = await loadSettings();
+  const settings = session.settings;
   const messages: Array<{ role: "system" | "user"; content: string }> = [
     {
       role: "system",
@@ -1725,13 +2011,14 @@ async function validateCompletionWithModel(
 }
 
 async function summarizeTextWithModel(args: {
+  settings: AgentSettings;
   title: string;
   sourceLabel: string;
   text: string;
   instruction: string;
   signal: AbortSignal;
 }): Promise<string> {
-  const settings = await loadSettings();
+  const settings = args.settings;
   const messages: Array<{ role: "system" | "user"; content: string }> = [
     {
       role: "system",
@@ -2366,6 +2653,7 @@ function recordUsageEvent(event: ModelUsageEvent, settings: {
   const costConfigured = usageSnapshot.costConfigured || typeof estimatedEventCost === "number";
 
   usageSnapshot = {
+    jev: usageSnapshot.jev,
     requestCount,
     successfulRequestCount: usageSnapshot.successfulRequestCount + (event.ok ? 1 : 0),
     cacheHitRequestCount: usageSnapshot.cacheHitRequestCount + (cachedPromptTokens > 0 ? 1 : 0),
@@ -2652,39 +2940,6 @@ function isNavigationLikeAction(action: AgentAction): boolean {
 
 interface DuplicateInputAction {
   message: string;
-  shouldAdvanceFocus: boolean;
-}
-
-async function handleDuplicateInputAction(
-  tabId: number,
-  action: AgentAction,
-  duplicate: DuplicateInputAction
-): Promise<{ ok: boolean; message: string; recoverable?: boolean }> {
-  if (!duplicate.shouldAdvanceFocus) {
-    return {
-      ok: true,
-      message: duplicate.message
-    };
-  }
-
-  const advanceResult = await executeAction(tabId, {
-    type: "press_key",
-    key: "Tab",
-    elementId: action.elementId
-  });
-
-  if (!advanceResult.ok) {
-    return {
-      ok: false,
-      recoverable: advanceResult.recoverable,
-      message: `${duplicate.message} Could not advance automatically: ${advanceResult.message}`
-    };
-  }
-
-  return {
-    ok: true,
-    message: `${duplicate.message} Advanced to the next focusable field. ${advanceResult.message}`
-  };
 }
 
 function getDuplicateInputAction(action: AgentAction, completedInputActions: Set<string>, tabAlias: string): DuplicateInputAction | undefined {
@@ -2696,34 +2951,29 @@ function getDuplicateInputAction(action: AgentAction, completedInputActions: Set
   if (action.type === "multi_click") {
     return {
       message: `Skipped repeated multi_click for ${action.elementIds?.length || 0} options; that option set was already handled.`,
-      shouldAdvanceFocus: false
     };
   }
 
   if (action.type === "multi_drag") {
     return {
       message: `Skipped repeated multi_drag for ${action.dragPairs?.length || 0} pairs; that drag/drop set was already handled.`,
-      shouldAdvanceFocus: false
     };
   }
 
   if (action.type === "upload_file") {
     return {
       message: `Skipped repeated upload_file on ${action.elementId}; that file input was already handled.`,
-      shouldAdvanceFocus: false
     };
   }
 
   if (action.type === "drag") {
     return {
       message: `Skipped repeated drag from ${action.elementId} to ${action.targetElementId}; that drag/drop action was already handled.`,
-      shouldAdvanceFocus: false
     };
   }
 
   return {
-    message: `Skipped repeated ${action.type} on ${action.elementId}; that field was already handled.`,
-    shouldAdvanceFocus: action.type === "fill" || action.type === "type"
+    message: `Skipped repeated ${action.type} on ${action.elementId}; that field was already handled. Focus was not advanced.`,
   };
 }
 
@@ -2735,7 +2985,7 @@ function rememberCompletedInputAction(action: AgentAction, completedInputActions
 }
 
 function getInputActionKey(action: AgentAction, tabAlias: string): string | undefined {
-  const prefix = `${tabAlias}:`;
+  const prefix = `${tabAlias}:${action.guard?.documentId || "unguarded"}:`;
   if (action.type === "multi_click") {
     return action.elementIds?.length ? `${prefix}multi_click:${[...action.elementIds].sort().join(",")}` : undefined;
   }

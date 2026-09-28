@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Bot, ChevronDown, ChevronUp, Pencil, Plus, RotateCcw, Send, Sparkles, Square, Trash2, User, X } from "lucide-react";
-import { DEFAULT_CHAT_SUGGESTIONS, MAX_CHAT_SUGGESTIONS } from "../../shared/defaults";
+import { Bot, ChevronDown, ChevronUp, Info, Pencil, Plus, RotateCcw, Send, Sparkles, Square, Trash2, User, X } from "lucide-react";
+import { DEFAULT_CHAT_SUGGESTIONS, JEV_MODEL, MAX_CHAT_SUGGESTIONS } from "../../shared/defaults";
 import {
   loadChatSuggestions,
   loadTaskDraft,
@@ -8,7 +8,7 @@ import {
   saveChatSuggestions,
   saveTaskDraft,
 } from "../../shared/storage";
-import type { AgentChatMessage, AgentLogEntry, ModelRetryStatus } from "../../shared/types";
+import type { AgentChatMessage, AgentLogEntry, JevSettings, ModelRetryStatus } from "../../shared/types";
 import { FileStagingPanel } from "./FileStagingPanel";
 import { Markdown } from "./Markdown";
 
@@ -20,13 +20,15 @@ interface ChatPanelProps {
   modelRetryStatus?: ModelRetryStatus;
   disabled: boolean;
   model: string;
+  jevMode?: JevSettings["mode"];
+  hasJevKey?: boolean;
   onSend: (message: string) => Promise<void>;
   onRerun: (message: string) => Promise<void>;
   onStop: () => Promise<void>;
   onClear: () => Promise<void>;
 }
 
-export function ChatPanel({ messages, currentLog, running, waitingForModel, modelRetryStatus, disabled, model, onSend, onRerun, onStop, onClear }: ChatPanelProps) {
+export function ChatPanel({ messages, currentLog, running, waitingForModel, modelRetryStatus, disabled, model, jevMode = "off", hasJevKey = false, onSend, onRerun, onStop, onClear }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
@@ -110,7 +112,7 @@ export function ChatPanel({ messages, currentLog, running, waitingForModel, mode
       </header>
 
       <div className="chat-thread" ref={threadRef} aria-live="polite">
-        <WelcomeMessage />
+        <WelcomeMessage jevOnly={jevMode === "only"} />
         {messages.map((message) => (
           <ChatMessage
             key={message.id}
@@ -131,12 +133,29 @@ export function ChatPanel({ messages, currentLog, running, waitingForModel, mode
         ) : running && waitingForModel ? (
           <div className="model-waiting-status" role="status">
             <Sparkles aria-hidden="true" />
-            <span>Polishing the next thought...</span>
+            <span>{jevMode === "only" ? "Choosing the next browser action..." : "Polishing the next thought..."}</span>
           </div>
         ) : null}
       </div>
 
-      <ChatSuggestions hasMessages={messages.length > 0} running={running} onSelect={useStarter} />
+      {jevMode !== "only" ? <ChatSuggestions hasMessages={messages.length > 0} running={running} onSelect={useStarter} /> : null}
+
+      {jevMode !== "off" ? (
+        <aside className="jev-chat-notice" role="note" aria-label="Jev capabilities">
+          <Info aria-hidden="true" />
+          <div>
+            <strong>{jevMode === "only" ? "Jev Only" : `Jev ${jevMode === "shadow" ? "Shadow" : "Fast"} + LLM`}</strong>
+            <p>
+              {jevMode === "only"
+                ? 'Jev can click, select, scroll, and fill exact double-quoted values from your request. No generated text or summaries. No LLM is used.'
+                : jevMode === "shadow"
+                ? "Jev records action choices only; your LLM still performs all tasks."
+                : "Jev chooses browser actions. Your configured LLM supplies missing field text or handles unsupported tasks, including summaries and research answers."}
+            </p>
+            {!hasJevKey ? <p>{jevMode === "only" ? "Add a TypeSafe API key in Settings. Jev Only will not fall back to an LLM." : "Jev needs a TypeSafe API key in Settings. Until then, only the LLM runs."}</p> : null}
+          </div>
+        </aside>
+      ) : null}
 
       <div className="chat-composer">
         <div className="chat-composer-main">
@@ -147,7 +166,7 @@ export function ChatPanel({ messages, currentLog, running, waitingForModel, mode
             id="chat-message"
             value={draft}
             rows={2}
-            placeholder="Type your message..."
+            placeholder={jevMode === "only" ? 'Describe a task; quote text to fill...' : "Type your message..."}
             disabled={busy}
             onChange={(event) => updateDraft(event.target.value)}
             onKeyDown={handleKeyDown}
@@ -163,10 +182,10 @@ export function ChatPanel({ messages, currentLog, running, waitingForModel, mode
             {running ? <Square aria-hidden="true" /> : <Send aria-hidden="true" />}
           </button>
         </div>
-        <p className="composer-model"><span>Model:</span> {model || "Not configured"}</p>
+        <p className="composer-model"><span>{jevMode === "only" ? "Jev:" : jevMode === "off" ? "Model:" : "LLM:"}</span> {jevMode === "only" ? JEV_MODEL : model || "Not configured"}</p>
       </div>
 
-      {disabled ? <p className="inline-warning">Add an API key in Settings.</p> : null}
+      {disabled ? <p className="inline-warning">{jevMode === "only" ? "Add a TypeSafe API key in Settings for Jev Only." : jevMode === "off" ? "Add an API key in Settings." : "Add an LLM API key in Settings. Jev cannot run alone."}</p> : null}
     </section>
   );
 }
@@ -402,13 +421,13 @@ function hasSuggestion(suggestions: string[], candidate: string): boolean {
   return suggestions.some((suggestion) => suggestion.replace(/\s+/g, " ").trim().toLocaleLowerCase() === normalized);
 }
 
-function WelcomeMessage() {
+function WelcomeMessage({ jevOnly = false }: { jevOnly?: boolean }) {
   return (
     <div className="chat-row assistant-row welcome-row">
       <span className="chat-avatar" aria-hidden="true"><Bot /></span>
       <div className="chat-bubble assistant-bubble">
-        <strong>Hello. What can I help with?</strong>
-        <p>Ask about the current page, request a summary, or describe a browser task.</p>
+        <strong>{jevOnly ? "What should I do in the browser?" : "Hello. What can I help with?"}</strong>
+        <p>{jevOnly ? 'For example: search for "typescript" and open the first result.' : "Ask about the current page, request a summary, or describe a browser task."}</p>
       </div>
     </div>
   );

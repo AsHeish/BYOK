@@ -2,6 +2,9 @@ import type { AgentSettings } from "./types";
 
 export const MIN_REQUEST_TIMEOUT_SECONDS = 10;
 export const MAX_REQUEST_TIMEOUT_SECONDS = 300;
+export const JEV_MODEL = "jev-1.13.0";
+export const DEFAULT_JEV_PROFILE_ID = "profile-jev-default";
+export const DEFAULT_JEV_PROFILE_NAME = "Jev Only (default)";
 
 export const DEFAULT_SETTINGS: AgentSettings = {
   provider: "openai",
@@ -11,6 +14,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   maxSteps: 60,
   requestTimeoutSeconds: 60,
   promptCacheMode: "auto",
+  disableThinking: false,
+  jev: { mode: "off", apiKey: "" },
   saveRunHistory: true,
   theme: "dark"
 };

@@ -134,7 +134,10 @@ export function App() {
     return () => window.clearInterval(intervalId);
   }, [running]);
 
-  const hasApiKey = useMemo(() => settings.apiKey.trim().length > 0, [settings.apiKey]);
+  const hasApiKey = useMemo(
+    () => settings.jev?.mode === "only" ? Boolean(settings.jev.apiKey.trim()) : settings.apiKey.trim().length > 0,
+    [settings.apiKey, settings.jev?.mode, settings.jev?.apiKey],
+  );
   const theme = settings.theme;
 
   useEffect(() => {
@@ -158,22 +161,33 @@ export function App() {
 
   async function handleRun(task: string) {
     setNotice(undefined);
-    await sendBackgroundMessage({ type: "SIDEPANEL_RUN_TASK", task });
+    const response = await sendBackgroundMessage({ type: "SIDEPANEL_RUN_TASK", task, settings });
+    const error = getResponseError(response);
+    if (error) {
+      setNotice(error);
+      throw new Error(error);
+    }
   }
 
   async function handleChat(message: string) {
     setNotice(undefined);
-    await sendBackgroundMessage({ type: "SIDEPANEL_SEND_CHAT", message });
+    const response = await sendBackgroundMessage({ type: "SIDEPANEL_SEND_CHAT", message, settings });
+    const error = getResponseError(response);
+    if (error) {
+      setNotice(error);
+      throw new Error(error);
+    }
   }
 
   async function handleStop() {
     await sendBackgroundMessage({ type: "SIDEPANEL_STOP_TASK" });
   }
 
-  async function handleTestConnection(candidateSettings: AgentSettings): Promise<{ latencyMs: number }> {
+  async function handleTestConnection(candidateSettings: AgentSettings, target?: "jev"): Promise<{ latencyMs: number }> {
     const response = await sendBackgroundMessage({
       type: "SIDEPANEL_TEST_MODEL_CONNECTION",
       settings: candidateSettings,
+      target,
     });
     if (isConnectionTestSuccess(response)) {
       return { latencyMs: response.latencyMs };
@@ -266,6 +280,8 @@ export function App() {
             modelRetryStatus={modelRetryStatus}
             disabled={!hasApiKey}
             model={settings.model}
+            jevMode={settings.jev?.mode}
+            hasJevKey={Boolean(settings.jev?.apiKey.trim())}
             onSend={handleChat}
             onRerun={handleChat}
             onStop={handleStop}

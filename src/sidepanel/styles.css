@@ -1640,9 +1640,51 @@ input::placeholder {
   border-bottom: 1px solid var(--border);
 }
 
+.jev-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px 0 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.jev-settings legend {
+  padding: 0 8px 0 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.jev-mode-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.jev-mode-control button {
+  min-height: 36px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--field);
+  color: var(--text-subtle);
+  font: inherit;
+  font-size: 12px;
+}
+
+.jev-mode-control button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 15%, var(--field));
+}
+
 .profile-create-actions,
 .profile-record-actions,
-.profile-transfer-actions {
+.profile-transfer-actions,
+.profile-save-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
@@ -1653,11 +1695,37 @@ input::placeholder {
 }
 
 .profile-record-actions > button {
-  flex: 1 1 84px;
+  min-width: 0;
+  padding-inline: 8px;
+}
+
+.profile-record-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.profile-save-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.profile-save-prompt p {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .profile-transfer-actions > button {
   flex: 1 1 110px;
+}
+
+.profile-transfer-actions > .profile-delete-button {
+  flex: 0 0 38px;
+  padding: 0;
 }
 
 label {
@@ -2600,6 +2668,67 @@ textarea:focus {
   align-items: center;
   min-height: 48px;
   padding: 8px 8px 2px;
+}
+
+.jev-chat-notice {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 4px;
+  border-top: 1px solid var(--border);
+  color: var(--text-subtle);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.jev-chat-notice > svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  color: var(--accent);
+}
+
+.jev-chat-notice > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.jev-chat-notice strong {
+  color: var(--text);
+}
+
+.jev-chat-notice p {
+  margin: 3px 0 0;
+}
+
+.jev-decision-inspector dl {
+  margin: 10px 0 0;
+}
+
+.jev-decision-inspector dl > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.jev-decision-inspector dd {
+  margin: 0;
+}
+
+.jev-decision-inspector small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-subtle);
+}
+
+.jev-decision-inspector strong > span {
+  color: var(--accent);
 }
 
 .chat-composer textarea {

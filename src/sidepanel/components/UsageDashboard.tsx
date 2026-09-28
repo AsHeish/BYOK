@@ -17,10 +17,10 @@ export function UsageDashboard({ usage }: UsageDashboardProps) {
       </div>
 
       <div className="usage-grid usage-grid-primary">
-        <Metric label="Total tokens" value={formatInteger(usage.totalTokens)} />
+        <Metric label="LLM tokens" value={formatInteger(usage.totalTokens)} />
         <Metric label="Cached" value={`${formatInteger(usage.cachedPromptTokens)} (${cacheHitRate}%)`} />
         <Metric label="Avg latency" value={formatDuration(usage.averageLatencyMs)} />
-        <Metric label="Cost est." value={formatCost(usage)} />
+        <Metric label="LLM cost est." value={formatCost(usage)} />
       </div>
 
       <details className="usage-details">
@@ -33,8 +33,43 @@ export function UsageDashboard({ usage }: UsageDashboardProps) {
         </div>
       </details>
 
+      {usage.jev ? (
+        <details className="usage-details" open>
+          <summary>Jev decisions</summary>
+          <div className="usage-grid usage-grid-secondary">
+            <Metric label="Jev requests" value={formatInteger(usage.jev.requests)} />
+            <Metric label="Jev Only calls" value={formatInteger(usage.jev.onlyRequests || 0)} />
+            <Metric label="Fast decisions" value={formatInteger(usage.jev.fastDecisions)} />
+            <Metric label="Text helper calls" value={formatInteger(usage.jev.helperRequests || 0)} />
+            <Metric label="Shadow choices" value={formatInteger(usage.jev.shadowDecisions)} />
+            <Metric label="Fallbacks" value={formatInteger(usage.jev.fallbacks)} />
+            <Metric label="Jev avg latency" value={formatDuration(usage.jev.requests ? usage.jev.totalLatencyMs / usage.jev.requests : undefined)} />
+            <Metric label="Jev input tokens" value={formatInteger(usage.jev.inputTokens)} />
+            <Metric label="Jev output tokens" value={formatInteger(usage.jev.outputTokens)} />
+            <Metric label="Jev cost est." value={`$${usage.jev.estimatedCostUsd.toFixed(6)}`} />
+          </div>
+        </details>
+      ) : null}
+
+      {usage.jev?.lastDecision?.length ? (
+        <details className="usage-details jev-decision-inspector">
+          <summary>Latest Jev decision</summary>
+          <dl>
+            {usage.jev.lastDecision.map((answer) => (
+              <div key={answer.question}>
+                <dt>{answer.question.replaceAll("_", " ")}</dt>
+                <dd>
+                  <strong>{answer.choice} <span>{Math.round(answer.confidence * 100)}%</span></strong>
+                  <small>{answer.probabilities.map((option) => `${option.option}: ${Math.round(option.probability * 100)}%`).join(" / ")}</small>
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </details>
+      ) : null}
+
       <div className="usage-footer">
-        <span>{usage.provider || "provider"}</span>
+        <span>{usage.jev?.onlyRequests ? "TypeSafe" : usage.provider || "provider"}</span>
         <span>{usage.model || "model"}</span>
         {usage.lastStatus ? <span>status {usage.lastStatus}</span> : null}
       </div>

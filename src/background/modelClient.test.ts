@@ -4,6 +4,7 @@ import {
   ModelClientError,
   ModelRequestCancelledError,
   requestAgentStep,
+  requestFieldText,
   sanitizeMessagesForLogging,
   setModelRequestTransport,
   testModelConnection,
@@ -24,6 +25,90 @@ const SETTINGS: AgentSettings = {
 };
 
 const MESSAGES: ChatMessage[] = [{ role: "user", content: "Do the next step" }];
+
+describe("disabled model thinking", () => {
+  it.each([
+    { provider: "custom", model: "gemma-4-31b", apiBaseUrl: "https://local-model.example/v1", expected: { chat_template_kwargs: { enable_thinking: false } } },
+    { provider: "openai", model: "Qwen/Qwen3-32B", apiBaseUrl: "http://localhost:8000/v1", expected: { chat_template_kwargs: { enable_thinking: false } } },
+    { provider: "custom", model: "qwen-3.6-27b", apiBaseUrl: "https://local-model.example/v1", expected: { chat_template_kwargs: { enable_thinking: false } } },
+    { provider: "openai", model: "gpt-5.2", apiBaseUrl: "https://api.openai.com/v1", expected: { reasoning_effort: "none" } },
+    { provider: "gemini", model: "gemini-2.5-flash", apiBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", expected: { reasoning_effort: "none" } },
+    { provider: "groq", model: "qwen/qwen3-32b", apiBaseUrl: "https://api.groq.com/openai/v1", expected: { reasoning_effort: "none" } },
+    { provider: "custom", model: "google/gemma-4-31b-it", apiBaseUrl: "https://openrouter.ai/api/v1", expected: { reasoning: { enabled: false } } },
+  ] as const)("sends the appropriate parameter for $model at $apiBaseUrl", async (scenario) => {
+    const transport = vi.fn().mockResolvedValue(await toModelHttpResponse(okResponse()));
+    setModelRequestTransport(transport);
+    await requestAgentStep({ ...SETTINGS, ...scenario, disableThinking: true }, MESSAGES);
+    expect(transport).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(transport.mock.calls[0][0].body);
+    expect(body).toMatchObject(scenario.expected);
+    expect(Object.keys(body).filter((key) => ["reasoning_effort", "reasoning", "chat_template_kwargs"].includes(key))).toHaveLength(1);
+    expect(body.messages).toEqual(MESSAGES);
+  });
+
+  it.each([undefined, false])("leaves provider defaults untouched when disableThinking=%s", async (disableThinking) => {
+    const transport = vi.fn().mockResolvedValue(await toModelHttpResponse(okResponse()));
+    setModelRequestTransport(transport);
+    await requestAgentStep({ ...SETTINGS, disableThinking }, MESSAGES);
+    const body = JSON.parse(transport.mock.calls[0][0].body);
+    expect(body).not.toHaveProperty("reasoning_effort");
+    expect(body).not.toHaveProperty("reasoning");
+    expect(body).not.toHaveProperty("chat_template_kwargs");
+  });
+
+  it("does not silently enable thinking after a provider rejects the option", async () => {
+    const transport = vi.fn().mockResolvedValue({ ok: false, status: 400, statusText: "Bad Request", responseText: '{"error":{"message":"Unsupported value for reasoning_effort: none"}}' });
+    setModelRequestTransport(transport);
+    await expect(requestAgentStep({ ...SETTINGS, disableThinking: true }, MESSAGES)).rejects.toThrow("reasoning_effort");
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(transport.mock.calls[0][0].body).reasoning_effort).toBe("none");
+  });
+
+  it("retains disabled thinking during JSON-format compatibility retries", async () => {
+    const transport = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 400, statusText: "Bad Request", responseText: '{"error":{"message":"Unsupported parameter: response_format"}}' })
+      .mockResolvedValueOnce(await toModelHttpResponse(okResponse()));
+    setModelRequestTransport(transport);
+    await requestAgentStep({ ...SETTINGS, disableThinking: true }, MESSAGES);
+    expect(transport).toHaveBeenCalledTimes(2);
+    for (const [request] of transport.mock.calls) expect(JSON.parse(request.body).reasoning_effort).toBe("none");
+  });
+
+  it("applies the same option to connection tests and hybrid field text", async () => {
+    const transport = vi.fn()
+      .mockResolvedValueOnce(await toModelHttpResponse(okResponse()))
+      .mockResolvedValueOnce({ ok: true, status: 200, statusText: "OK", responseText: JSON.stringify({ choices: [{ message: { content: '{"text":"Zurich"}' } }], usage: { prompt_tokens: 10, completion_tokens: 4 } }) });
+    setModelRequestTransport(transport);
+    const settings: AgentSettings = { ...SETTINGS, provider: "custom", model: "gemma-4-31b", disableThinking: true, jev: { mode: "fast", apiKey: "jev-key" } };
+    await testModelConnection(settings);
+    await expect(requestFieldText(settings, { field: "Origin" }, new AbortController().signal)).resolves.toMatchObject({ text: "Zurich" });
+    expect(transport).toHaveBeenCalledTimes(2);
+    for (const [request] of transport.mock.calls) expect(JSON.parse(request.body).chat_template_kwargs).toEqual({ enable_thinking: false });
+  });
+});
+
+describe("hybrid field text helper", () => {
+  it.each(["only", "shadow", "off"] as const)("never sends a text request in %s mode", async (mode) => {
+    const transport = vi.fn();
+    setModelRequestTransport(transport);
+    await expect(requestFieldText({ ...SETTINGS, jev: { mode, apiKey: "jev" } }, {}, new AbortController().signal)).rejects.toThrow("explicit Jev hybrid");
+    expect(transport).not.toHaveBeenCalled();
+  });
+
+  it("returns only validated text and accounts for its own usage", async () => {
+    const transport = vi.fn().mockResolvedValue({ ok: true, status: 200, statusText: "OK", responseText: JSON.stringify({ choices: [{ message: { content: '{"text":"Zurich"}' } }], usage: { prompt_tokens: 10, completion_tokens: 4 } }) });
+    setModelRequestTransport(transport);
+    const result = await requestFieldText({ ...SETTINGS, jev: { mode: "fast", apiKey: "jev" } }, { field: "Origin" }, new AbortController().signal);
+    expect(result).toMatchObject({ text: "Zurich", usage: { promptTokens: 10, completionTokens: 4, attempts: 1 } });
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(transport.mock.calls[0][0].body).max_tokens).toBe(1024);
+  });
+
+  it.each(['{"text":null}', '{"text":"value","action":"click"}', '```json\n{"text":"value"}\n```', '{"text":""}'])("rejects unsafe helper output %s", async (content) => {
+    setModelRequestTransport(vi.fn().mockResolvedValue({ ok: true, status: 200, statusText: "OK", responseText: JSON.stringify({ choices: [{ message: { content } }] }) }));
+    await expect(requestFieldText({ ...SETTINGS, jev: { mode: "fast", apiKey: "jev" } }, {}, new AbortController().signal)).rejects.toThrow("Nothing was typed");
+  });
+});
 
 afterEach(() => {
   setModelRequestTransport(undefined);
@@ -51,6 +136,45 @@ describe("multimodal prompt logging", () => {
 });
 
 describe("model request retries", () => {
+  it.each(["PageUp", "page up", "PageDown", "pgdn"])("preserves the intended page-navigation key %s", async (key) => {
+    setModelRequestTransport(vi.fn().mockResolvedValue({ ok: true, status: 200, statusText: "OK", responseText: JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      mode: "browser", thought_summary: "Scroll to the previous questions", risk_level: "low", action: { type: "press_key", key },
+    }) } }] }) }));
+    const result = await requestAgentStep(SETTINGS, MESSAGES);
+    expect(result.response.actions?.[0].key).toBe(key.toLowerCase().includes("up") ? "PageUp" : "PageDown");
+  });
+
+  it.each([undefined, "UnrecognizedKey"])("does not silently turn key %s into Tab", async (key) => {
+    setModelRequestTransport(vi.fn().mockResolvedValue({ ok: true, status: 200, statusText: "OK", responseText: JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      mode: "browser", thought_summary: "Move", risk_level: "low", action: { type: "press_key", key },
+    }) } }] }) }));
+    await expect(requestAgentStep(SETTINGS, MESSAGES)).rejects.toThrow("unsupported or missing key");
+  });
+
+  it("blocks Jev Only at the LLM transport boundary for steps and connection probes", async () => {
+    const transport = vi.fn();
+    const fetchMock = vi.fn();
+    setModelRequestTransport(transport);
+    vi.stubGlobal("fetch", fetchMock);
+    const settings: AgentSettings = { ...SETTINGS, jev: { mode: "only", apiKey: "jev-key" } };
+    await expect(requestAgentStep(settings, MESSAGES)).rejects.toThrow("LLM requests are disabled");
+    await expect(testModelConnection(settings)).rejects.toThrow("LLM requests are disabled");
+    expect(transport).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["Find the setup guide", "x".repeat(501)])("normalizes optional navigation delegation", async (navigationGoal) => {
+    setModelRequestTransport(vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: "OK",
+      responseText: JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+        mode: "browser", thought_summary: "Browse docs", risk_level: "low", navigationGoal,
+        action: { type: "navigate", url: "https://example.test/docs/start" },
+      }) } }] }),
+    }));
+    const result = await requestAgentStep(SETTINGS, MESSAGES);
+    expect(result.response.navigationGoal).toBe(navigationGoal.length <= 500 ? navigationGoal : undefined);
+  });
+
   it("aborts an in-flight request without retrying", async () => {
     const notices: ModelRequestNotice[] = [];
     const controller = new AbortController();

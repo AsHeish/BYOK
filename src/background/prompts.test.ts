@@ -10,6 +10,25 @@ const OBSERVATION: PageObservation = {
 };
 
 describe("agent response mode prompt", () => {
+  it("distinguishes page scrolling from focus changes and forbids guessed form IDs", () => {
+    const messages = buildAgentMessages({ task: "Fill remaining problems", observation: OBSERVATION, step: 3, maxSteps: 10 });
+    const system = getTextContent(messages[0].content);
+    expect(system).toContain("Tab, Shift+Tab, PageUp, or PageDown");
+    expect(system).toContain("Never guess a field ID");
+    expect(system).toContain("read_page does not scroll");
+    expect(system).toContain("does not press Tab or advance focus");
+  });
+
+  it("offers one-step navigation delegation only when Jev is configured", () => {
+    const args = { task: "Find the guide", observation: OBSERVATION, step: 1, maxSteps: 10 };
+    const disabled = buildAgentMessages(args);
+    const enabled = buildAgentMessages({ ...args, allowJevNavigation: true });
+    expect(getTextContent(disabled[2].content)).not.toContain("navigationGoal");
+    expect(getTextContent(enabled[2].content)).toContain("navigationGoal");
+    expect(getTextContent(enabled[2].content)).toContain("one same-origin public-content link");
+    expect(enabled[0]).toEqual(disabled[0]);
+  });
+
   it("lets the first call choose a mode while including browser context", () => {
     const messages = buildAgentMessages({
       task: "hello",

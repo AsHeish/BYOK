@@ -97,8 +97,10 @@ const elementContexts = new WeakMap<Element, Pick<DomElementInfo, "frameContext"
 const currentElements = new Map<string, HTMLElement>();
 const currentElementInfo = new Map<string, DomElementInfo>();
 const historicalElementInfo = new Map<string, DomElementInfo>();
+const documentId = crypto.randomUUID();
 let nextElementId = 1;
 let nextFrameId = 1;
+let lastScrollDirection: "up" | "down" | "left" | "right" = "down";
 
 type QueryRoot = Document | ShadowRoot;
 
@@ -135,14 +137,24 @@ export function observePage(): PageObservation {
   const elements = interactiveElements
     .slice(0, MAX_DOM_ELEMENTS)
     .map(toElementInfo);
+  const privateValues = queryAllInContexts(contexts, "input,textarea,[contenteditable='true']")
+    .filter(isSensitiveElement)
+    .map((element) => "value" in element ? String(element.value || "") : element.textContent || "")
+    .filter((value) => value.length > 0);
+  const redact = (text: string) => privateValues.reduce((value, secret) => value.split(secret).join("[redacted]"), text);
 
   return {
+    documentId,
+    formState: getFormStateFingerprint(),
+    isLoading: document.readyState !== "complete" || queryAllInContexts(contexts, '[aria-busy="true"],[role="progressbar"]').some(isVisibleElement),
     url: location.href,
-    title: document.title,
-    text: getReadableText(contexts),
-    elements,
+    title: redact(document.title),
+    text: redact(getReadableText(contexts)),
+    elements: elements.map((element) => Object.fromEntries(Object.entries(element).map(([key, value]) => [key,
+      key === "id" || key === "fingerprint" ? value : typeof value === "string" ? redact(value) : Array.isArray(value) ? value.map(redact) : value,
+    ])) as unknown as DomElementInfo),
     interactiveElementCount: interactiveElements.length,
-    viewport: getViewportInfo(),
+    viewport: getViewportInfo(contexts),
     frames: contexts.frames
   };
 }
@@ -230,30 +242,91 @@ function hashText(value: string): string {
   return (hash >>> 0).toString(36);
 }
 
-function getViewportInfo(): PageObservation["viewport"] {
-  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-  const pageWidth = Math.max(
-    document.documentElement.scrollWidth,
-    document.body?.scrollWidth || 0,
-    viewportWidth
-  );
-  const pageHeight = Math.max(
-    document.documentElement.scrollHeight,
-    document.body?.scrollHeight || 0,
-    viewportHeight
-  );
-  const maxScrollableY = Math.max(1, pageHeight - viewportHeight);
-
+function getViewportInfo(contexts: DomContextCollection): PageObservation["viewport"] {
+  const container = findScrollContainer(lastScrollDirection, contexts);
+  const owner = container.ownerDocument;
+  const view = owner.defaultView || window;
+  const root = container === (owner.scrollingElement || owner.documentElement);
+  const viewportWidth = root ? view.innerWidth || container.clientWidth : container.clientWidth;
+  const viewportHeight = root ? view.innerHeight || container.clientHeight : container.clientHeight;
+  const pageWidth = Math.max(container.scrollWidth, root ? owner.body?.scrollWidth || 0 : 0, viewportWidth);
+  const pageHeight = Math.max(container.scrollHeight, root ? owner.body?.scrollHeight || 0 : 0, viewportHeight);
+  const scrollX = Math.max(0, Math.round(container.scrollLeft || (root ? view.scrollX : 0) || 0));
+  const scrollY = Math.max(0, Math.round(container.scrollTop || (root ? view.scrollY : 0) || 0));
+  const maxScrollableY = Math.max(0, pageHeight - viewportHeight);
   return {
-    scrollX: Math.max(0, Math.round(window.scrollX || window.pageXOffset || 0)),
-    scrollY: Math.max(0, Math.round(window.scrollY || window.pageYOffset || 0)),
+    scrollContainerId: getOrCreateElementId(container),
+    scrollContainerLabel: root ? "document" : container.getAttribute("aria-label") || container.id || container.getAttribute("role") || container.tagName.toLowerCase(),
+    scrollX,
+    scrollY,
     viewportWidth: Math.round(viewportWidth),
     viewportHeight: Math.round(viewportHeight),
     pageWidth: Math.round(pageWidth),
     pageHeight: Math.round(pageHeight),
-    progressPercent: Math.min(100, Math.max(0, Math.round(((window.scrollY || window.pageYOffset || 0) / maxScrollableY) * 100)))
+    progressPercent: maxScrollableY ? Math.min(100, Math.max(0, Math.round(scrollY / maxScrollableY * 100))) : 100,
   };
+}
+
+export function getScrollContainer(direction: "up" | "down" | "left" | "right"): HTMLElement {
+  lastScrollDirection = direction;
+  return findScrollContainer(direction, collectDomContexts());
+}
+
+function findScrollContainer(direction: "up" | "down" | "left" | "right", contexts: DomContextCollection): HTMLElement {
+  const horizontal = direction === "left" || direction === "right";
+  const candidates = queryAllInContexts(contexts, "*");
+  let best: { element: HTMLElement; score: number } | undefined;
+  for (const element of candidates) {
+    const owner = element.ownerDocument;
+    const view = owner.defaultView || window;
+    const root = element === (owner.scrollingElement || owner.documentElement);
+    const size = root ? horizontal ? view.innerWidth : view.innerHeight : horizontal ? element.clientWidth : element.clientHeight;
+    const extent = horizontal ? Math.max(element.scrollWidth, root ? owner.body?.scrollWidth || 0 : 0)
+      : Math.max(element.scrollHeight, root ? owner.body?.scrollHeight || 0 : 0);
+    if (size <= 0 || extent <= size + 1) continue;
+    const style = view.getComputedStyle(element);
+    const overflow = horizontal ? style.overflowX || style.overflow : style.overflowY || style.overflow;
+    if (!root && !/^(auto|scroll|overlay)$/.test(overflow)) continue;
+    if (root && /^(hidden|clip)$/.test(overflow)) continue;
+    const area = visibleScrollArea(element);
+    if (!area) continue;
+    const focused = !root && owner.activeElement && owner.activeElement !== owner.body && element.contains(owner.activeElement);
+    const dialog = element.closest('dialog[open],[role="dialog"],[aria-modal="true"]');
+    const score = area + (focused ? view.innerWidth * view.innerHeight : 0) + (dialog ? view.innerWidth * view.innerHeight * 2 : 0);
+    if (!best || score > best.score) best = { element, score };
+  }
+  return best?.element || (document.scrollingElement as HTMLElement | null) || document.documentElement;
+}
+
+function visibleScrollArea(element: HTMLElement): number {
+  const view = element.ownerDocument.defaultView;
+  if (!view || !element.isConnected || !isVisibleElement(element) || element.closest('[hidden],[inert],[aria-hidden="true"]')) return 0;
+  const rect = element.getBoundingClientRect();
+  let left = Math.max(rect.left, 0);
+  let top = Math.max(rect.top, 0);
+  let right = Math.min(rect.right, view.innerWidth);
+  let bottom = Math.min(rect.bottom, view.innerHeight);
+  let ancestor = element.parentElement;
+  while (ancestor) {
+    const style = view.getComputedStyle(ancestor);
+    const bounds = ancestor.getBoundingClientRect();
+    if (/auto|scroll|hidden|clip/.test(style.overflowX || style.overflow)) {
+      left = Math.max(left, bounds.left);
+      right = Math.min(right, bounds.right);
+    }
+    if (/auto|scroll|hidden|clip/.test(style.overflowY || style.overflow)) {
+      top = Math.max(top, bounds.top);
+      bottom = Math.min(bottom, bounds.bottom);
+    }
+    ancestor = ancestor.parentElement;
+  }
+  let area = Math.max(0, right - left) * Math.max(0, bottom - top);
+  if (view !== window) {
+    const frame = view.frameElement;
+    if (!frame || !isHtmlElement(frame)) return 0;
+    area = Math.min(area, visibleScrollArea(frame));
+  }
+  return area;
 }
 
 function collectDomContexts(): DomContextCollection {
@@ -454,6 +527,29 @@ export function getMappedElement(elementId: string): HTMLElement | undefined {
   return currentElements.get(elementId);
 }
 
+export function getDocumentId(): string {
+  return documentId;
+}
+
+export function getFormStateFingerprint(): string {
+  const controls = queryAllInContexts(collectDomContexts(), "input,textarea,select,[contenteditable='true']")
+    .filter((element) => !isSensitiveElement(element));
+  return hashText(JSON.stringify(controls.map((element) => [getOrCreateElementId(element), getSafeValue(element), getCheckedState(element),
+    isDisabled(element), element.getAttribute("readonly"), element.getAttribute("aria-readonly")])));
+}
+
+export function getElementFingerprint(element: HTMLElement): string {
+  const scope = element.closest("form,dialog,[role='dialog'],li,tr,[role='row']") || element.parentElement;
+  return String(hashText(JSON.stringify([
+    getOrCreateElementId(element), element.tagName, element.getAttribute("role"), getElementLabel(element),
+    getElementText(element), isSensitiveElement(element) ? undefined : getSafeValue(element), getCheckedState(element),
+    element.getAttribute("href"), element.getAttribute("type"), element.getAttribute("aria-expanded"),
+    element.getAttribute("aria-selected"), element.getAttribute("readonly"), element.getAttribute("aria-readonly"),
+    isDisabled(element), scope?.textContent?.slice(0, 1_000),
+    isSelectElement(element) ? Array.from(element.options).map((option) => [option.value, option.text, option.disabled, option.selected]) : undefined,
+  ])));
+}
+
 export function findMappedElementReplacement(elementId: string): HTMLElement | undefined {
   const snapshot = currentElementInfo.get(elementId) || historicalElementInfo.get(elementId);
   if (!snapshot) {
@@ -522,30 +618,35 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
   const questionContext = getElementQuestionContext(element);
   const isDraggable = isDraggableElement(element);
   const isDropTarget = isDropTargetElement(element);
+  const sensitive = isSensitiveElement(element);
 
   const info: DomElementInfo = {
     id,
+    fingerprint: getElementFingerprint(element),
     tag,
     frameContext: elementContext.frameContext,
     rootContext: elementContext.rootContext === "document" ? undefined : elementContext.rootContext,
     role: element.getAttribute("role") || implicitRole(element),
-    type: input?.type,
-    text: getElementText(element),
+    type: input?.type || (isButtonElement(element) ? element.type : undefined),
+    text: sensitive ? undefined : getElementText(element),
     label: getElementLabel(element),
     name: getFormName(element),
     placeholder: getPlaceholder(element),
     accept: getFileAccept(element),
     context: questionContext?.text,
     questionNumber: questionContext?.questionNumber,
-    value: getSafeValue(element),
+    value: sensitive ? undefined : getSafeValue(element),
     checkedState: getCheckedState(element),
     href: isAnchorElement(element) ? element.href : undefined,
-    options: nestedSelect ? Array.from(nestedSelect.options).map((option) => option.text || option.value).slice(0, 30) : undefined,
+    options: nestedSelect ? Array.from(nestedSelect.options).filter((option) => !option.disabled && !option.closest("optgroup[disabled]")).map((option) => option.text || option.value).slice(0, 30) : undefined,
     isDraggable: isDraggable || undefined,
     isDropTarget: isDropTarget || undefined,
     isFocused: isElementFocused(element),
+    isExpanded: element.hasAttribute("aria-expanded") ? element.getAttribute("aria-expanded") === "true" : undefined,
+    isSelected: element.hasAttribute("aria-selected") ? element.getAttribute("aria-selected") === "true" : undefined,
+    isReadOnly: element.hasAttribute("readonly") || element.getAttribute("aria-readonly") === "true" || nestedInput?.hasAttribute("readonly") || undefined,
     isDisabled: isDisabled(element),
-    isSensitive: false
+    isSensitive: sensitive
   };
 
   rememberElementInfo(info);
@@ -863,7 +964,9 @@ function getFileAccept(element: HTMLElement): string | undefined {
 }
 
 function getSafeValue(element: HTMLElement): string | undefined {
-
+  if (isSensitiveElement(element)) return undefined;
+  if (isTextAreaElement(element)) return element.value.slice(0, 160) || undefined;
+  if (element.isContentEditable) return element.textContent?.slice(0, 160) || undefined;
   if (isSelectElement(element)) {
     return element.selectedOptions[0]?.text || element.value || undefined;
   }
@@ -1072,8 +1175,16 @@ function isDisabled(element: HTMLElement): boolean {
   return element.getAttribute("aria-disabled") === "true";
 }
 
-export function isSensitiveElement(_element: HTMLElement): boolean {
-  return false;
+export function isSensitiveElement(element: HTMLElement): boolean {
+  const controls = [element, ...element.querySelectorAll("input,textarea,[contenteditable='true']")];
+  return controls.some((control) => {
+    if (control.getAttribute("type")?.toLowerCase() === "password") return true;
+    const autocomplete = (control.getAttribute("autocomplete") || "").toLowerCase();
+    if (/(?:^|\s)(?:current-password|new-password|one-time-code|cc-[\w-]+)(?:\s|$)/.test(autocomplete)) return true;
+    const identity = [control.id, control.getAttribute("name"), control.getAttribute("aria-label"), control.getAttribute("placeholder")]
+      .filter(Boolean).join(" ").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+    return /password|passphrase|one.?time.?code|\botp\b|\b(?:cvv|cvc|ssn)\b|credit.?card|card.?number|social.?security|api.?key|private.?key|secret|auth.?token/.test(identity);
+  });
 }
 
 function getPrimaryTextEditableDescendant(element: HTMLElement): HTMLElement | undefined {

@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentChatMessage, AgentSettings, RunReport } from "./types";
+import { DEFAULT_JEV_PROFILE_ID, DEFAULT_JEV_PROFILE_NAME } from "./defaults";
 import {
+  applyConfigurationProfile,
   clearChatMessages,
+  deleteConfigurationProfile,
   importConfigurationProfiles,
   loadChatSuggestions,
   loadChatMessages,
@@ -63,6 +66,40 @@ afterEach(() => {
 });
 
 describe("settings persistence", () => {
+  it("preserves provider defaults until thinking is explicitly disabled", async () => {
+    expect((await loadSettings()).disableThinking).toBe(false);
+    await saveSettings({ ...PROFILE_SETTINGS, disableThinking: true });
+    expect((await loadSettings()).disableThinking).toBe(true);
+    await saveSettings({ ...PROFILE_SETTINGS, disableThinking: false });
+    expect((await loadSettings()).disableThinking).toBe(false);
+    stored.byokAgentSettings = { ...PROFILE_SETTINGS, disableThinking: "true" };
+    expect((await loadSettings()).disableThinking).toBe(false);
+  });
+
+  it.each(["", "jev-key"])("preserves Jev Only even when its key is %j", async (apiKey) => {
+    await saveSettings({ ...PROFILE_SETTINGS, jev: { mode: "only", apiKey } });
+    expect((await loadSettings()).jev).toEqual({ mode: "only", apiKey });
+    const profiles = await saveConfigurationProfile("Jev Only", { ...PROFILE_SETTINGS, jev: { mode: "only", apiKey } });
+    const imported = await importConfigurationProfiles(JSON.parse(serializeConfigurationProfiles(profiles.filter((profile) => profile.id !== DEFAULT_JEV_PROFILE_ID))));
+    const profile = imported.profiles.find((entry) => imported.importedIds.includes(entry.id))!;
+    expect(profile.jev).toEqual({ mode: "only", apiKey });
+    expect(applyConfigurationProfile(PROFILE_SETTINGS, profile).jev?.mode).toBe("only");
+  });
+
+  it("defaults Jev off and round-trips its separate key and mode", async () => {
+    expect((await loadSettings()).jev).toEqual({ mode: "off", apiKey: "" });
+    await saveSettings({ ...PROFILE_SETTINGS, jev: { mode: "shadow", apiKey: " jev-key " } });
+    expect((await loadSettings()).jev).toEqual({ mode: "shadow", apiKey: "jev-key" });
+    expect((await loadSettings()).apiKey).toBe(PROFILE_SETTINGS.apiKey);
+  });
+
+  it("does not enable Jev for invalid settings or an absent key", async () => {
+    stored.byokAgentSettings = { jev: { mode: "unknown", apiKey: "jev-key" } };
+    expect((await loadSettings()).jev?.mode).toBe("off");
+    await saveSettings({ ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "" } });
+    expect((await loadSettings()).jev?.mode).toBe("off");
+  });
+
   it("preserves a 60-second model timeout", async () => {
     await saveSettings({ ...PROFILE_SETTINGS, requestTimeoutSeconds: 60 });
 
@@ -81,6 +118,7 @@ describe("run report persistence", () => {
       evidence: [],
       findings: [],
       usage: {
+        jev: { requests: 2, helperRequests: 1, lastDecision: [{ question: "operation", choice: "click", confidence: 0.99, probabilities: [{ option: "click", probability: 0.99 }] }], fastDecisions: 1, shadowDecisions: 0, fallbacks: 1, inputTokens: 200, outputTokens: 20, totalLatencyMs: 400, estimatedCostUsd: 0.0000084 },
         requestCount: 0,
         successfulRequestCount: 0,
         cacheHitRequestCount: 0,
@@ -100,6 +138,7 @@ describe("run report persistence", () => {
     expect(reloaded).toHaveLength(1);
     expect(reloaded[0].id).toBe("task-1");
     expect(reloaded[0].status).toBe("running");
+    expect(reloaded[0].usage.jev).toEqual(report.usage.jev);
 
     await markInterruptedRunReports(20);
     const recovered = await loadRunReports();
@@ -165,6 +204,63 @@ describe("chat suggestion persistence", () => {
 });
 
 describe("configuration profile persistence", () => {
+  it("round-trips disabled thinking through save, update, import, and apply", async () => {
+    const settings: AgentSettings = { ...PROFILE_SETTINGS, disableThinking: true };
+    const saved = await saveConfigurationProfile("No thinking", settings);
+    const profile = saved.find((entry) => entry.name === "No thinking")!;
+    expect(profile.disableThinking).toBe(true);
+    const imported = await importConfigurationProfiles(JSON.parse(serializeConfigurationProfiles([profile])));
+    const copy = imported.profiles.find((entry) => imported.importedIds.includes(entry.id))!;
+    expect(copy.disableThinking).toBe(true);
+    expect(applyConfigurationProfile(PROFILE_SETTINGS, copy).disableThinking).toBe(true);
+    expect(applyConfigurationProfile(settings, { ...copy, disableThinking: undefined }).disableThinking).toBe(false);
+    const updated = await updateConfigurationProfile(profile.id, { ...settings, disableThinking: false });
+    expect(updated.find((entry) => entry.id === profile.id)?.disableThinking).toBe(false);
+    expect(applyConfigurationProfile(settings, (await loadConfigurationProfiles()).find((entry) => entry.id === DEFAULT_JEV_PROFILE_ID)!).disableThinking).toBe(true);
+  });
+
+  it("creates one permanent Jev profile and retains an existing TypeSafe key", async () => {
+    await saveSettings({ ...PROFILE_SETTINGS, jev: { mode: "only", apiKey: "existing-jev-key" } });
+    const first = await loadConfigurationProfiles();
+    const second = await loadConfigurationProfiles();
+    expect(first).toHaveLength(1);
+    expect(second).toEqual(first);
+    expect(first[0]).toMatchObject({ id: DEFAULT_JEV_PROFILE_ID, name: DEFAULT_JEV_PROFILE_NAME, apiKey: "", jev: { mode: "only", apiKey: "existing-jev-key" } });
+    await expect(deleteConfigurationProfile(DEFAULT_JEV_PROFILE_ID)).rejects.toThrow("cannot be deleted");
+    expect(await loadConfigurationProfiles()).toHaveLength(1);
+  });
+
+  it("updates and reloads the default Jev config without replacing LLM credentials", async () => {
+    const first = (await loadConfigurationProfiles())[0];
+    await updateConfigurationProfile(DEFAULT_JEV_PROFILE_ID, { ...PROFILE_SETTINGS, jev: { mode: "only", apiKey: "new-jev-key" } });
+    const profile = (await loadConfigurationProfiles()).find((entry) => entry.id === DEFAULT_JEV_PROFILE_ID)!;
+    expect(profile).toMatchObject({ id: first.id, name: first.name, createdAt: first.createdAt, apiKey: "", jev: { mode: "only", apiKey: "new-jev-key" } });
+    expect(applyConfigurationProfile(PROFILE_SETTINGS, profile)).toEqual({ ...PROFILE_SETTINGS, jev: { mode: "only", apiKey: "new-jev-key" } });
+    await expect(updateConfigurationProfile(DEFAULT_JEV_PROFILE_ID, PROFILE_SETTINGS)).rejects.toThrow("Select Jev Only");
+  });
+
+  it("exports and imports the Jev config without overwriting the default identity", async () => {
+    const profiles = await updateConfigurationProfile(DEFAULT_JEV_PROFILE_ID, { ...PROFILE_SETTINGS, jev: { mode: "only", apiKey: "jev-export-key" } });
+    const imported = await importConfigurationProfiles(JSON.parse(serializeConfigurationProfiles(profiles)));
+    expect(imported.importedIds).toHaveLength(1);
+    expect(imported.importedIds).not.toContain(DEFAULT_JEV_PROFILE_ID);
+    expect(imported.profiles.filter((profile) => profile.id === DEFAULT_JEV_PROFILE_ID)).toHaveLength(1);
+    expect(imported.profiles.find((profile) => imported.importedIds.includes(profile.id))?.jev).toEqual({ mode: "only", apiKey: "jev-export-key" });
+  });
+
+  it("round-trips Jev in profiles and disables it when applying a legacy profile", async () => {
+    const settings: AgentSettings = { ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "jev-key" } };
+    const saved = await saveConfigurationProfile("Jev", settings);
+    expect(saved[0].jev).toEqual(settings.jev);
+    const exported = serializeConfigurationProfiles(saved.filter((profile) => profile.id !== DEFAULT_JEV_PROFILE_ID));
+    expect(exported).toContain("jev-key");
+    const imported = await importConfigurationProfiles(JSON.parse(exported));
+    const profile = imported.profiles.find((entry) => imported.importedIds.includes(entry.id));
+    expect(profile?.jev).toEqual(settings.jev);
+    expect(applyConfigurationProfile(PROFILE_SETTINGS, saved[0]).jev).toEqual(settings.jev);
+    expect(applyConfigurationProfile(settings, { ...saved[0], jev: undefined }).jev).toEqual({ mode: "off", apiKey: "" });
+  });
+
   it("updates a selected profile while preserving its identity and name", async () => {
     const saved = await saveConfigurationProfile("Work", PROFILE_SETTINGS);
     const original = saved[0];
@@ -175,7 +271,7 @@ describe("configuration profile persistence", () => {
       model: "new-model",
     });
 
-    expect(updated).toHaveLength(1);
+    expect(updated).toHaveLength(2);
     expect(updated[0]).toMatchObject({
       id: original.id,
       name: "Work",
@@ -187,7 +283,7 @@ describe("configuration profile persistence", () => {
 
   it("exports API keys and imports name conflicts as renamed copies", async () => {
     const saved = await saveConfigurationProfile("Work", PROFILE_SETTINGS);
-    const exported = serializeConfigurationProfiles(saved, "2026-08-18T00:00:00.000Z");
+    const exported = serializeConfigurationProfiles(saved.filter((profile) => profile.id !== DEFAULT_JEV_PROFILE_ID), "2026-08-18T00:00:00.000Z");
     expect(exported).toContain("secret-key");
 
     const firstImport = await importConfigurationProfiles(JSON.parse(exported));
@@ -196,8 +292,8 @@ describe("configuration profile persistence", () => {
 
     const secondImport = await importConfigurationProfiles(JSON.parse(exported));
     expect(secondImport.profiles.map((profile) => profile.name)).toContain("Work (imported 2)");
-    expect(new Set(secondImport.profiles.map((profile) => profile.id)).size).toBe(3);
-    expect((await loadConfigurationProfiles()).map((profile) => profile.apiKey))
+    expect(new Set(secondImport.profiles.map((profile) => profile.id)).size).toBe(4);
+    expect((await loadConfigurationProfiles()).filter((profile) => profile.id !== DEFAULT_JEV_PROFILE_ID).map((profile) => profile.apiKey))
       .toEqual(["secret-key", "secret-key", "secret-key"]);
   });
 

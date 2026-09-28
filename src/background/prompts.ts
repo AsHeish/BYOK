@@ -8,7 +8,7 @@ import type {
 import { MAX_TRACKED_TABS } from "../shared/defaults";
 import type { ChatMessage, ChatMessageContent } from "./modelClient";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.2.2";
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.2.24";
 const MAX_ACTIONS_PER_RESPONSE = 10;
 const MAX_OBSERVATION_INPUT_TOKENS = 4000;
 const APPROX_CHARS_PER_TOKEN = 4;
@@ -69,9 +69,13 @@ export function buildAgentMessages(args: {
   stagedFile?: PromptStagedFileInfo;
   downloads?: PromptDownloadInfo[];
   allowChatMode?: boolean;
+  allowJevNavigation?: boolean;
 }): ChatMessage[] {
   const currentContext = [
     formatAllowedResponseModes(Boolean(args.allowChatMode)),
+    args.allowJevNavigation
+      ? "Optional Jev navigation delegation: only with mode=browser, risk_level=low, and one navigate or open_tab action, you may add top-level navigationGoal (at most 500 characters) describing the NEXT public documentation/article link to find after this action. The extension may follow one same-origin public-content link before returning control to you. Delegate only an unambiguous read-only browsing goal, never form entry, account changes, transactions, downloads, or completion. Omit navigationGoal when the destination already contains the needed information or more reasoning is required."
+      : "",
     `Step: ${args.step} of ${args.maxSteps}`,
     args.tabs?.length
       ? `Tabs owned by this agent run (the only tabs you can use):\n${formatTabs(args.tabs, args.activeTabAlias)}`
@@ -138,6 +142,7 @@ export function buildAgentMessages(args: {
         "- Use list_downloads to inspect recent browser downloads. Use summarize_pdf for PDFs from a staged file, a PDF URL, a downloadId, or the current PDF tab.",
         "- For a normal web page summary, use summarize_page or return done with the summary in action.text when the current observation already has enough text.",
         "- Use read_page when you need the full prose of the current page. It returns cleaned Markdown once on the next step; structured tables, links, and forms remain available through extract.",
+        "- read_page does not scroll or reveal new actionable element IDs. Do not repeat it to move around a form. Use scroll or PageUp/PageDown and then inspect the fresh observation.",
         "- Use inspect_screenshot only when the DOM observation is insufficient for visual layout, charts, canvas, diagrams, or icon-only controls. It attaches one screenshot of the active agent-owned tab on the next step.",
         "- Never use inspect_screenshot merely to read prose; use read_page. If vision is unavailable, continue with DOM/read_page or explain the limitation.",
         "- Use wait_for instead of guessing delays. Set waitCondition to document_ready, dom_stable, url_changed, text_present, text_absent, element_hidden, or element_enabled; include text or elementId when required and optional timeoutMs up to 15000.",
@@ -171,12 +176,14 @@ export function buildAgentMessages(args: {
         "- When multiple fields have the same label, use each element's problem and context fields to decide which question it belongs to. Do not rely only on repeated labels like \"Your Submission\".",
         "- Do not copy the same option number into multiple questions unless each field's own context independently supports that answer.",
         "- Do not fill any field that already has a non-empty value in the observation, even if the value differs from the answer you planned. Move to the next empty field or finish.",
-        "- If the previous action result says a field was skipped because it already has a value or was skipped and advanced, never retry that same element. Use the element marked focused=true, choose the next empty field, or return done.",
+        "- A skipped or repeated fill does not press Tab or advance focus. Choose the next empty field from the current observation explicitly.",
         "- The previous action result lists what was actually completed. Continue from the last completed action; do not repeat completed or skipped actions.",
         "- If the previous action result says the target element is no longer available, do not retry that stale elementId. Use the refreshed observation and pick a current element ID.",
+        "- Never guess a field ID from earlier steps, question order, or ID numbering. Match each current field's problem/context to the intended question. If the needed field is above or below the viewport, scroll there first.",
         "- If the previous action result says the target is not editable, do not retry the same wrapper. Use the refreshed focused element or an empty fillable control from the page state summary.",
         "- If the previous action result says an action likely changed the page before the content script replied, treat it as a navigation/page-change recovery. Continue from the refreshed current page and do not repeat that click unless still visibly needed.",
         "- If the user asks to keep pressing Tab or move to the next input, use press_key with key=\"Tab\". The next observation will mark the newly focused element with focused=true.",
+        "- To move up or down the page, use scroll with direction=up/down or press_key with PageUp/PageDown. Tab changes focus; it is not a page-scrolling substitute.",
         "",
         "Allowed action schema:",
         "Return either action for one action or actions for an ordered batch. Do not include both unless actions is the intended plan.",
@@ -192,7 +199,7 @@ export function buildAgentMessages(args: {
         "For list_downloads, optional maxItems controls the number of recent downloads to list.",
         "For fill and type, set elementId and text. Use fill for normal form input because it combines click/focus and typing.",
         "For a select/combobox with options, use select with elementId and text set to the exact visible option text. A leading option number such as 1 or 2 is also accepted when the options are numbered.",
-        "For press_key, set key to Tab or Shift+Tab.",
+        "For press_key, set key to Tab, Shift+Tab, PageUp, or PageDown. PageUp/PageDown scroll the active scroll container without advancing field focus. Unsupported keys are rejected, not substituted.",
         "For go_back, no elementId or url is needed.",
         "For open_tab, set url. The new tab becomes active and receives the next tab alias.",
         "For switch_tab and close_tab, set tabAlias such as \"tab-2\". For reload, tabAlias is optional and defaults to the active tab.",

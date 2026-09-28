@@ -1,4 +1,4 @@
-import { extractPageData, findMappedElementReplacement, getMappedElement, observePage } from "./domMap";
+import { extractPageData, getDocumentId, getElementFingerprint, getFormStateFingerprint, getMappedElement, getScrollContainer, observePage } from "./domMap";
 import type { AgentAction, ContentActionResult } from "../shared/types";
 
 type ElementLookup = { ok: true; value: HTMLElement } | { ok: false; message: string; recoverable?: boolean };
@@ -23,6 +23,7 @@ type HtmlConstructorName =
 
 type QueryRoot = Document | ShadowRoot;
 const STAGED_UPLOAD_FILE_KEY = "byokAgentStagedUploadFile";
+const consumedGuards = new Set<string>();
 
 const textEditableSelector = [
   "input:not([type='hidden']):not([type='button']):not([type='submit']):not([type='reset']):not([type='checkbox']):not([type='radio']):not([type='file'])",
@@ -70,34 +71,39 @@ const editableContextSelector = [
 ].join(",");
 
 export async function executeAction(action: AgentAction): Promise<ContentActionResult> {
+  if (action.guard) {
+    const refusal = validateActionGuard(action);
+    if (refusal) return { ok: false, recoverable: true, notExecuted: true, message: refusal };
+    consumedGuards.add(action.guard.id);
+  }
   switch (action.type) {
     case "click":
-      return withFreshObservation(clickElement(action.elementId));
+      return withFreshObservation(clickElement(action.elementId), action);
 
     case "multi_click":
-      return withFreshObservation(clickMultipleElements(action.elementIds));
+      return withFreshObservation(clickMultipleElements(action.elementIds), action);
 
     case "drag":
-      return withFreshObservation(dragElementToTarget(action.elementId, action.targetElementId));
+      return withFreshObservation(dragElementToTarget(action.elementId, action.targetElementId), action);
 
     case "multi_drag":
-      return withFreshObservation(dragMultipleElementsToTargets(action.dragPairs));
+      return withFreshObservation(dragMultipleElementsToTargets(action.dragPairs), action);
 
     case "upload_file":
       return withFreshObservation(uploadStagedFile(action.elementId, action.fileId));
 
     case "fill":
     case "type":
-      return withFreshObservation(typeIntoElement(action.elementId, action.text || ""));
+      return withFreshObservation(typeIntoElement(action.elementId, action.text || "", action), action);
 
     case "select":
-      return withFreshObservation(selectOption(action.elementId, action.text || ""));
+      return withFreshObservation(selectOption(action.elementId, action.text || ""), action);
 
     case "press_key":
-      return withFreshObservation(pressKey(action.key || action.text || "Tab", action.elementId));
+      return withFreshObservation(pressKey(action.key || action.text || "", action.elementId), action);
 
     case "scroll":
-      return withFreshObservation(scrollPage(action.direction || "down"));
+      return withFreshObservation(scrollPage(action.direction || "down"), action);
 
     case "navigate":
       return navigateTo(action.url);
@@ -126,8 +132,66 @@ export async function executeAction(action: AgentAction): Promise<ContentActionR
   }
 }
 
+function validateActionGuard(action: AgentAction, afterFocus = false): string | undefined {
+  const guard = action.guard!;
+  if (!afterFocus && consumedGuards.has(guard.id)) return "This action was already attempted. Observe before choosing another action.";
+  if (guard.documentId !== getDocumentId() || guard.url !== location.href) return "The document changed. Observe before acting.";
+  if (guard.formState && guard.formState !== getFormStateFingerprint()) return "Form values changed. Observe before acting.";
+  const targetIds = [action.elementId, ...(action.elementIds || []), action.targetElementId,
+    ...(action.dragPairs || []).flatMap((pair) => [pair.elementId, pair.targetElementId])].filter((id): id is string => Boolean(id));
+  for (const id of targetIds) {
+    const target = getMappedElement(id);
+    if (!target?.isConnected || !guard.targets[id] || getElementFingerprint(target) !== guard.targets[id]) {
+      return "The selected target or its context changed. Observe before acting.";
+    }
+    const choiceClick = (action.type === "click" || action.type === "multi_click")
+      && isInputElement(target) && (target.type === "radio" || target.type === "checkbox");
+    const surface = choiceClick ? getChoiceClickSurface(target) : target;
+    if (isDisabled(target) || !isVisibleElement(surface)
+      || target.closest('[inert],[aria-hidden="true"],[aria-disabled="true"]')) {
+      return "The selected target is not available for automatic interaction.";
+    }
+    if ((action.type === "fill" || action.type === "type") && (target.hasAttribute("readonly") || target.getAttribute("aria-readonly") === "true")) {
+      return "The selected field is read-only.";
+    }
+    const view = target.ownerDocument.defaultView;
+    if (!view) return "The target document is no longer available.";
+    let rect = surface.getBoundingClientRect();
+    if (rect.left + rect.width / 2 < 0 || rect.top + rect.height / 2 < 0
+      || rect.left + rect.width / 2 >= view.innerWidth || rect.top + rect.height / 2 >= view.innerHeight) {
+      surface.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      rect = surface.getBoundingClientRect();
+      if (!target.isConnected || getElementFingerprint(target) !== guard.targets[id]) return "The selected target changed while scrolling into view.";
+    }
+    const clientX = rect.left + rect.width / 2;
+    const clientY = rect.top + rect.height / 2;
+    if (clientX < 0 || clientY < 0 || clientX >= view.innerWidth || clientY >= view.innerHeight) {
+      return "The selected target is outside the viewport.";
+    }
+    if (view !== window) {
+      const frame = view.frameElement;
+      if (!frame?.isConnected) return "The target frame changed.";
+      const frameRect = frame.getBoundingClientRect();
+      if (frame.ownerDocument.elementFromPoint(frameRect.left + frameRect.width / 2, frameRect.top + frameRect.height / 2) !== frame) {
+        return "The target frame is covered by another element.";
+      }
+    }
+    let hit = target.ownerDocument.elementFromPoint(clientX, clientY);
+    while (hit?.shadowRoot?.elementFromPoint) {
+      const inner = hit.shadowRoot.elementFromPoint(clientX, clientY);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    const hitLabel = hit?.closest("label");
+    const associatedLabelHit = choiceClick && hitLabel && isLabelElement(hitLabel) && hitLabel.control === target;
+    if (!hit || (!target.contains(hit) && !associatedLabelHit)) return "The selected target is covered by another element.";
+  }
+  return undefined;
+}
+
 async function withFreshObservation(
-  resultOrPromise: ContentActionResult | Promise<ContentActionResult>
+  resultOrPromise: ContentActionResult | Promise<ContentActionResult>,
+  action?: AgentAction,
 ): Promise<ContentActionResult> {
   const result = await resultOrPromise;
   if (!result.ok) {
@@ -140,11 +204,41 @@ async function withFreshObservation(
     return result;
   }
 
-  await sleep(120);
+  if (action?.guard) await waitForInteraction(action);
+  else await sleep(120);
   return {
     ...result,
     observation: observePage()
   };
+}
+
+async function waitForInteraction(action: AgentAction): Promise<void> {
+  const target = action.elementId ? getMappedElement(action.elementId) : undefined;
+  const owner = target?.ownerDocument || document;
+  const view = owner.defaultView || window;
+  const autocomplete = action.type === "fill" && (target?.getAttribute("role") === "combobox" || target?.hasAttribute("aria-autocomplete"));
+  await new Promise<void>((resolve) => {
+    let frame: number | undefined;
+    let frames = 0;
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      view.clearTimeout(deadline);
+      if (frame !== undefined) view.cancelAnimationFrame(frame);
+      resolve();
+    };
+    const deadline = view.setTimeout(finish, autocomplete ? 200 : 80);
+    const check = () => {
+      frames += 1;
+      const ids = (target?.getAttribute("aria-controls") || target?.getAttribute("aria-owns") || "").split(/\s+/).filter(Boolean);
+      const roots: ParentNode[] = ids.length ? ids.map((id) => owner.getElementById(id)).filter((element): element is HTMLElement => Boolean(element)) : [owner];
+      const ready = !autocomplete || roots.some((root) => Array.from(root.querySelectorAll<HTMLElement>('[role="option"]')).some(isVisibleElement));
+      if (frames >= 2 && ready) finish();
+      else frame = view.requestAnimationFrame(check);
+    };
+    if (typeof view.requestAnimationFrame === "function") frame = view.requestAnimationFrame(check);
+  });
 }
 
 function clickElement(elementId?: string): ContentActionResult {
@@ -341,7 +435,7 @@ async function uploadStagedFile(elementId: string | undefined, fileId: string | 
   };
 }
 
-async function typeIntoElement(elementId: string | undefined, text: string): Promise<ContentActionResult> {
+async function typeIntoElement(elementId: string | undefined, text: string, action?: AgentAction): Promise<ContentActionResult> {
   const lookup = requireElement(elementId);
   if (!lookup.ok) {
     return lookup;
@@ -354,6 +448,13 @@ async function typeIntoElement(elementId: string | undefined, text: string): Pro
   }
 
   const editable = await resolveTextEditableTarget(element);
+
+  if (action?.guard) {
+    const refusal = validateActionGuard(action, true);
+    if (refusal || (editable && (editable.hasAttribute("readonly") || editable.getAttribute("aria-readonly") === "true"))) {
+      return { ok: false, recoverable: true, message: refusal || "The focused field is read-only. Nothing was typed." };
+    }
+  }
 
   if (!editable) {
     return {
@@ -482,12 +583,9 @@ function normalizeTypedValue(value: string): string {
 }
 
 function skipAlreadyFilledField(editable: TextEditableElement): ContentActionResult {
-  const nextElement = focusAdjacentElement(false, editable.ownerDocument);
-  const advanceMessage = nextElement ? ` Focused next field ${describeElement(nextElement)}.` : "";
-
   return {
     ok: true,
-    message: `Skipped typing because ${describeElement(editable)} already has a value.${advanceMessage}`
+    message: `Skipped typing because ${describeElement(editable)} already has a value. No automatic Tab or focus advance was performed.`
   };
 }
 
@@ -829,8 +927,14 @@ async function pressKey(key: string, startingElementId?: string): Promise<Conten
   if (!normalizedKey) {
     return {
       ok: false,
-      message: "Only Tab and Shift+Tab key actions are supported."
+      recoverable: true,
+      notExecuted: true,
+      message: "Unsupported or missing key. Use Tab, Shift+Tab, PageUp, or PageDown. No other key was substituted."
     };
+  }
+
+  if (normalizedKey === "PageUp" || normalizedKey === "PageDown") {
+    return scrollPage(normalizedKey === "PageUp" ? "up" : "down");
   }
 
   const startingElementResult = focusStartingElement(startingElementId);
@@ -878,7 +982,7 @@ function focusStartingElement(elementId?: string): ContentActionResult {
   };
 }
 
-function normalizeSupportedKey(key: string): "Tab" | "Shift+Tab" | undefined {
+function normalizeSupportedKey(key: string): AgentAction["key"] | undefined {
   const normalized = key.trim().toLowerCase().replace(/\s+/g, "");
   if (normalized === "tab") {
     return "Tab";
@@ -886,6 +990,8 @@ function normalizeSupportedKey(key: string): "Tab" | "Shift+Tab" | undefined {
   if (normalized === "shift+tab" || normalized === "shifttab") {
     return "Shift+Tab";
   }
+  if (normalized === "pageup" || normalized === "pgup") return "PageUp";
+  if (normalized === "pagedown" || normalized === "pgdn") return "PageDown";
   return undefined;
 }
 
@@ -981,7 +1087,7 @@ function selectOption(elementId: string | undefined, text: string): ContentActio
 }
 
 function selectOptionFromElement(element: HTMLSelectElement, text: string): ContentActionResult {
-  const options = Array.from(element.options).filter((candidate) => !candidate.disabled);
+  const options = Array.from(element.options).filter((candidate) => !candidate.disabled && !candidate.closest("optgroup[disabled]"));
   const normalizedText = normalizeSelectOptionText(text);
   const option =
     options.find(
@@ -1146,7 +1252,10 @@ function dispatchMouseDragEvent(
 }
 
 function scrollPage(direction: NonNullable<AgentAction["direction"]>): ContentActionResult {
-  const amount = Math.max(320, Math.floor(window.innerHeight * 0.75));
+  const container = getScrollContainer(direction);
+  const view = container.ownerDocument.defaultView || window;
+  const horizontal = direction === "left" || direction === "right";
+  const amount = Math.max(120, Math.floor((horizontal ? container.clientWidth || view.innerWidth : container.clientHeight || view.innerHeight) * 0.75));
   const delta = {
     up: { top: -amount, left: 0 },
     down: { top: amount, left: 0 },
@@ -1154,10 +1263,18 @@ function scrollPage(direction: NonNullable<AgentAction["direction"]>): ContentAc
     right: { top: 0, left: amount }
   }[direction];
 
-  window.scrollBy({ ...delta, behavior: "smooth" });
+  const beforeX = container.scrollLeft;
+  const beforeY = container.scrollTop;
+  container.scrollBy({ ...delta, behavior: "instant" });
+  const moved = Math.abs(container.scrollLeft - beforeX) > 0 || Math.abs(container.scrollTop - beforeY) > 0;
+  const label = container.getAttribute("aria-label") || container.id || container.tagName.toLowerCase();
   return {
-    ok: true,
-    message: `Scrolled ${direction}.`
+    ok: moved,
+    recoverable: !moved,
+    notExecuted: !moved,
+    message: moved
+      ? `Scrolled ${direction} in ${label}: x=${Math.round(container.scrollLeft)}, y=${Math.round(container.scrollTop)}.`
+      : `No scroll movement ${direction} in ${label}; this container is at its edge or cannot scroll. Choose another visible control instead of repeating the same scroll.`,
   };
 }
 
@@ -1202,7 +1319,7 @@ function requireElement(elementId?: string): ElementLookup {
   }
 
   const element = getMappedElement(elementId);
-  const currentElement = element?.isConnected ? element : findMappedElementReplacement(elementId);
+  const currentElement = element?.isConnected ? element : undefined;
   if (!currentElement?.isConnected) {
     return {
       ok: false,
@@ -1255,10 +1372,12 @@ function describeElement(element: HTMLElement): string {
 
 function activateElement(element: HTMLElement): void {
   const target = getBestActivationTarget(element);
-  prepareElement(target);
+  const surface = getChoiceClickSurface(target);
+  prepareElement(surface);
 
   if (isInputElement(target) && (target.type === "checkbox" || target.type === "radio")) {
-    dispatchPointerSequence(target);
+    if (surface !== target) target.focus({ preventScroll: true });
+    dispatchPointerSequence(surface);
     target.click();
     setNativeChecked(target, true);
     dispatchFormEvents(target);
@@ -1267,6 +1386,12 @@ function activateElement(element: HTMLElement): void {
 
   dispatchPointerSequence(target);
   target.click();
+}
+
+function getChoiceClickSurface(element: HTMLElement): HTMLElement {
+  if (!isInputElement(element) || (element.type !== "radio" && element.type !== "checkbox") || isVisibleElement(element)) return element;
+  return Array.from(element.labels || []).find((label) => label.control === element && isVisibleElement(label)
+    && !label.closest('[inert],[aria-hidden="true"],[aria-disabled="true"]')) || element;
 }
 
 function isAlreadySelectedChoice(element: HTMLElement): boolean {
@@ -1316,7 +1441,7 @@ function dispatchPointerSequence(element: HTMLElement): void {
     clientY,
     button: 0,
     buttons: 1,
-    view: window
+    view: element.ownerDocument.defaultView
   };
 
   element.dispatchEvent(new PointerEvent("pointerdown", eventInit));
