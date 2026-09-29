@@ -1,7 +1,5 @@
 import {
   DEFAULT_CHAT_SUGGESTIONS,
-  DEFAULT_JEV_PROFILE_ID,
-  DEFAULT_JEV_PROFILE_NAME,
   DEFAULT_SETTINGS,
   MAX_CHAT_MESSAGES,
   MAX_CHAT_SUGGESTIONS,
@@ -15,6 +13,7 @@ import type {
   AiConfigurationProfile,
   JevSettings,
   JevUsageSnapshot,
+  OpenAiApi,
   PromptCacheMode,
   Provider,
   RequirementStatus,
@@ -32,6 +31,8 @@ const TASK_DRAFT_KEY = "byokAgentTaskDraft";
 const CHAT_MESSAGES_KEY = "byokAgentChatMessages";
 const CHAT_SUGGESTIONS_KEY = "byokAgentChatSuggestions";
 const CONFIG_PROFILES_KEY = "byokAgentConfigProfiles";
+// Placeholder profile seeded by retired Jev Only builds; never shown or imported.
+const LEGACY_JEV_PROFILE_ID = "profile-jev-default";
 const STAGED_UPLOAD_FILE_KEY = "byokAgentStagedUploadFile";
 export const RUN_REPORTS_KEY = "byokAgentRunReports";
 const MIN_MAX_STEPS = 1;
@@ -69,12 +70,18 @@ function normalizePromptCacheMode(value: unknown): PromptCacheMode {
   return DEFAULT_SETTINGS.promptCacheMode;
 }
 
+function normalizeOpenAiApi(value: unknown): OpenAiApi | undefined {
+  return value === "responses" || value === "chat" ? value : undefined;
+}
+
 function normalizeJevSettings(value: unknown): JevSettings {
   const raw = value && typeof value === "object" ? value as Partial<JevSettings> : {};
   const apiKey = typeof raw.apiKey === "string" ? raw.apiKey.trim() : "";
   return {
     apiKey,
-    mode: raw.mode === "only" ? "only" : apiKey && (raw.mode === "shadow" || raw.mode === "fast") ? raw.mode : "off",
+    mode: apiKey && (raw.mode === "shadow" || raw.mode === "fast") ? raw.mode
+      // Retired Jev Only settings keep Jev active as Fast.
+      : apiKey && (raw.mode as string) === "only" ? "fast" : "off",
   };
 }
 
@@ -113,6 +120,7 @@ export async function loadSettings(): Promise<AgentSettings> {
     ),
     apiKey: String(raw?.apiKey || ""),
     model: String(raw?.model || DEFAULT_SETTINGS.model),
+    openAiApi: normalizeOpenAiApi(raw?.openAiApi),
     maxSteps: normalizeStoredMaxSteps(raw?.maxSteps),
     requestTimeoutSeconds: Math.min(
       Math.max(
@@ -142,6 +150,7 @@ export async function saveSettings(settings: AgentSettings): Promise<void> {
     [SETTINGS_KEY]: {
       ...settings,
       apiBaseUrl: settings.apiBaseUrl.replace(/\/+$/, ""),
+      openAiApi: normalizeOpenAiApi(settings.openAiApi),
       maxSteps: clampMaxSteps(settings.maxSteps),
       requestTimeoutSeconds: Math.min(
         Math.max(settings.requestTimeoutSeconds, MIN_REQUEST_TIMEOUT_SECONDS),
@@ -271,23 +280,7 @@ export async function loadConfigurationProfiles(): Promise<
   AiConfigurationProfile[]
 > {
   const stored = await chrome.storage.local.get(CONFIG_PROFILES_KEY);
-  const profiles = normalizeProfiles(stored[CONFIG_PROFILES_KEY]);
-  const existing = profiles.find((profile) => profile.id === DEFAULT_JEV_PROFILE_ID);
-  if (existing) {
-    return [
-      ...profiles.filter((profile) => profile.id !== DEFAULT_JEV_PROFILE_ID),
-      { ...existing, name: DEFAULT_JEV_PROFILE_NAME, apiKey: "", jev: { mode: "only", apiKey: existing.jev?.apiKey || "" } },
-    ];
-  }
-  const settings = await loadSettings();
-  const defaultProfile = createConfigurationProfile(DEFAULT_JEV_PROFILE_NAME, {
-    ...DEFAULT_SETTINGS,
-    jev: { mode: "only", apiKey: settings.jev?.apiKey || "" },
-  });
-  defaultProfile.id = DEFAULT_JEV_PROFILE_ID;
-  const nextProfiles = [...profiles, defaultProfile];
-  await chrome.storage.local.set({ [CONFIG_PROFILES_KEY]: nextProfiles });
-  return nextProfiles;
+  return normalizeProfiles(stored[CONFIG_PROFILES_KEY]);
 }
 
 export async function saveConfigurationProfile(
@@ -303,9 +296,6 @@ export async function saveConfigurationProfile(
   const existing = profiles.find(
     (profile) => profile.name.toLowerCase() === trimmedName.toLowerCase(),
   );
-  if (existing?.id === DEFAULT_JEV_PROFILE_ID) {
-    return updateConfigurationProfile(existing.id, settings);
-  }
   const savedProfile = createConfigurationProfile(trimmedName, settings, existing);
 
   const nextProfiles = existing
@@ -330,13 +320,7 @@ export async function updateConfigurationProfile(
     throw new Error("Choose a saved profile first.");
   }
 
-  if (profileId === DEFAULT_JEV_PROFILE_ID && settings.jev?.mode !== "only") {
-    throw new Error("Select Jev Only before updating its default profile.");
-  }
-  const profileSettings = profileId === DEFAULT_JEV_PROFILE_ID
-    ? { ...DEFAULT_SETTINGS, jev: { mode: "only" as const, apiKey: settings.jev?.apiKey || "" } }
-    : settings;
-  const updatedProfile = createConfigurationProfile(existing.name, profileSettings, existing);
+  const updatedProfile = createConfigurationProfile(existing.name, settings, existing);
   const nextProfiles = profiles.map((profile) =>
     profile.id === profileId ? updatedProfile : profile,
   );
@@ -402,9 +386,6 @@ export async function importConfigurationProfiles(
 export async function deleteConfigurationProfile(
   profileId: string,
 ): Promise<AiConfigurationProfile[]> {
-  if (profileId === DEFAULT_JEV_PROFILE_ID) {
-    throw new Error("The default Jev profile cannot be deleted.");
-  }
   const profiles = await loadConfigurationProfiles();
   const nextProfiles = profiles.filter((profile) => profile.id !== profileId);
   await chrome.storage.local.set({
@@ -417,20 +398,17 @@ export function applyConfigurationProfile(
   settings: AgentSettings,
   profile: AiConfigurationProfile,
 ): AgentSettings {
-  if (profile.id === DEFAULT_JEV_PROFILE_ID || profile.jev?.mode === "only") {
-    return { ...settings, jev: { mode: "only", apiKey: profile.jev?.apiKey || "" } };
-  }
   return {
     ...settings,
     provider: profile.provider,
     apiBaseUrl: profile.apiBaseUrl,
     apiKey: profile.apiKey,
     model: profile.model,
+    openAiApi: normalizeOpenAiApi(profile.openAiApi),
     maxSteps: profile.maxSteps,
     requestTimeoutSeconds: profile.requestTimeoutSeconds,
     promptCacheMode: profile.promptCacheMode,
     disableThinking: profile.disableThinking === true,
-    jev: normalizeJevSettings(profile.jev),
     inputTokenCostPerMillion: profile.inputTokenCostPerMillion,
     cachedInputTokenCostPerMillion: profile.cachedInputTokenCostPerMillion,
     outputTokenCostPerMillion: profile.outputTokenCostPerMillion,
@@ -450,7 +428,7 @@ function normalizeProfiles(value: unknown): AiConfigurationProfile[] {
 
       const raw = profile as Partial<AiConfigurationProfile>;
       const name = String(raw.name || "").trim();
-      if (!name) {
+      if (!name || raw.id === LEGACY_JEV_PROFILE_ID) {
         return undefined;
       }
 
@@ -463,6 +441,7 @@ function normalizeProfiles(value: unknown): AiConfigurationProfile[] {
         ).replace(/\/+$/, ""),
         apiKey: String(raw.apiKey || ""),
         model: String(raw.model || DEFAULT_SETTINGS.model),
+        openAiApi: normalizeOpenAiApi(raw.openAiApi),
         maxSteps: normalizeStoredMaxSteps(raw.maxSteps),
         requestTimeoutSeconds: Math.min(
           Math.max(
@@ -473,7 +452,6 @@ function normalizeProfiles(value: unknown): AiConfigurationProfile[] {
         ),
         promptCacheMode: normalizePromptCacheMode(raw.promptCacheMode),
         disableThinking: raw.disableThinking === true,
-        jev: normalizeJevSettings(raw.jev),
         inputTokenCostPerMillion: normalizeOptionalPrice(raw.inputTokenCostPerMillion),
         cachedInputTokenCostPerMillion: normalizeOptionalPrice(raw.cachedInputTokenCostPerMillion),
         outputTokenCostPerMillion: normalizeOptionalPrice(raw.outputTokenCostPerMillion),
@@ -498,6 +476,7 @@ function createConfigurationProfile(
     apiBaseUrl: settings.apiBaseUrl.replace(/\/+$/, ""),
     apiKey: settings.apiKey,
     model: settings.model,
+    openAiApi: normalizeOpenAiApi(settings.openAiApi),
     maxSteps: clampMaxSteps(settings.maxSteps),
     requestTimeoutSeconds: Math.min(
       Math.max(settings.requestTimeoutSeconds, MIN_REQUEST_TIMEOUT_SECONDS),
@@ -505,7 +484,6 @@ function createConfigurationProfile(
     ),
     promptCacheMode: normalizePromptCacheMode(settings.promptCacheMode),
     disableThinking: settings.disableThinking === true,
-    jev: normalizeJevSettings(settings.jev),
     inputTokenCostPerMillion: normalizeOptionalPrice(settings.inputTokenCostPerMillion),
     cachedInputTokenCostPerMillion: normalizeOptionalPrice(settings.cachedInputTokenCostPerMillion),
     outputTokenCostPerMillion: normalizeOptionalPrice(settings.outputTokenCostPerMillion),
@@ -839,7 +817,6 @@ function normalizeJevUsage(value: unknown): JevUsageSnapshot | undefined {
   const raw = value as Partial<JevUsageSnapshot>;
   return {
     requests: Math.max(0, finiteNumber(raw.requests, 0)),
-    ...(raw.onlyRequests === undefined ? {} : { onlyRequests: Math.max(0, finiteNumber(raw.onlyRequests, 0)) }),
     ...(raw.helperRequests === undefined ? {} : { helperRequests: Math.max(0, finiteNumber(raw.helperRequests, 0)) }),
     ...(Array.isArray(raw.lastDecision) ? { lastDecision: raw.lastDecision.filter((entry) => entry && typeof entry === "object").slice(0, 12).map((entry) => ({
       question: String(entry.question || "").slice(0, 80), choice: String(entry.choice || "").slice(0, 120),

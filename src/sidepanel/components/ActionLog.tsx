@@ -33,6 +33,12 @@ export function ActionLog({ logs }: ActionLogProps) {
             <div className="log-message">
               <Markdown text={entry.message} />
             </div>
+            {entry.details ? (
+              <details className="log-details">
+                <summary>Model output</summary>
+                <pre>{entry.details}</pre>
+              </details>
+            ) : null}
           </li>
         ))}
       </ol>

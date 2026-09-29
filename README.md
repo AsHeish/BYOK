@@ -72,24 +72,25 @@ The side-panel settings support:
 - `apiBaseUrl`: defaults to `https://api.openai.com/v1`, `https://generativelanguage.googleapis.com/v1beta/openai`, or `https://api.groq.com/openai/v1`.
 - `apiKey`: stored with `chrome.storage.local`.
 - `model`: any model name accepted by the configured compatible endpoint.
-- `maxSteps`: maximum observe/act loop iterations for LLM modes, default `60`. Jev Only has no numeric navigation limit.
+- `openAiApi`: with the OpenAI-compatible provider, **OpenAI endpoint** selects Responses (`/responses`) or Chat Completions (`/chat/completions`). Unset, `api.openai.com` uses Responses and other hosts use Chat Completions.
+- `maxSteps`: maximum observe/act loop iterations for the LLM planner, default `60`. Jev Fast phases have no numeric navigation limit.
 - `requestTimeoutSeconds`: AI request timeout per attempt, default `60` seconds.
 - `promptCacheMode`: `auto` selects cache hints by provider and model, `on` forces cache hints, and `off` disables them.
 - `disableThinking`: **Disable model thinking** below Model requests non-thinking generation. It is off by default, preserving the provider's normal behavior, and is saved with each AI profile.
 - Optional token pricing rates: input, cached input, and output USD per 1M tokens for the dashboard cost estimate.
 - `saveRunHistory`: stores sanitized run reports locally; screenshots, uploaded files, form values, and API keys are never included in reports.
-- Named AI profiles: test the current connection, save new profiles, apply or update a selected profile, and delete profiles from Settings. Profiles can be exported and imported as versioned JSON. Exports include API keys in plaintext; imported name conflicts are retained as renamed copies such as `Work (imported)`.
+- Named AI profiles: test the current connection, save new profiles, apply or update a selected profile, and delete profiles from Settings. Profiles can be exported and imported as versioned JSON. Exports include API keys in plaintext; imported name conflicts are retained as renamed copies such as `Work (imported)`. Profiles do not store Jev settings.
 
 The **Save** button is beside **Update** in the profile toolbar. With a matching profile selected, it offers **Save & Update** to persist the current settings and replace that profile's values, **Save Only** to leave the profile unchanged, or **Cancel**. Without a matching profile, Save persists settings directly.
 
 Each task carries the configuration currently shown in the side panel, including unsaved provider changes. The worker uses that snapshot for the entire run, including summaries and completion checks, instead of reloading a different saved provider. Save is still required to retain settings across reloads. Requests from an outdated side panel that omit the configuration are rejected; reload the extension and reopen its side panel after an upgrade.
 
-The extension uses `fetch` from the open side-panel document against `POST {apiBaseUrl}/chat/completions` with OpenAI-compatible chat-completions JSON. Keeping model HTTP outside the Manifest V3 service worker avoids Chrome's 30-second service-worker fetch-response limit. No paid SDK is used.
+The extension uses `fetch` from the open side-panel document against `POST {apiBaseUrl}/responses` (OpenAI Responses JSON) or `POST {apiBaseUrl}/chat/completions` (OpenAI-compatible chat-completions JSON). Keeping model HTTP outside the Manifest V3 service worker avoids Chrome's 30-second service-worker fetch-response limit. No paid SDK is used.
 Each AI request uses the configured timeout. A timed-out step gets up to four attempts. Provider compatibility downgrades for rejected prompt-cache fields and JSON response-format fields use separate bounded retries, so earlier timeouts cannot consume a promised compatibility fallback. Authentication and other non-compatible HTTP failures are returned immediately. Chat shows the active timeout retry and next attempt number, while the action log retains every retry.
 
 ## Model Thinking
 
-Enable **Settings > Disable model thinking**, then use **Test Connection** with the current configuration. **Save** retains the setting; **Save & Update** also updates the selected profile. The option applies to all LLM requests: chat, browser planning, summaries, completion checks, connection tests, and Jev Fast's field-text helper. Jev requests are unchanged, and the control is hidden in Jev Only.
+Enable **Settings > Disable model thinking**, then use **Test Connection** with the current configuration. **Save** retains the setting; **Save & Update** also updates the selected profile. The option applies to all LLM requests: chat, browser planning, summaries, completion checks, connection tests, and Jev Fast's field-text helper. Jev requests are unchanged.
 
 The request parameter depends on the endpoint:
 
@@ -103,19 +104,19 @@ Support depends on the provider, model, and server configuration. Some models re
 
 When an endpoint rejects the parameter, the error is returned; the extension does not remove the setting and silently retry with thinking enabled. Other compatibility retries retain the disabled-thinking parameter. Leave the toggle unchecked for the provider default. See [vLLM reasoning controls](https://docs.vllm.ai/en/latest/features/reasoning_outputs/), [Gemini OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai#thinking), and [OpenRouter reasoning controls](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
 
-## Jev Only
+## Jev Actions
 
-Choose **Provider > Jev Only (browser actions)** for a standalone action controller. Only a TypeSafe API key is required. LLM settings remain saved but hidden. Neither task execution nor connection testing calls an LLM in this mode, and the LLM HTTP boundary rejects accidental calls. A missing TypeSafe key never changes the selected mode.
+Enter a TypeSafe API key under **Settings > Jev actions**. Entering a key selects **Fast**; clearing it turns Jev off. **Off**, **Shadow**, and **Fast** remain available while a key is present. Without a key, Jev is never called and only the LLM runs. An LLM API key and model are always required.
 
-**Jev Only (default)** is always available under saved profiles. Selecting Jev Only selects this profile; enter your TypeSafe key and choose **Save & Update** or **Update** to retain its configuration. The profile has a stable identity, cannot be deleted or overwritten with an LLM mode, and does not replace your LLM credentials when applied. Its first creation preserves any already-saved TypeSafe key. Export/import includes the Jev key; imports remain separate copies instead of overwriting the built-in profile.
+Jev settings are global. **Save** retains them, and they stay unchanged when you switch provider or apply, save, or update AI profiles. Profile exports do not include the TypeSafe key. Earlier Jev Only settings load as Fast when a key exists, and the retired `Jev Only (default)` profile is no longer shown.
 
-Jev chooses one operation plus compatible targets in a single TypeSafe request. Supported operations are observed link/button/checkbox clicks, empty-field fills, native dropdown selection, scrolling, short waits, completion, and fallback. For fills in Only mode, put the exact value in double quotes, for example: `Search for "typescript" and open the first result`. Code supplies that exact value; Jev selects its field and value index. Existing field values are preserved. Generated text, summaries, uploads, screenshots, and narrative research answers are not supported in Only mode.
+Jev chooses one operation plus compatible targets in a single TypeSafe request. Supported operations are observed link/button/checkbox clicks, empty-field fills, native dropdown selection, scrolling, short waits, completion, and fallback. For fills, put an exact value in double quotes, for example: `Search for "typescript" and open the first result`. Code supplies that exact value without an LLM helper call; Jev selects its field and value index. Existing field values are preserved. Summaries, uploads, screenshots, and narrative research answers go to the LLM planner.
 
 The controller operates on its starting owned tab. Observed links can leave the original site. There are no keyword-based bans on submit, transaction, account, or sensitive-looking controls, and a model's high-risk label does not itself stop execution. HTTP(S) URLs are not rejected because their paths or query parameters contain words such as delete or token. File inputs still use the explicit staged-upload workflow. Browser protocol, permission, disabled/read-only, and stale-target constraints remain.
 
 CAUTION: Removing these policy refusals allows task instructions to cause form submissions and state-changing actions. Review the task and use Stop when needed. Redaction of detected secret values remains independent of permission to interact with a control.
 
-There is no numeric navigation cap. Repeated unchanged action/target states and prolonged unproductive waits stop the run; different actions, focus changes, and scroll progress are distinct. Suspected stalls get a short re-observation window for delayed updates. Stop aborts active model/helper requests. Unlimited overall steps can continue to incur costs until completion or Stop.
+There is no numeric navigation cap. Repeated unchanged action/target states and prolonged unproductive waits hand control to the LLM planner; different actions, focus changes, and scroll progress are distinct. Suspected stalls get a short re-observation window for delayed updates. Stop aborts active model/helper requests. Unlimited overall steps can continue to incur costs until completion or Stop.
 
 Completion requires both `operation=done` and a separate `completion=verified` answer at confidence >= 0.95, followed by a fresh semantic observation and evidence-ledger checks. This is model-backed verification, not an independent guarantee of task correctness. Use deterministic outcome checks for critical workflows and benchmark tasks.
 
@@ -125,7 +126,7 @@ For native radio/checkbox clicks, an explicitly associated label is a valid clic
 
 ## Jev Hybrid And Shadow
 
-Choose **Provider > Jev + LLM (hybrid)** and configure both keys. The LLM provider/model remains independently configurable. Selecting Fast explicitly permits field-text generation and planner fallback with that configured LLM:
+Configure the LLM provider as usual and add a TypeSafe key. Fast permits field-text generation and planner fallback with that configured LLM:
 
 - **Off** (default): the existing LLM agent runs without Jev requests.
 - **Shadow**: Jev records operation/target choices; only the LLM's actions execute. No speculative text-helper calls are made. This mode adds latency and is for evaluation.
@@ -133,21 +134,21 @@ Choose **Provider > Jev + LLM (hybrid)** and configure both keys. The LLM provid
 
 After one successful LLM recovery batch, the runtime completes the normal interaction wait and takes a fresh observation. If the page changed and no document, screenshot, or staged upload still needs the LLM, it logs **Returning control to Jev** and lets Jev continue. The resumed Jev call receives prior Jev actions and the completed LLM recovery batch; it does not restart the task or clear the evidence ledger. This supports flows such as LLM answer selection plus Continue, then Jev on the next quiz question.
 
-To avoid repeated handoffs, two consecutive returns to Jev that execute no browser actions leave the LLM in control for the rest of the task. A return in which Jev executes an action resets that counter. Jev API/validation failures, text-helper failures, and staged uploads keep the LLM in control without automatic Jev retries. Failed or unchanged LLM batches do not trigger a return. Stop, `ask_user`, and completed tasks never restart Jev. Shadow and Jev Only behavior are unchanged; Only still never calls an LLM. These handoff limits do not add a total navigation cap to Jev.
+To avoid repeated handoffs, two consecutive returns to Jev that execute no browser actions leave the LLM in control for the rest of the task. A return in which Jev executes an action resets that counter. Jev API/validation failures, text-helper failures, and staged uploads keep the LLM in control without automatic Jev retries. Failed or unchanged LLM batches do not trigger a return. Stop, `ask_user`, and completed tasks never restart Jev. Shadow behavior is unchanged. These handoff limits do not add a total navigation cap to Jev.
 
 Field text uses one request with a 10-second deadline and a 1,024-token output limit. Only a JSON object containing exactly one nonempty `text` string of at most 2,000 characters is accepted; no action output is executable. The helper must not invent personal data or missing values. Its output is reused across a stale retry only when the full helper context, target fingerprint, and recent history are identical. Every generated fill is checked by the content-side guard after generation and before mutation. Helper usage appears separately from Jev decisions, and its tokens/cost are included in the normal LLM totals.
 
-Only content-confirmed `notExecuted` refusals can retry, at most twice. An ambiguous mutation outcome stops instead of repeating the action or handing it to another model. Fast can hand over when no mutation is in doubt; Only stops without any LLM call.
+Only content-confirmed `notExecuted` refusals can retry, at most twice. An ambiguous mutation outcome stops instead of repeating the action or handing it to another model. Fast can hand over when no mutation is in doubt.
 
 ## Jev Safety, Data And Timing
 
-Requests use `POST https://api.typesafe.ai/v1/systemone`, pinned to `jev-1.13.0`, with a two-second deadline and no automatic HTTP retries. The task, URL/title, up to 6,000 characters of page text, up to 80 eligible control descriptions, ordinary field values, and recent action history are sent. Detected password/credential/OTP/payment values are redacted, but detection is not universal: avoid sensitive page content. Screenshots are not part of the Jev loop. Keys stay in extension-owned storage/transport; exports include saved keys in plaintext.
+Requests use `POST https://api.typesafe.ai/v1/systemone`, pinned to `jev-1.13.0`, with a two-second deadline and no automatic HTTP retries. The task, URL/title, up to 6,000 characters of page text, up to 80 eligible control descriptions, ordinary field values, and recent action history are sent. Detected password/credential/OTP/payment values are redacted, but detection is not universal: avoid sensitive page content. Screenshots are not part of the Jev loop. Keys stay in extension-owned storage/transport; profile exports do not include the TypeSafe key.
 
 Each action has a single-use guard bound to the document, URL, form-state fingerprint, and selected target fingerprints. The content executor checks identity, visibility, disabled/read-only state, current geometry, and occlusion. A verified offscreen target is scrolled into view before execution; stale targets are never replaced heuristically. Missing IDs return a recoverable explanation to the planner instead of a misleading sensitive-action refusal.
 
 Guarded interactions wait for two animation frames, capped at 80 ms; autocomplete fills wait for visible options, capped at 200 ms. The resulting atomic observation is reused for the next Jev decision, avoiding the LLM loop's extra 800 ms settlement wait. These waits are not completion guarantees. Navigation retains Chrome tab-completion handling, and explicit waits remain available for delayed page state.
 
-Console shows Jev request latency, Only/Fast/Shadow counts, fallbacks, helper calls, tokens/cost, and a latest-decision inspector with each head's confidence and top alternatives. Logs retain per-step decisions without storing field values in the inspector. Counters and the latest inspector state survive run-history reloads. Jev cost estimates use $0.042 per million reported input tokens with free output tokens, per [TypeSafe documentation](https://docs.typesafe.ai/models), September 22, 2026. Missing usage can undercount charges.
+Console shows Jev request latency, Fast/Shadow counts, fallbacks, helper calls, tokens/cost, and a latest-decision inspector with each head's confidence and top alternatives. Logs retain per-step decisions without storing field values in the inspector. Counters and the latest inspector state survive run-history reloads. Jev cost estimates use $0.042 per million reported input tokens with free output tokens, per [TypeSafe documentation](https://docs.typesafe.ai/models), September 22, 2026. Missing usage can undercount charges.
 
 Compare the same tasks in Off/Fast with the same providers: record full turn duration, median/p95 latency, actual outcome success, model calls, failures, and combined cost. Shadow is for decision evaluation, not speed. Automated tests use mocks; no live Jev speed claim or universal outcome verifier is implied. Research prose and specialized repository ranking remain LLM tasks, not a Jev-only research product.
 

@@ -6,6 +6,7 @@ import {
 } from "./prompts";
 import { getActiveTab, notifySidePanel, sendTabMessage, sleep, tryInjectContentScript } from "./chromeAsync";
 import {
+  formatModelErrorDetails,
   ModelClientError,
   ModelRequestCancelledError,
   requestAgentStep,
@@ -18,7 +19,7 @@ import {
 } from "./modelClient";
 import { registerModelTransportBroker, requestModelThroughSidePanel } from "./modelTransport";
 import { addJevUsage } from "./jevNavigation";
-import { JevDecisionError, JEV_MODEL, testJevConnection } from "./jevClient";
+import { JevDecisionError, testJevConnection } from "./jevClient";
 import { jevFieldContext, progressKey, requestJevAction, semanticPageKey, type JevActionDecision, type JevHistoryEntry } from "./jevActions";
 import { guardObservedAction, validateAgentAction } from "./safety";
 import { extractPdfText } from "./pdfText";
@@ -65,6 +66,7 @@ import type {
   BackgroundToSidePanelMessage,
   ContentWaitCheckResult,
   ContentActionResult,
+  DomElementInfo,
   FullPageDocument,
   ModelRetryStatus,
   ModelUsageEvent,
@@ -92,6 +94,8 @@ interface RunningSession {
   pendingDocument?: FullPageDocument;
   pendingScreenshot?: PromptScreenshotInfo;
   visionDisabled?: boolean;
+  consecutiveFailedSteps: number;
+  autoScreenshots: number;
   nextTabNumber: number;
   stopped: boolean;
   runPersistenceEnabled: boolean;
@@ -145,6 +149,10 @@ const DEFAULT_WAIT_TIMEOUT_MS = 8_000;
 const MAX_WAIT_TIMEOUT_MS = 15_000;
 const WAIT_POLL_INTERVAL_MS = 200;
 const DOM_STABLE_SAMPLE_COUNT = 3;
+const STUCK_STEPS_BEFORE_SCREENSHOT = 2;
+const MAX_AUTO_SCREENSHOTS_PER_RUN = 3;
+const MAX_COMPLETION_CHECK_ATTEMPTS = 2;
+const STUCK_SCREENSHOT_NOTE = `The last ${STUCK_STEPS_BEFORE_SCREENSHOT} steps failed, so a screenshot of what is on screen is attached. Use it to find what blocks progress, such as an overlay, dialog, clipped panel, or wrong section, before choosing the next action.`;
 const AGENT_TAB_GROUP_TITLE = "AI Agent";
 const AGENT_TAB_GROUP_COLOR: chrome.tabGroups.ColorEnum = "blue";
 
@@ -272,7 +280,7 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
       return { ok: true };
 
     case "SIDEPANEL_TEST_MODEL_CONNECTION":
-      return message.target === "jev" || message.settings.jev?.mode === "only"
+      return message.target === "jev"
         ? testJevConnection(message.settings.jev?.apiKey || "", requestModelThroughSidePanel)
         : testModelConnection(message.settings);
 
@@ -329,16 +337,11 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
   }
   appendChatMessage("user", submittedTask, "message", taskId);
   try {
-    const jevOnly = settings.jev?.mode === "only";
-    if (jevOnly && !settings.jev?.apiKey.trim()) {
-      reportTaskError(taskId, "Add a TypeSafe API key in Settings for Jev Only. No LLM was called.");
-      return;
-    }
-    if (!jevOnly && !settings.apiKey.trim()) {
+    if (!settings.apiKey.trim()) {
       reportTaskError(taskId, "Add an API key in Settings before running a task.");
       return;
     }
-    if (!jevOnly && !settings.model.trim()) {
+    if (!settings.model.trim()) {
       reportTaskError(taskId, "Add a model name in Settings before running a task.");
       return;
     }
@@ -350,24 +353,22 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
 
     const tab = await getActiveTab();
     if (!tab?.id || !isSupportedTabUrl(tab.url)) {
-      if (!jevOnly && source === "chat" && !continuation) {
+      if (source === "chat" && !continuation) {
         await answerDirectChat(submittedTask, priorChatMessages, taskId, settings, taskAbortController.signal);
         return;
       }
-      reportTaskError(taskId, jevOnly
-        ? "Open an http(s) webpage before using Jev Only. No LLM was called."
-        : "Open an http(s) webpage before running the agent. Browser internal pages are blocked.");
+      reportTaskError(taskId, "Open an http(s) webpage before running the agent. Browser internal pages are blocked.");
       return;
     }
 
-    usageSnapshot = createEmptyUsageSnapshot(jevOnly ? { provider: undefined, model: JEV_MODEL } : settings);
+    usageSnapshot = createEmptyUsageSnapshot(settings);
     runningSession = createRunningSession(
       taskId,
       submittedTask,
-      jevOnly ? submittedTask : agentInstruction,
+      agentInstruction,
       tab,
       usageSnapshot,
-      jevOnly || !allowChatMode,
+      !allowChatMode,
       taskAbortController.signal,
       settings,
     );
@@ -381,12 +382,12 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
     let resumeJev = false;
     let unsuccessfulJevReturns = 0;
     const jevHistory: JevHistoryEntry[] = [];
-    if ((jevOnly || settings.jev?.mode === "fast") && settings.jev?.apiKey.trim()) {
+    if (settings.jev?.mode === "fast" && settings.jev.apiKey.trim()) {
       const outcome = await runJevActionTask(runningSession, settings, jevHistory);
       if (!outcome.fallback || isStopped(taskId)) return;
       previousResult = outcome.fallback;
       jevProgress = outcome.madeProgress;
-      resumeJev = settings.jev?.mode === "fast" && outcome.resumeAllowed !== false;
+      resumeJev = outcome.resumeAllowed !== false;
       appendLog("info", "Jev returned control to the configured LLM planner.");
     }
     const completedInputActions = new Set<string>();
@@ -489,7 +490,7 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
           }
           if (error instanceof ModelClientError && /JSON|schema/i.test(error.message)) {
             previousResult = buildModelErrorProgress(previousResult, error.message);
-            appendLog("warning", `${error.message} Asking the model to continue with valid action JSON.`);
+            appendLog("warning", `${error.message} Asking the model to continue with valid action JSON.`, formatModelErrorDetails(error));
             await sleep(450);
             continue;
           }
@@ -524,6 +525,7 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
         if (safety.recoverable) {
           previousResult = safety.reason;
           appendLog("warning", safety.reason);
+          if (await attachScreenshotWhenStuck(session, true)) previousResult = `${previousResult}\n${STUCK_SCREENSHOT_NOTE}`;
           continue;
         }
         finishRun(session, "blocked", safety.reason, safety.reason);
@@ -558,6 +560,10 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
         }
       } else {
         await sleep(getPostBatchDelay(plannedActions));
+      }
+
+      if (await attachScreenshotWhenStuck(session, !loopResult.ok)) {
+        previousResult = `${previousResult}\n${STUCK_SCREENSHOT_NOTE}`;
       }
 
       if (resumeJev && loopResult.ok && !loopResult.recoverable && loopResult.completedActions.length > 0
@@ -600,7 +606,7 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
     if (runningSession?.taskId === taskId && runningSession.run.status === "running") {
       finishRun(runningSession, "failed", message);
     }
-    reportTaskError(taskId, message);
+    reportTaskError(taskId, message, formatModelErrorDetails(error));
   } finally {
     if (runningSession?.taskId === taskId) {
       await persistRunReport(runningSession.run);
@@ -620,7 +626,6 @@ async function runJevActionTask(
   history: JevHistoryEntry[] = [],
   initialObservation?: PageObservation,
 ): Promise<{ fallback?: string; madeProgress: boolean; resumeAllowed?: boolean }> {
-  const only = settings.jev?.mode === "only";
   const tabId = session.activeTabId;
   const initialHistoryLength = history.length;
   const repetitions = new Map<string, number>();
@@ -636,13 +641,11 @@ async function runJevActionTask(
     appendChatMessage("assistant", message, "answer", session.taskId);
     appendLog("warning", message);
   };
-  const defer = (reason: string, resumeAllowed = true) => {
-    if (only) {
-      stop(`${reason} No LLM was called.`);
-      return { madeProgress: history.length > initialHistoryLength };
-    }
-    return { fallback: `${reason}\nActions already completed (do not repeat): ${JSON.stringify(history.slice(-15))}`, madeProgress: history.length > initialHistoryLength, resumeAllowed };
-  };
+  const defer = (reason: string, resumeAllowed = true) => ({
+    fallback: `${reason}\nActions already completed (do not repeat): ${JSON.stringify(history.slice(-15))}`,
+    madeProgress: history.length > initialHistoryLength,
+    resumeAllowed,
+  });
   const readOwnedPage = async () => {
     await refreshTrackedTabs(session);
     if (isStopped(session.taskId)) {
@@ -658,8 +661,8 @@ async function runJevActionTask(
     pendingModelRequestCount += 1;
     emitModelStatus();
     try {
-      const decision = await requestJevAction({ apiKey: settings.jev!.apiKey, goal: session.instruction, observation, history, allowTextHelper: !only, signal: session.abortSignal }, requestModelThroughSidePanel);
-      recordJevDecision(session, decision, only ? "only" : decision.kind === "fallback" ? "fallback" : "fast");
+      const decision = await requestJevAction({ apiKey: settings.jev!.apiKey, goal: session.instruction, observation, history, allowTextHelper: true, signal: session.abortSignal }, requestModelThroughSidePanel);
+      recordJevDecision(session, decision, decision.kind === "fallback" ? "fallback" : "fast");
       return decision;
     } finally {
       pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
@@ -686,7 +689,7 @@ async function runJevActionTask(
     } catch (error) {
       if (session.abortSignal.aborted) throw new ModelRequestCancelledError();
       if (error instanceof JevDecisionError) {
-        recordJevDecision(session, { kind: "fallback", operation: "fallback", reason: error.message }, only ? "only" : "fallback", error.elapsedMs);
+        recordJevDecision(session, { kind: "fallback", operation: "fallback", reason: error.message }, "fallback", error.elapsedMs);
       }
       return defer(error instanceof Error ? error.message : "Jev request failed.", false);
     }
@@ -709,7 +712,7 @@ async function runJevActionTask(
       if (getCompletionLedgerIssues(session.run, "completed").length) {
         return defer("The observation ledger did not verify completion.");
       }
-      const report = `Jev verified the requested browser outcome on: ${observation.title.slice(0, 180) || "Page"}\n\n${observation.url}${only ? "\n\nNo LLM was called." : ""}`;
+      const report = `Jev verified the requested browser outcome on: ${observation.title.slice(0, 180) || "Page"}\n\n${observation.url}`;
       finishRun(session, "completed", undefined, report);
       appendChatMessage("assistant", report, "answer", session.taskId);
       appendLog("success", "Jev browser task completed.");
@@ -774,7 +777,7 @@ async function runJevActionTask(
     if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
     if (!executed.ok || executed.recoverable) {
       if (executed.notExecuted && ++staleRetries <= 2) { nextObservation = executed.observation; continue; }
-      stop(`Jev stopped after an unverified action: ${executed.message}${only ? " No LLM was called." : ""}`);
+      stop(`Jev stopped after an unverified action: ${executed.message}`);
       return { madeProgress: history.length > initialHistoryLength };
     }
     staleRetries = 0;
@@ -783,14 +786,14 @@ async function runJevActionTask(
     if (executed.observation) {
       updateTrackedTabFromObservation(session, tabId, executed.observation);
     }
-    recordActionEvidence(session, action, executed.message);
+    recordActionEvidence(session, action, executed.message, observation.elements.find((element) => element.id === action.elementId));
     queueRunReportSave(session.run);
     nextObservation = executed.observation;
   }
   return { madeProgress: history.length > initialHistoryLength };
 }
 
-function recordJevDecision(session: RunningSession, decision: JevActionDecision, outcome: "fast" | "shadow" | "only" | "fallback", elapsedMs?: number): void {
+function recordJevDecision(session: RunningSession, decision: JevActionDecision, outcome: "fast" | "shadow" | "fallback", elapsedMs?: number): void {
   const answer = decision.result?.answers.operation;
   if (answer || elapsedMs !== undefined) {
     usageSnapshot = { ...usageSnapshot, jev: addJevUsage(usageSnapshot.jev, {
@@ -885,6 +888,7 @@ async function handlePlannedActions(
       continue;
     }
 
+    const target = (lastObservation || observation).elements.find((element) => element.id === action.elementId);
     const result = await handleSingleAction(taskId, modelResponse, action);
     messages.push(formatActionResult(index, actions.length, result.message));
     if (result.lastObservation) {
@@ -897,7 +901,7 @@ async function handlePlannedActions(
       completedActions.push(formatCompletedAction(index, action, result.message, "done"));
       if (latestSession?.taskId === taskId && action.type !== "done" && action.type !== "ask_user") {
         if (action.type !== "inspect_screenshot") {
-          recordActionEvidence(latestSession, action, result.message);
+          recordActionEvidence(latestSession, action, result.message, target);
         }
       }
     }
@@ -966,6 +970,19 @@ async function handleSingleAction(
     updateTrackedTabFromObservation(session, session.activeTabId, observation);
     recordObservationEvidence(session, observation);
     const validation = await validateCompletionWithModel(session, observation, finalReport);
+    if (validation.unavailable) {
+      const report = `${finalReport}\n\nUnverified: the final completion check returned unusable output twice (${validation.message}). Review the page before relying on this result.`;
+      finishRun(session, "blocked", "The final completion check was unavailable.", report);
+      appendChatMessage("assistant", report, "answer", session.taskId);
+      return {
+        ok: false,
+        recoverable: false,
+        message: "Stopped: the final completion check was unavailable, so the proposed report is shown in Chat as unverified.",
+        shouldStop: true,
+        completedActions: [],
+        lastObservation: observation,
+      };
+    }
     if (!validation.accepted) {
       return {
         ok: false,
@@ -1137,6 +1154,30 @@ async function readPageDocument(tabId: number): Promise<FullPageDocument> {
     } catch {
       throw new Error(`Could not read the full page document. ${getErrorMessage(firstError)}`);
     }
+  }
+}
+
+// Returns true when a screenshot was queued for the next model request.
+async function attachScreenshotWhenStuck(session: RunningSession, failed: boolean): Promise<boolean> {
+  if (!failed) {
+    session.consecutiveFailedSteps = 0;
+    return false;
+  }
+  session.consecutiveFailedSteps += 1;
+  if (session.consecutiveFailedSteps < STUCK_STEPS_BEFORE_SCREENSHOT || session.stopped || session.visionDisabled
+    || session.pendingScreenshot || session.autoScreenshots >= MAX_AUTO_SCREENSHOTS_PER_RUN) {
+    return false;
+  }
+  session.consecutiveFailedSteps = 0;
+  session.autoScreenshots += 1;
+  const prefix = `Stuck after ${STUCK_STEPS_BEFORE_SCREENSHOT} failed steps (automatic screenshot ${session.autoScreenshots} of ${MAX_AUTO_SCREENSHOTS_PER_RUN}).`;
+  try {
+    const result = await captureScreenshotForSession(session);
+    appendLog(result.ok ? "info" : "warning", result.ok ? `${prefix} ${result.message}` : `${prefix} No screenshot was sent: ${result.message}`);
+    return result.ok;
+  } catch (error) {
+    appendLog("warning", `${prefix} No screenshot was sent: ${getErrorMessage(error)}`);
+    return false;
   }
 }
 
@@ -1333,6 +1374,8 @@ function createRunningSession(
       updatedAt: now,
     },
     nextTabNumber: 2,
+    consecutiveFailedSteps: 0,
+    autoScreenshots: 0,
     stopped: false,
     runPersistenceEnabled,
     abortSignal,
@@ -1974,16 +2017,19 @@ async function validateCompletionWithModel(
   session: RunningSession,
   observation: PageObservation,
   proposedReport: string,
-): Promise<{ accepted: boolean; message: string }> {
+): Promise<{ accepted: boolean; message: string; unavailable?: boolean }> {
   const settings = session.settings;
   const messages: Array<{ role: "system" | "user"; content: string }> = [
     {
       role: "system",
       content: [
         "You validate completion of a browser task from an extension-owned evidence ledger and a fresh page observation.",
-        "Return strict JSON using the normal agent schema.",
+        "Return exactly one strict JSON object with no markdown or code fences, in one of these two shapes:",
+        '{"mode":"browser","thought_summary":"short reason","risk_level":"low","action":{"type":"done","text":"why the evidence proves completion"}}',
+        '{"mode":"browser","thought_summary":"short reason","risk_level":"low","action":{"type":"ask_user","text":"the concrete missing or contradictory work"}}',
         "Return action type done only when every requirement is supported by the supplied evidence and the fresh observation does not contradict completion.",
         "Otherwise return action type ask_user with text listing the concrete missing or contradictory work.",
+        "The fresh observation covers only the current viewport region. Work outside it is proven by the evidence ledger, not by its absence from the observation.",
         "Do not infer completion from the proposed final report alone. Do not invent evidence.",
       ].join("\n"),
     },
@@ -2002,12 +2048,24 @@ async function validateCompletionWithModel(
     },
   ];
 
-  const result = await requestModelStep(settings, messages, session.abortSignal);
-  recordUsageEvent(result.usage, settings);
-  const action = getPlannedActions(result.response)[0];
-  return action.type === "done"
-    ? { accepted: true, message: action.text || result.response.thought_summary }
-    : { accepted: false, message: action.text || result.response.thought_summary || "The evidence did not prove completion." };
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const result = await requestModelStep(settings, messages, session.abortSignal);
+      recordUsageEvent(result.usage, settings);
+      const action = getPlannedActions(result.response)[0];
+      return action.type === "done"
+        ? { accepted: true, message: action.text || result.response.thought_summary }
+        : { accepted: false, message: action.text || result.response.thought_summary || "The evidence did not prove completion." };
+    } catch (error) {
+      if (!(error instanceof ModelClientError) || error instanceof ModelRequestCancelledError || !/JSON|schema/i.test(error.message)) {
+        throw error;
+      }
+      if (error.usage) recordUsageEvent(error.usage, settings);
+      const retry = attempt < MAX_COMPLETION_CHECK_ATTEMPTS;
+      appendLog("warning", `The final completion check returned unusable output: ${error.message}${retry ? " Retrying the check once." : ""}`, formatModelErrorDetails(error));
+      if (!retry) return { accepted: false, unavailable: true, message: error.message };
+    }
+  }
 }
 
 async function summarizeTextWithModel(args: {
@@ -2376,20 +2434,35 @@ function recordVisualEvidence(
   queueRunReportSave(session.run);
 }
 
-function recordActionEvidence(session: RunningSession, action: AgentAction, message: string): void {
+function recordActionEvidence(session: RunningSession, action: AgentAction, message: string, target?: DomElementInfo): void {
   const trackedTab = findTrackedTab(session);
+  const detail = formatEvidenceTarget(action, target);
   session.run.evidence = [
     ...session.run.evidence,
     {
       id: createId("evidence"),
       kind: "action",
-      summary: `${formatAction(action)}: ${message}`,
+      summary: `${formatAction(action)}${detail ? ` [${detail}]` : ""}: ${message}`,
       tabAlias: session.activeTabAlias,
       url: trackedTab?.url,
       createdAt: Date.now(),
     },
   ];
   touchRun(session.run);
+}
+
+// Lets the completion check verify what was entered where, without persisting sensitive values.
+function formatEvidenceTarget(action: AgentAction, target: DomElementInfo | undefined): string {
+  if (!target) return "";
+  const parts = [
+    target.label ? `label ${JSON.stringify(target.label.slice(0, 80))}` : "",
+    target.questionNumber ? `problem ${target.questionNumber}` : "",
+  ];
+  if ((action.type === "fill" || action.type === "type" || action.type === "select") && action.text
+    && !target.isSensitive && target.type !== "password") {
+    parts.push(`value ${JSON.stringify(action.text.slice(0, 120))}`);
+  }
+  return parts.filter(Boolean).join(", ");
 }
 
 function finishRun(
@@ -2461,7 +2534,7 @@ function stopCurrentTask(reason: string, status: Exclude<RunStatus, "running"> =
   emitStatus();
 }
 
-function appendLog(level: AgentLogEntry["level"], message: string): void {
+function appendLog(level: AgentLogEntry["level"], message: string, details?: string): void {
   if (isHiddenActionLog(message)) {
     return;
   }
@@ -2470,6 +2543,7 @@ function appendLog(level: AgentLogEntry["level"], message: string): void {
     id: createId("log"),
     level,
     message,
+    ...(details ? { details } : {}),
     timestamp: Date.now()
   };
 
@@ -2518,8 +2592,8 @@ function enqueueChatMessagesClear(): Promise<void> {
   return chatMessageWriteQueue;
 }
 
-function reportTaskError(taskId: string, message: string): void {
-  appendLog("error", message);
+function reportTaskError(taskId: string, message: string, details?: string): void {
+  appendLog("error", message, details);
   appendChatMessage("assistant", message, "error", taskId);
 }
 
@@ -2569,7 +2643,7 @@ async function answerDirectChat(
       recordUsageEvent(error.usage, settings);
     }
     if (directChatTaskId === taskId) {
-      reportTaskError(taskId, getErrorMessage(error));
+      reportTaskError(taskId, getErrorMessage(error), formatModelErrorDetails(error));
     }
   } finally {
     if (directChatTaskId === taskId) {

@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Download, LoaderCircle, RefreshCw, Save, Trash2, Upload, Wifi } from "lucide-react";
 import {
-  DEFAULT_JEV_PROFILE_ID,
   JEV_MODEL,
   MAX_REQUEST_TIMEOUT_SECONDS,
   MIN_REQUEST_TIMEOUT_SECONDS,
   PROVIDER_DEFAULT_BASE_URLS,
   PROVIDER_DEFAULT_MODELS,
+  resolveModelApi,
 } from "../../shared/defaults";
 import {
   applyConfigurationProfile,
@@ -21,6 +21,8 @@ import {
 import type {
   AgentSettings,
   AiConfigurationProfile,
+  JevSettings,
+  OpenAiApi,
   Provider,
 } from "../../shared/types";
 
@@ -57,27 +59,8 @@ export function SettingsPanel({
     [profiles, selectedProfileId],
   );
   const jevSelected = Boolean(settings.jev && settings.jev.mode !== "off");
-  const jevOnly = settings.jev?.mode === "only";
-  const canUpdateSelectedProfile = Boolean(selectedProfile && (selectedProfile.id !== DEFAULT_JEV_PROFILE_ID || jevOnly));
 
-  function selectProvider(provider: Provider | "jev" | "jev-only") {
-    if (provider === "jev" || provider === "jev-only") {
-      if (provider === "jev-only") {
-        setSelectedProfileId(DEFAULT_JEV_PROFILE_ID);
-      }
-      onChange({
-        ...settings,
-        jev: {
-          apiKey: settings.jev?.apiKey || (provider === "jev-only" ? profiles.find((profile) => profile.id === DEFAULT_JEV_PROFILE_ID)?.jev?.apiKey : "") || "",
-          mode: provider === "jev-only" ? "only" : settings.jev?.mode === "shadow" ? "shadow" : "fast",
-        },
-      });
-      return;
-    }
-    updateProvider(provider);
-  }
-
-  function updateProvider(provider: Provider, keepJev = false) {
+  function updateProvider(provider: Provider) {
     const currentDefaultModel = PROVIDER_DEFAULT_MODELS[settings.provider];
     const shouldReplaceModel =
       !settings.model.trim() || settings.model === currentDefaultModel;
@@ -85,7 +68,6 @@ export function SettingsPanel({
     onChange({
       ...settings,
       provider,
-      jev: keepJev ? settings.jev : settings.jev ? { ...settings.jev, mode: "off" } : undefined,
       apiBaseUrl:
         provider === "custom"
           ? settings.apiBaseUrl
@@ -103,7 +85,7 @@ export function SettingsPanel({
     setSelectedProfileId((current) =>
       current && nextProfiles.some((profile) => profile.id === current)
         ? current
-        : settings.jev?.mode === "only" ? DEFAULT_JEV_PROFILE_ID : nextProfiles[0]?.id || "",
+        : nextProfiles[0]?.id || "",
     );
   }
 
@@ -139,8 +121,8 @@ export function SettingsPanel({
   }
 
   async function handleUpdateProfile() {
-    if (!selectedProfile || !canUpdateSelectedProfile) {
-      setProfileNotice("Choose a matching saved profile first.");
+    if (!selectedProfile) {
+      setProfileNotice("Choose a saved profile first.");
       return;
     }
 
@@ -256,8 +238,8 @@ export function SettingsPanel({
         <div className="button-row profile-create-actions">
           <button
             className="secondary-button button-with-icon"
-            disabled={testingConnection || (jevOnly ? !settings.jev?.apiKey.trim() : !settings.apiBaseUrl.trim() || !settings.apiKey.trim() || !settings.model.trim())}
-            onClick={() => void handleTestConnection(jevOnly ? "jev" : undefined)}
+            disabled={testingConnection || !settings.apiBaseUrl.trim() || !settings.apiKey.trim() || !settings.model.trim()}
+            onClick={() => void handleTestConnection()}
           >
             {testingConnection ? <LoaderCircle className="spin" aria-hidden="true" /> : <Wifi aria-hidden="true" />}
             {testingConnection ? "Testing..." : "Test Connection"}
@@ -284,7 +266,7 @@ export function SettingsPanel({
             ) : null}
             {profiles.map((profile) => (
               <option key={profile.id} value={profile.id}>
-                {profile.name} - {profile.jev?.mode === "only" ? `Jev Only / ${JEV_MODEL}` : `${profile.jev && profile.jev.mode !== "off" ? "Jev + " : ""}${profile.provider} / ${profile.model}`}
+                {profile.name} - {profile.provider} / {profile.model}
               </option>
             ))}
           </select>
@@ -301,7 +283,7 @@ export function SettingsPanel({
           </button>
           <button
             className="secondary-button button-with-icon"
-            disabled={!canUpdateSelectedProfile || savingSettings || Boolean(saveProfileTarget)}
+            disabled={!selectedProfile || savingSettings || Boolean(saveProfileTarget)}
             onClick={() => void handleUpdateProfile()}
           >
             <RefreshCw aria-hidden="true" />
@@ -312,7 +294,7 @@ export function SettingsPanel({
             aria-label="Save Settings"
             title="Save settings"
             disabled={savingSettings || Boolean(saveProfileTarget)}
-            onClick={() => selectedProfile && canUpdateSelectedProfile ? setSaveProfileTarget(selectedProfile) : void handleSaveSettings()}
+            onClick={() => selectedProfile ? setSaveProfileTarget(selectedProfile) : void handleSaveSettings()}
           >
             {savingSettings ? <LoaderCircle className="spin" aria-hidden="true" /> : <Save aria-hidden="true" />}
             Save
@@ -372,8 +354,8 @@ export function SettingsPanel({
           <button
             className="danger-button subtle-danger button-with-icon profile-delete-button"
             aria-label="Delete profile"
-            title={selectedProfile?.id === DEFAULT_JEV_PROFILE_ID ? "The default Jev profile cannot be deleted" : "Delete profile"}
-            disabled={!selectedProfile || selectedProfile.id === DEFAULT_JEV_PROFILE_ID || savingSettings || Boolean(saveProfileTarget)}
+            title="Delete profile"
+            disabled={!selectedProfile || savingSettings || Boolean(saveProfileTarget)}
             onClick={() => void handleDeleteProfile()}
           >
             <Trash2 aria-hidden="true" />
@@ -389,31 +371,29 @@ export function SettingsPanel({
         <label>
           Provider
           <select
-            value={jevOnly ? "jev-only" : jevSelected ? "jev" : settings.provider}
-            onChange={(event) => selectProvider(event.target.value as Provider | "jev" | "jev-only")}
+            value={settings.provider}
+            onChange={(event) => updateProvider(event.target.value as Provider)}
           >
             <option value="openai">OpenAI-compatible</option>
             <option value="gemini">Gemini-compatible</option>
             <option value="groq">Groq</option>
             <option value="custom">Custom</option>
-            <option value="jev">Jev + LLM (hybrid)</option>
-            <option value="jev-only">Jev Only (browser actions)</option>
           </select>
         </label>
 
-        {jevSelected && !jevOnly ? (
+        {settings.provider === "openai" ? (
           <label>
-            LLM planner provider
-            <select value={settings.provider} onChange={(event) => updateProvider(event.target.value as Provider, true)}>
-              <option value="openai">OpenAI-compatible</option>
-              <option value="gemini">Gemini-compatible</option>
-              <option value="groq">Groq</option>
-              <option value="custom">Custom</option>
+            OpenAI endpoint
+            <select
+              value={resolveModelApi(settings)}
+              onChange={(event) => onChange({ ...settings, openAiApi: event.target.value as OpenAiApi })}
+            >
+              <option value="responses">Responses (/responses)</option>
+              <option value="chat">Chat Completions (/chat/completions)</option>
             </select>
           </label>
         ) : null}
 
-        {!jevOnly ? <>
         <label>
           {jevSelected ? "LLM API base URL" : "API base URL"}
           <input
@@ -568,8 +548,6 @@ export function SettingsPanel({
           />
         </label>
 
-        </> : null}
-
         <label className="checkbox-setting">
           <input
             type="checkbox"
@@ -583,7 +561,7 @@ export function SettingsPanel({
       </div>
 
       <fieldset className="jev-settings">
-        <legend>{jevOnly ? "Jev Only (experimental)" : "Jev actions (experimental)"}</legend>
+        <legend>Jev actions (experimental)</legend>
         <label>
           TypeSafe API key
           <input
@@ -591,13 +569,10 @@ export function SettingsPanel({
             autoComplete="off"
             spellCheck={false}
             value={settings.jev?.apiKey || ""}
-            onChange={(event) => onChange({
-              ...settings,
-              jev: { mode: settings.jev?.mode || "off", apiKey: event.target.value },
-            })}
+            onChange={(event) => onChange({ ...settings, jev: withJevApiKey(settings.jev, event.target.value) })}
           />
         </label>
-        {!jevOnly ? <div className="jev-mode-control" role="group" aria-label="Jev action mode">
+        <div className="jev-mode-control" role="group" aria-label="Jev action mode">
           {(["off", "shadow", "fast"] as const).map((mode) => (
             <button
               type="button"
@@ -610,7 +585,7 @@ export function SettingsPanel({
               {mode === "off" ? "Off" : mode === "shadow" ? "Shadow" : "Fast"}
             </button>
           ))}
-        </div> : null}
+        </div>
         <label>
           Jev model
           <input value={JEV_MODEL} readOnly />
@@ -625,7 +600,7 @@ export function SettingsPanel({
           Test Jev
         </button>
         {jevNotice ? <p className="profile-notice" role="status">{jevNotice}</p> : null}
-        <p className="storage-note">TypeSafe receives the task, page URL/title, up to 6,000 characters of page text, eligible controls and recent actions. {jevOnly ? "No LLM requests." : "Fast can send field context to the configured LLM for text generation and return unsupported tasks to the LLM planner."} Profile exports include saved keys.</p>
+        <p className="storage-note">TypeSafe receives the task, page URL/title, up to 6,000 characters of page text, eligible controls and recent actions. Fast can send field context to the configured LLM for text generation and return unsupported tasks to the LLM planner. Jev settings stay the same when you switch AI profiles and are not included in profile exports.</p>
       </fieldset>
 
       <p className="storage-note">
@@ -633,6 +608,13 @@ export function SettingsPanel({
       </p>
     </section>
   );
+}
+
+// A newly entered key turns Jev on (Fast); clearing the key turns it off.
+function withJevApiKey(jev: JevSettings | undefined, apiKey: string): JevSettings {
+  if (!apiKey.trim()) return { apiKey, mode: "off" };
+  const mode = jev?.mode || "off";
+  return { apiKey, mode: !jev?.apiKey.trim() && mode === "off" ? "fast" : mode };
 }
 
 function parseOptionalNumber(value: string): number | undefined {

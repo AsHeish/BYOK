@@ -160,7 +160,7 @@ export async function requestJevAction(args: {
       if (!value || value.confidence < CONFIDENCE_FLOOR || value.choice === "fallback") return fallback("No confident field value is available.");
       if (value.choice === "generate" && args.allowTextHelper) needsText = true;
       else if (Object.hasOwn(space.values, value.choice)) action.text = space.values[value.choice];
-      else return fallback("Jev Only cannot generate field text.");
+      else return fallback("Field text generation is not available.");
     }
   }
   const guarded = guardObservedAction(action, args.observation);

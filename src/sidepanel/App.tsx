@@ -135,8 +135,8 @@ export function App() {
   }, [running]);
 
   const hasApiKey = useMemo(
-    () => settings.jev?.mode === "only" ? Boolean(settings.jev.apiKey.trim()) : settings.apiKey.trim().length > 0,
-    [settings.apiKey, settings.jev?.mode, settings.jev?.apiKey],
+    () => settings.apiKey.trim().length > 0,
+    [settings.apiKey],
   );
   const theme = settings.theme;
 

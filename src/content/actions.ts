@@ -176,17 +176,53 @@ function validateActionGuard(action: AgentAction, afterFocus = false): string | 
         return "The target frame is covered by another element.";
       }
     }
-    let hit = target.ownerDocument.elementFromPoint(clientX, clientY);
-    while (hit?.shadowRoot?.elementFromPoint) {
-      const inner = hit.shadowRoot.elementFromPoint(clientX, clientY);
-      if (!inner || inner === hit) break;
-      hit = inner;
+    let hit = getHitElement(target, clientX, clientY);
+    if (isTargetHit(target, hit, choiceClick)) continue;
+    // Inner scroll containers and sticky bars can hide a target whose center is inside the window.
+    surface.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+    if (!target.isConnected || getElementFingerprint(target) !== guard.targets[id]) return "The selected target changed while scrolling into view.";
+    const retryRect = surface.getBoundingClientRect();
+    const retryX = retryRect.left + retryRect.width / 2;
+    const retryY = retryRect.top + retryRect.height / 2;
+    const retryInView = retryX >= 0 && retryY >= 0 && retryX < view.innerWidth && retryY < view.innerHeight;
+    hit = retryInView ? getHitElement(target, retryX, retryY) : null;
+    if (!isTargetHit(target, hit, choiceClick)) {
+      console.warn("[BYOK Agent] Guarded target is covered.", {
+        action: action.type, elementId: id, target, hit, point: { x: retryX, y: retryY },
+        targetRect: retryRect, viewport: { width: view.innerWidth, height: view.innerHeight },
+      });
+      return `The selected target is covered by ${describeHitElement(hit)} at (${Math.round(retryX)}, ${Math.round(retryY)}), even after scrolling it into view.`;
     }
-    const hitLabel = hit?.closest("label");
-    const associatedLabelHit = choiceClick && hitLabel && isLabelElement(hitLabel) && hitLabel.control === target;
-    if (!hit || (!target.contains(hit) && !associatedLabelHit)) return "The selected target is covered by another element.";
   }
   return undefined;
+}
+
+function getHitElement(target: HTMLElement, clientX: number, clientY: number): Element | null {
+  let hit = target.ownerDocument.elementFromPoint(clientX, clientY);
+  while (hit?.shadowRoot?.elementFromPoint) {
+    const inner = hit.shadowRoot.elementFromPoint(clientX, clientY);
+    if (!inner || inner === hit) break;
+    hit = inner;
+  }
+  return hit;
+}
+
+function isTargetHit(target: HTMLElement, hit: Element | null, choiceClick: boolean): boolean {
+  if (!hit) return false;
+  if (target.contains(hit)) return true;
+  const hitLabel = hit.closest("label");
+  return choiceClick && hitLabel !== null && isLabelElement(hitLabel) && hitLabel.control === target;
+}
+
+function describeHitElement(element: Element | null): string {
+  if (!element) return "nothing hit-testable";
+  const id = element.id ? `#${element.id.slice(0, 40)}` : "";
+  const classes = typeof element.className === "string"
+    ? element.className.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((name) => `.${name.slice(0, 40)}`).join("")
+    : "";
+  const role = element.getAttribute("role");
+  const text = (element.getAttribute("aria-label") || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40);
+  return `<${element.tagName.toLowerCase()}${id}${classes}${role ? ` role=${role}` : ""}>${text ? ` "${text}"` : ""}`;
 }
 
 async function withFreshObservation(
@@ -1425,7 +1461,8 @@ function getBestActivationTarget(element: HTMLElement): HTMLElement {
 }
 
 function prepareElement(element: HTMLElement): void {
-  element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+  // "auto" follows CSS scroll-behavior; a smooth scroll can still be moving the target at the post-focus guard check.
+  element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
   element.focus({ preventScroll: true });
 }
 

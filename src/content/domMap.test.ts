@@ -144,6 +144,34 @@ describe("guarded content execution", () => {
     expect(await executeAction(guarded)).toMatchObject({ ok: false, notExecuted: true, message: expect.stringContaining("target") });
   });
 
+  it("scrolls a target hidden by an inner panel or sticky bar into view and then clicks it once", async () => {
+    const guarded = action();
+    const target = document.querySelector("#search") as HTMLElement;
+    let scrolled = false;
+    const scrollIntoView = vi.fn(() => { scrolled = true; });
+    Object.defineProperty(target, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => scrolled ? target : document.body });
+    const click = vi.fn();
+    target.addEventListener("click", click);
+    expect((await executeAction(guarded)).ok).toBe(true);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", inline: "nearest", behavior: "instant" });
+    expect(click).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the covering element when scrolling does not uncover the target", async () => {
+    document.body.insertAdjacentHTML("beforeend", '<div id="sticky-bar" class="footer fixed extra" role="toolbar">Submit   quiz</div>');
+    const guarded = action();
+    const click = vi.fn();
+    document.querySelector("#search")!.addEventListener("click", click);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => document.querySelector("#sticky-bar") });
+    expect(await executeAction(guarded)).toMatchObject({
+      ok: false, notExecuted: true,
+      message: 'The selected target is covered by <div#sticky-bar.footer.fixed role=toolbar> "Submit quiz" at (60, 25), even after scrolling it into view.',
+    });
+    expect(click).not.toHaveBeenCalled();
+  });
+
   it.each(["radio", "checkbox"])("clicks a %s when its associated label covers the control", async (type) => {
     document.body.insertAdjacentHTML("beforeend", `<div><input id="answer" type="${type}" style="opacity:1" /><label for="answer" style="opacity:1"><span id="choice-text">Option A</span></label></div>`);
     const control = document.querySelector("#answer") as HTMLInputElement;

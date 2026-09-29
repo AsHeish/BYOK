@@ -38,7 +38,6 @@ export function UsageDashboard({ usage }: UsageDashboardProps) {
           <summary>Jev decisions</summary>
           <div className="usage-grid usage-grid-secondary">
             <Metric label="Jev requests" value={formatInteger(usage.jev.requests)} />
-            <Metric label="Jev Only calls" value={formatInteger(usage.jev.onlyRequests || 0)} />
             <Metric label="Fast decisions" value={formatInteger(usage.jev.fastDecisions)} />
             <Metric label="Text helper calls" value={formatInteger(usage.jev.helperRequests || 0)} />
             <Metric label="Shadow choices" value={formatInteger(usage.jev.shadowDecisions)} />
@@ -69,7 +68,7 @@ export function UsageDashboard({ usage }: UsageDashboardProps) {
       ) : null}
 
       <div className="usage-footer">
-        <span>{usage.jev?.onlyRequests ? "TypeSafe" : usage.provider || "provider"}</span>
+        <span>{usage.provider || "provider"}</span>
         <span>{usage.model || "model"}</span>
         {usage.lastStatus ? <span>status {usage.lastStatus}</span> : null}
       </div>

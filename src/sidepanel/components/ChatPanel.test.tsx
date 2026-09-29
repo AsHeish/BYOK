@@ -20,27 +20,6 @@ function renderChat(jevMode?: JevSettings["mode"], hasJevKey = true, disabled = 
 }
 
 describe("Jev chat capabilities", () => {
-  it("identifies Jev Only without advertising an LLM or unsupported starters", () => {
-    const markup = renderChat("only");
-    expect(markup).toContain("Jev Only");
-    expect(markup).toContain("No LLM is used.");
-    expect(markup).toContain("Jev:");
-    expect(markup).not.toContain("LLM:");
-    expect(markup).not.toContain("planner-model");
-    expect(markup).not.toContain("Summarize the current page.");
-    expect(markup).not.toContain("request a summary");
-    expect(markup).toContain("What should I do in the browser?");
-    expect(markup).toContain("exact double-quoted values");
-    expect(markup).not.toContain("Jev cannot run alone");
-  });
-
-  it("requires only the TypeSafe key and promises no silent fallback", () => {
-    const markup = renderChat("only", false, true);
-    expect(markup).toContain("Add a TypeSafe API key in Settings for Jev Only.");
-    expect(markup).toContain("Jev Only will not fall back to an LLM.");
-    expect(markup).not.toContain("Add an LLM API key");
-  });
-
   it.each([undefined, "off"] as const)("omits the notice when Jev is %s", (mode) => {
     const markup = renderChat(mode);
     expect(markup).not.toContain('aria-label="Jev capabilities"');
@@ -64,8 +43,12 @@ describe("Jev chat capabilities", () => {
     expect(markup).toContain("LLM still performs all tasks");
   });
 
-  it("does not imply Jev is running before its key is configured", () => {
-    expect(renderChat("fast", false)).toContain("Jev needs a TypeSafe API key in Settings. Until then, only the LLM runs.");
+  it("treats a mode without a Jev key as LLM-only", () => {
+    const markup = renderChat("fast", false, true);
+    expect(markup).not.toContain('aria-label="Jev capabilities"');
+    expect(markup).toContain("Model:");
+    expect(markup).toContain("Add an API key in Settings.");
+    expect(markup).not.toContain("Jev cannot run alone");
   });
 
   it("explains why an LLM key is required even with a Jev key", () => {

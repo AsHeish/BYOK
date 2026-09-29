@@ -3,8 +3,9 @@ import { DEFAULT_SETTINGS } from "../shared/defaults";
 import type { AgentAction, AgentModelResponse, AgentSettings, JevSettings, RunReport, SidePanelToBackgroundMessage } from "../shared/types";
 import type { ModelHttpRequest } from "./modelClient";
 
-const mocks = vi.hoisted(() => ({ transport: vi.fn(), sendTabMessage: vi.fn(), notify: vi.fn(), activeTab: vi.fn() }));
+const mocks = vi.hoisted(() => ({ transport: vi.fn(), sendTabMessage: vi.fn(), notify: vi.fn(), activeTab: vi.fn(), capture: vi.fn() }));
 vi.mock("./modelTransport", () => ({ registerModelTransportBroker: vi.fn(), requestModelThroughSidePanel: mocks.transport }));
+vi.mock("./screenshot", async (importOriginal) => ({ ...await importOriginal<typeof import("./screenshot")>(), captureAndResizeVisibleTab: mocks.capture }));
 vi.mock("./pdfText", () => ({ extractPdfText: vi.fn() }));
 vi.mock("./chromeAsync", () => ({
   getActiveTab: mocks.activeTab, notifySidePanel: mocks.notify, sendTabMessage: mocks.sendTabMessage,
@@ -119,7 +120,7 @@ function send(message: SidePanelToBackgroundMessage): Promise<unknown> {
 }
 
 async function start(mode: JevSettings["mode"], overrides: Partial<AgentSettings> = {}, task = "Find the setup guide", source: "run" | "chat" = "run") {
-  const settings: AgentSettings = { ...DEFAULT_SETTINGS, apiKey: mode === "only" ? "" : "llm-key", apiBaseUrl: "https://llm.example/v1", jev: { mode, apiKey: "jev-key" }, ...overrides };
+  const settings: AgentSettings = { ...DEFAULT_SETTINGS, apiKey: "llm-key", apiBaseUrl: "https://llm.example/v1", jev: { mode, apiKey: "jev-key" }, ...overrides };
   stored.byokAgentSettings = settings;
   await import("./index");
   await send(source === "chat" ? { type: "SIDEPANEL_SEND_CHAT", message: task, settings } : { type: "SIDEPANEL_RUN_TASK", task, settings });
@@ -376,10 +377,13 @@ describe("Jev background loop integration", () => {
       }
       return result;
     });
-    await start("only");
-    await waitForAnswer('invalid probabilities for "click_target": sum=0.500000');
+    await start("fast");
+    await waitForAnswer("Setup guide reached.");
     expect(requests("jev")).toHaveLength(1);
-    expect(requests("llm")).toHaveLength(0);
+    expect(requests("llm")).toHaveLength(3);
+    const firstPlannerMessages = JSON.parse(requests("llm")[0].body).messages as Array<{ content: unknown }>;
+    expect(firstPlannerMessages.some((message) => typeof message.content === "string" && message.content.includes('invalid probabilities for "click_target": sum=0.500000'))).toBe(true);
+    expect(mocks.sendTabMessage.mock.calls.filter(([, message]) => message.action?.type === "click")).toHaveLength(0);
     expect(navigationCount).toBe(0);
   });
 
@@ -411,6 +415,133 @@ describe("Jev background loop integration", () => {
     expect(actions[0]).toMatchObject({ type: "press_key", key: "PageUp" });
     expect(actions[1]).toMatchObject({ type: "fill", elementId: "field" });
     expect(JSON.stringify(JSON.parse(requests("llm")[1].body).messages)).toContain("not currently observed");
+  });
+
+  it("attaches raw model output to the Console warning for non-JSON output and continues", async () => {
+    const prose = "Sure! I will open the setup guide now.";
+    let calls = 0;
+    mocks.transport.mockImplementation(async () => {
+      calls += 1;
+      return calls === 1
+        ? { ok: true, status: 200, statusText: "OK", responseText: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: prose } }] }) }
+        : llmActionResponse({ type: "ask_user", text: "Recovered after invalid JSON." });
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await start("off");
+    await waitForAnswer("Recovered after invalid JSON");
+    const warning = mocks.notify.mock.calls.map(([message]) => message)
+      .find((message) => message.type === "AGENT_LOG" && message.entry.message.includes("did not return strict JSON"));
+    expect(warning?.entry.level).toBe("warning");
+    expect(warning?.entry.message).toContain("Asking the model to continue with valid action JSON.");
+    expect(warning?.entry.details).toContain("finish_reason=stop");
+    expect(warning?.entry.details).toContain(prose);
+    expect(requests("llm")).toHaveLength(2);
+    expect(JSON.stringify(JSON.parse(requests("llm")[1].body).messages)).toContain("did not return strict JSON (");
+  });
+
+  it("executes no browser action for conflicting plans and asks the model again", async () => {
+    const plan = (url: string) => JSON.stringify({ mode: "browser", risk_level: "low", thought_summary: "Navigate", action: { type: "navigate", url } });
+    const content = `${plan("https://example.test/docs/wrong")}}\n<|im_end|>\nOops, wrong page.${plan("https://example.test/docs/setup")}`;
+    let calls = 0;
+    mocks.transport.mockImplementation(async () => {
+      calls += 1;
+      return calls === 1
+        ? { ok: true, status: 200, statusText: "OK", responseText: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content } }] }) }
+        : llmActionResponse({ type: "ask_user", text: "Retried after conflicting plans." });
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await start("off");
+    await waitForAnswer("Retried after conflicting plans");
+    expect(mocks.sendTabMessage.mock.calls.filter(([, message]) => message.type === "CONTENT_EXECUTE")).toHaveLength(0);
+    expect(tab.url).toBe("https://example.test/docs/home");
+    expect(requests("llm")).toHaveLength(2);
+    const warning = mocks.notify.mock.calls.map(([message]) => message)
+      .find((message) => message.type === "AGENT_LOG" && message.entry.message.includes("conflicting JSON action plans"));
+    expect(warning?.entry.details).toContain("Leaked chat-template token <|im_end|>");
+    expect(JSON.stringify(JSON.parse(requests("llm")[1].body).messages)).toContain("so none were executed");
+  });
+
+  it("attaches a screenshot after two failed steps, at most three times per run", async () => {
+    useField = true;
+    let calls = 0;
+    mocks.transport.mockImplementation(async () => {
+      calls += 1;
+      return llmActionResponse(calls <= 8 ? { type: "fill", elementId: "field", text: `answer ${calls}` } : { type: "ask_user", text: "Still blocked by the overlay." });
+    });
+    const original = mocks.sendTabMessage.getMockImplementation()!;
+    mocks.sendTabMessage.mockImplementation(async (tabId: number, message: { type: string; action?: AgentAction }) => message.type === "CONTENT_EXECUTE"
+      ? { ok: false, recoverable: true, notExecuted: true, message: "The selected target is covered by <div#cookie-modal>.", observation: observation() }
+      : original(tabId, message));
+    mocks.capture.mockResolvedValue("data:image/jpeg;base64,stuck");
+    Object.assign((globalThis as unknown as { chrome: { tabs: Record<string, unknown> } }).chrome.tabs, { query: vi.fn(async () => [{ ...tab }]) });
+    await start("off");
+    await waitForAnswer("Still blocked by the overlay");
+    expect(fieldValue).toBe("");
+    const withImage = requests("llm").map((request, index) => ({ index: index + 1, content: JSON.parse(request.body).messages.at(-1).content }))
+      .filter(({ content }) => Array.isArray(content));
+    expect(requests("llm")).toHaveLength(9);
+    expect(withImage.map(({ index }) => index)).toEqual([3, 5, 7]);
+    for (const { content } of withImage) {
+      expect(content).toContainEqual({ type: "image_url", image_url: { url: "data:image/jpeg;base64,stuck", detail: "low" } });
+      expect(content[0].text).toContain("The last 2 steps failed, so a screenshot of what is on screen is attached.");
+    }
+    expect(mocks.capture).toHaveBeenCalledTimes(3);
+    const logs = mocks.notify.mock.calls.map(([message]) => message).filter((message) => message.type === "AGENT_LOG" && message.entry.message.startsWith("Stuck after 2 failed steps"));
+    expect(logs.map((message) => message.entry.message)).toEqual([1, 2, 3].map((count) => expect.stringContaining(`automatic screenshot ${count} of 3`)));
+  });
+
+  describe("final completion check", () => {
+    const flattenedRejection = '```json\n{\n  "actionType": "ask_user",\n  "text": "Cannot confirm task completion. The field value is not shown."\n}\n```';
+
+    function routeValidator(validatorReplies: string[]) {
+      let plannerCalls = 0;
+      let validatorCalls = 0;
+      mocks.transport.mockImplementation(async (request: ModelHttpRequest) => {
+        const messages = JSON.parse(request.body).messages as Array<{ role: string; content: string }>;
+        if (messages[0].content.startsWith("You validate completion")) {
+          const content = validatorReplies[validatorCalls++];
+          return { ok: true, status: 200, statusText: "OK", responseText: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content } }] }) };
+        }
+        plannerCalls += 1;
+        const prompt = messages.map((message) => message.content).join("\n");
+        if (plannerCalls === 1) return llmActionResponse({ type: "fill", elementId: "field", text: "3" });
+        if (plannerCalls === 2) {
+          const requirementId = /- (req-[\w-]+) status=/.exec(prompt)![1];
+          const evidenceId = /- (evidence-[\w-]+) kind=action/.exec(prompt)![1];
+          return { ok: true, status: 200, statusText: "OK", responseText: JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+            mode: "browser", risk_level: "low", thought_summary: "All fields filled",
+            requirementUpdates: [{ requirementId, status: "satisfied", evidenceIds: [evidenceId] }],
+            action: { type: "done", outcome: "completed", text: "Filled the field with 3." },
+          }) } }] }) };
+        }
+        return llmActionResponse({ type: "ask_user", text: "Stopped after validator feedback." });
+      });
+    }
+
+    it("accepts a flattened ask_user verdict as a rejection and continues with its reason", async () => {
+      useField = true;
+      routeValidator([flattenedRejection]);
+      await start("off");
+      await waitForAnswer("Stopped after validator feedback");
+      const planner = requests("llm").filter((request) => !JSON.parse(request.body).messages[0].content.startsWith("You validate completion"));
+      expect(planner).toHaveLength(3);
+      expect(requests("llm")).toHaveLength(4);
+      expect(JSON.stringify(JSON.parse(planner[2].body).messages)).toContain("Completion rejected by final validation: Cannot confirm task completion.");
+      await vi.waitFor(() => {
+        const evidence = (stored.byokAgentRunReports as RunReport[])[0].evidence.filter((item) => item.kind === "action");
+        expect(evidence.map((item) => item.summary)).toEqual([expect.stringContaining('[label "Search", value "3"]')]);
+      });
+    });
+
+    it("stops with an unverified report after two unusable verdicts", async () => {
+      useField = true;
+      routeValidator(["I think it is done.", "Looks complete to me."]);
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await start("off");
+      await waitForAnswer("Unverified: the final completion check returned unusable output twice");
+      expect(requests("llm")).toHaveLength(4);
+      await vi.waitFor(() => expect((stored.byokAgentRunReports as RunReport[])[0].status).toBe("blocked"));
+    });
   });
 
   it("does not inject a Tab action when an LLM repeats a completed fill", async () => {
@@ -453,12 +584,12 @@ describe("Jev background loop integration", () => {
     expect(state.usage.jev?.requests || 0).toBe(scenario.jevCalls);
   });
 
-  it.each(["fast", "only"] as const)("cancels %s on Stop without starting another LLM call", async (mode) => {
+  it("cancels fast mode on Stop without starting another LLM call", async () => {
     const original = mocks.transport.getMockImplementation()!;
     mocks.transport.mockImplementation((request: ModelHttpRequest) => request.endpoint.includes("api.typesafe.ai")
       ? new Promise<never>((_resolve, reject) => request.signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError"))))
       : original(request));
-    await start(mode);
+    await start("fast");
     await vi.waitFor(() => expect(requests("jev")).toHaveLength(1));
     await send({ type: "SIDEPANEL_STOP_TASK" });
     await vi.waitFor(async () => {
@@ -478,10 +609,10 @@ async function waitForAnswer(text: string) {
   });
 }
 
-describe("Jev Only runtime isolation", () => {
-  it.each(["run", "chat"] as const)("uses the visible Jev Only configuration for %s even when storage still has an LLM", async (source) => {
+describe("Jev runtime selection", () => {
+  it.each(["run", "chat"] as const)("uses the visible Jev key for %s even when storage has no Jev key", async (source) => {
     stored.byokAgentSettings = { ...DEFAULT_SETTINGS, apiKey: "old-llm-key", model: "gemma-4-31b", jev: { mode: "off", apiKey: "" } };
-    const settings: AgentSettings = { ...DEFAULT_SETTINGS, apiKey: "", model: "", jev: { mode: "only", apiKey: "jev-key" } };
+    const settings: AgentSettings = { ...DEFAULT_SETTINGS, apiKey: "llm-key", apiBaseUrl: "https://llm.example/v1", jev: { mode: "fast", apiKey: "jev-key" } };
     await import("./index");
     await send(source === "chat"
       ? { type: "SIDEPANEL_SEND_CHAT", message: "Find the setup guide", settings }
@@ -489,6 +620,14 @@ describe("Jev Only runtime isolation", () => {
     await waitForAnswer("Jev verified the requested browser outcome");
     expect(requests("jev")).toHaveLength(2);
     expect(requests("llm")).toHaveLength(0);
+    expect(tab.url).toBe("https://example.test/docs/setup");
+  });
+
+  it("uses only the LLM when Fast is selected without a Jev key", async () => {
+    await start("fast", { jev: { mode: "fast", apiKey: "" } });
+    await waitForAnswer("Setup guide reached.");
+    expect(requests("jev")).toHaveLength(0);
+    expect(requests("llm")).toHaveLength(3);
     expect(tab.url).toBe("https://example.test/docs/setup");
   });
 
@@ -500,8 +639,8 @@ describe("Jev Only runtime isolation", () => {
     expect(mocks.transport).not.toHaveBeenCalled();
   });
 
-  it.each(["run", "chat"] as const)("completes a %s navigation with no LLM key, calls, or validator", async (source) => {
-    await start("only", { model: "" }, "Find the setup guide", source);
+  it.each(["run", "chat"] as const)("completes and persists a %s navigation with zero LLM requests", async (source) => {
+    await start("fast", {}, "Find the setup guide", source);
     await waitForAnswer("Jev verified the requested browser outcome");
     expect(tab.url).toBe("https://example.test/docs/setup");
     expect(requests("jev")).toHaveLength(2);
@@ -511,86 +650,23 @@ describe("Jev Only runtime isolation", () => {
     expect(executed[0][1].action).toMatchObject({ type: "click", elementId: "el-1", guard: { documentId: "doc:https://example.test/docs/home" } });
     await vi.waitFor(() => {
       const reports = stored.byokAgentRunReports as RunReport[];
-      expect(reports?.[0]).toMatchObject({ status: "completed", usage: { requestCount: 0, jev: { onlyRequests: 2, fastDecisions: 0 } } });
+      expect(reports?.[0]).toMatchObject({ status: "completed", usage: { requestCount: 0, jev: { requests: 2, fastDecisions: 2 } } });
       expect(reports[0].requirements[0]).toMatchObject({ status: "satisfied", evidenceIds: [expect.any(String)] });
     });
   });
 
-  it("stops an unsupported request even when an LLM key is available", async () => {
-    operationChoice = "fallback";
-    await start("only", { apiKey: "available-but-forbidden" }, "Summarize this page", "chat");
-    await waitForAnswer("unsupported action");
-    expect(requests("jev")).toHaveLength(1);
-    expect(requests("llm")).toHaveLength(0);
-    expect(mocks.sendTabMessage.mock.calls.filter(([, message]) => message.type === "CONTENT_EXECUTE")).toHaveLength(0);
-  });
-
-  it.each([401, 429, 529])("stops on HTTP %s without calling an available LLM", async (status) => {
-    jevStatus = status;
-    await start("only", { apiKey: "available-but-forbidden" });
-    await waitForAnswer(`Jev returned HTTP ${status}`);
-    expect(requests("jev")).toHaveLength(1);
-    expect(requests("llm")).toHaveLength(0);
-  });
-
-  it("blocks a missing Jev key rather than reverting to the LLM", async () => {
-    await start("only", { apiKey: "available-but-forbidden", jev: { mode: "only", apiKey: "" } });
-    await waitForAnswer("Add a TypeSafe API key");
-    expect(mocks.transport).not.toHaveBeenCalled();
-  });
-
-  it("does not answer direct chat on an unsupported tab", async () => {
-    tab.url = "chrome://settings";
-    await start("only", { apiKey: "available-but-forbidden" }, "Hello", "chat");
-    await waitForAnswer("Open an http(s) webpage");
-    expect(mocks.transport).not.toHaveBeenCalled();
-  });
-
-  it("stops uncertain navigation rather than consulting the LLM", async () => {
-    operationChoice = "fallback";
-    await start("only");
-    await waitForAnswer("unsupported action");
-    expect(requests("jev")).toHaveLength(1);
-    expect(requests("llm")).toHaveLength(0);
-    expect(tab.url).toBe("https://example.test/docs/home");
-  });
-
-  it("stops on a browser-internal page after a redirect", async () => {
-    const original = mocks.sendTabMessage.getMockImplementation()!;
-    mocks.sendTabMessage.mockImplementation(async (tabId: number, message: { type: string; action?: AgentAction }) => {
-      const result = await original(tabId, message);
-      if (message.type === "CONTENT_EXECUTE") { tab.url = "chrome://settings"; result.observation = observation(); }
-      return result;
-    });
-    await start("only");
-    await waitForAnswer("does not support safe observed actions");
-    expect(requests("jev")).toHaveLength(1);
-    expect(requests("llm")).toHaveLength(0);
-  });
-
-  it("continues beyond the old cap and the LLM step limit until it reaches the destination", async () => {
+  it("continues beyond the LLM step limit until Jev reaches the destination", async () => {
     journeyLength = 12;
-    await start("only", { maxSteps: 1 });
+    await start("fast", { maxSteps: 1 });
     await waitForAnswer("Jev verified the requested browser outcome");
     expect(navigationCount).toBe(12);
     expect(requests("llm")).toHaveLength(0);
     expect(requests("jev")).toHaveLength(13);
   });
 
-  it("stops after repeated content-confirmed stale refusals", async () => {
-    const original = mocks.sendTabMessage.getMockImplementation()!;
-    mocks.sendTabMessage.mockImplementation(async (tabId: number, message: { type: string }) => message.type === "CONTENT_EXECUTE"
-      ? { ok: false, recoverable: true, notExecuted: true, message: "Stale target" } : original(tabId, message));
-    await start("only", { apiKey: "available-but-forbidden" });
-    await waitForAnswer("No progress after repeated");
-    expect(requests("jev")).toHaveLength(3);
-    expect(requests("llm")).toHaveLength(0);
-    expect(navigationCount).toBe(0);
-  });
-
-  it("uses exact user text with no LLM calls", async () => {
+  it("fills exact quoted user text without a helper LLM call", async () => {
     useField = true;
-    await start("only", {}, 'Search for "typescript" and open the result');
+    await start("fast", {}, 'Search for "typescript" and open the result');
     await waitForAnswer("Jev verified");
     expect(fieldValue).toBe("typescript");
     expect(requests("llm")).toHaveLength(0);
@@ -640,15 +716,19 @@ describe("Jev Only runtime isolation", () => {
     expect(mocks.sendTabMessage.mock.calls.filter(([, message]) => message.type === "CONTENT_EXECUTE")).toHaveLength(1);
   });
 
-  it("stops a confirmed unchanged action loop without imposing a total step limit", async () => {
+  it("hands a confirmed unchanged Jev action loop to the LLM with its history", async () => {
     const original = mocks.sendTabMessage.getMockImplementation()!;
-    mocks.sendTabMessage.mockImplementation(async (tabId: number, message: { type: string }) => message.type === "CONTENT_EXECUTE"
-      ? { ok: true, message: "Clicked but unchanged", observation: observation() } : original(tabId, message));
-    await start("only");
-    await waitForAnswer("No progress after repeated click");
-    expect(requests("jev")).toHaveLength(3);
-    expect(requests("llm")).toHaveLength(0);
-    expect(mocks.sendTabMessage.mock.calls.filter(([, message]) => message.type === "CONTENT_EXECUTE")).toHaveLength(2);
+    mocks.sendTabMessage.mockImplementation(async (tabId: number, message: { type: string; action?: AgentAction }) =>
+      message.type === "CONTENT_EXECUTE" && message.action?.type === "click" && tab.url.endsWith("/home")
+        ? { ok: true, message: "Clicked but unchanged", observation: observation() } : original(tabId, message));
+    await start("fast");
+    await waitForAnswer("Jev verified");
+    const firstPlannerMessages = JSON.parse(requests("llm")[0].body).messages as Array<{ content: unknown }>;
+    expect(firstPlannerMessages.some((message) => typeof message.content === "string" && message.content.includes("No progress after repeated click"))).toBe(true);
+    expect(requests("llm")).toHaveLength(1);
+    const executed = mocks.sendTabMessage.mock.calls.filter(([, message]) => message.type === "CONTENT_EXECUTE").map(([, message]) => message.action.type);
+    expect(executed).toEqual(["click", "click", "navigate", "click"]);
+    expect(tab.url).toBe("https://example.test/docs/setup");
   });
 
   it("cancels a hybrid text request before any input is executed", async () => {

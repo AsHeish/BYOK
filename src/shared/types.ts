@@ -1,14 +1,14 @@
 export type Provider = "openai" | "gemini" | "groq" | "custom";
+export type OpenAiApi = "responses" | "chat";
 export type PromptCacheMode = "auto" | "on" | "off";
 
 export interface JevSettings {
-  mode: "off" | "shadow" | "fast" | "only";
+  mode: "off" | "shadow" | "fast";
   apiKey: string;
 }
 
 export interface JevUsageSnapshot {
   requests: number;
-  onlyRequests?: number;
   helperRequests?: number;
   lastDecision?: Array<{
     question: string;
@@ -30,6 +30,7 @@ export interface AgentSettings {
   apiBaseUrl: string;
   apiKey: string;
   model: string;
+  openAiApi?: OpenAiApi;
   maxSteps: number;
   requestTimeoutSeconds: number;
   promptCacheMode: PromptCacheMode;
@@ -49,6 +50,7 @@ export interface AiConfigurationProfile {
   apiBaseUrl: string;
   apiKey: string;
   model: string;
+  openAiApi?: OpenAiApi;
   maxSteps: number;
   requestTimeoutSeconds: number;
   promptCacheMode: PromptCacheMode;
@@ -56,7 +58,6 @@ export interface AiConfigurationProfile {
   inputTokenCostPerMillion?: number;
   cachedInputTokenCostPerMillion?: number;
   outputTokenCostPerMillion?: number;
-  jev?: JevSettings;
   createdAt: number;
   updatedAt: number;
 }
@@ -390,6 +391,8 @@ export interface AgentLogEntry {
   id: string;
   level: "info" | "success" | "warning" | "error";
   message: string;
+  // Plain text, e.g. raw model output; never parsed as markdown.
+  details?: string;
   timestamp: number;
 }
 

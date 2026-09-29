@@ -3,7 +3,7 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_JEV_PROFILE_ID, DEFAULT_JEV_PROFILE_NAME, DEFAULT_SETTINGS } from "../../shared/defaults";
+import { DEFAULT_SETTINGS } from "../../shared/defaults";
 import type { AgentSettings, AgentUsageSnapshot } from "../../shared/types";
 import { SettingsPanel } from "./SettingsPanel";
 import { UsageDashboard } from "./UsageDashboard";
@@ -55,6 +55,12 @@ function seedProfile() {
   return profile;
 }
 
+function providerSelect(): HTMLSelectElement {
+  const found = Array.from(container.querySelectorAll("select")).find((select) => select.closest("label")?.textContent?.startsWith("Provider"));
+  expect(found).toBeDefined();
+  return found!;
+}
+
 describe("model thinking setting", () => {
   function checkbox(): HTMLInputElement {
     const input = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
@@ -85,15 +91,33 @@ describe("model thinking setting", () => {
     await act(async () => button("Save & Update").click());
     expect(stored.byokAgentConfigProfiles).toEqual(expect.arrayContaining([expect.objectContaining({ id: profile.id, disableThinking: true })]));
   });
+});
 
-  it("hides the LLM-only control in Jev Only without losing its value", async () => {
-    const settings: AgentSettings = { ...DEFAULT_SETTINGS, disableThinking: true, jev: { mode: "only", apiKey: "jev-key" } };
-    const { changed } = await renderSettings(settings);
-    expect(container.textContent).not.toContain("Disable model thinking");
-    const provider = Array.from(container.querySelectorAll("select")).find((select) => Array.from(select.options).some((option) => option.value === "jev"))!;
-    await act(async () => { provider.value = "jev"; provider.dispatchEvent(new Event("change", { bubbles: true })); });
-    expect(checkbox().checked).toBe(true);
-    expect(changed.mock.lastCall?.[0].disableThinking).toBe(true);
+describe("OpenAI endpoint setting", () => {
+  function endpointSelect(): HTMLSelectElement | undefined {
+    return Array.from(container.querySelectorAll("select")).find((select) => select.closest("label")?.textContent?.includes("OpenAI endpoint"));
+  }
+
+  async function choose(select: HTMLSelectElement, value: string) {
+    await act(async () => { select.value = value; select.dispatchEvent(new Event("change", { bubbles: true })); });
+  }
+
+  it("defaults to Responses for api.openai.com and tests the selected endpoint", async () => {
+    const settings: AgentSettings = { ...DEFAULT_SETTINGS, apiKey: "llm-key" };
+    const { changed, testConnection } = await renderSettings(settings);
+    expect(endpointSelect()?.value).toBe("responses");
+    await choose(endpointSelect()!, "chat");
+    expect(changed).toHaveBeenLastCalledWith({ ...settings, openAiApi: "chat" });
+    expect(endpointSelect()?.value).toBe("chat");
+    await act(async () => button("Test Connection").click());
+    expect(testConnection).toHaveBeenCalledExactlyOnceWith({ ...settings, openAiApi: "chat" }, undefined);
+  });
+
+  it("shows the endpoint only for the OpenAI provider", async () => {
+    await renderSettings({ ...DEFAULT_SETTINGS, openAiApi: "chat" });
+    expect(endpointSelect()).toBeDefined();
+    await choose(providerSelect(), "groq");
+    expect(endpointSelect()).toBeUndefined();
   });
 });
 
@@ -169,90 +193,51 @@ describe("settings save actions", () => {
 });
 
 describe("Jev settings", () => {
-  it("always offers the default Jev profile and saves the selected Jev config into it", async () => {
-    const settings: AgentSettings = { ...DEFAULT_SETTINGS, jev: { mode: "only", apiKey: "saved-jev-key" } };
-    const { save } = await renderSettings(settings);
-    const profileSelect = Array.from(container.querySelectorAll("select")).find((select) => Array.from(select.options).some((option) => option.value === DEFAULT_JEV_PROFILE_ID))!;
-    expect(profileSelect).toBeDefined();
-    expect(profileSelect.value).toBe(DEFAULT_JEV_PROFILE_ID);
-    expect((container.querySelector('[aria-label="Delete profile"]') as HTMLButtonElement).disabled).toBe(true);
-    await act(async () => button("Save").click());
-    expect(container.querySelector('[aria-label="Save settings confirmation"]')?.textContent).toContain(DEFAULT_JEV_PROFILE_NAME);
-    await act(async () => button("Save & Update").click());
-    expect(save).toHaveBeenCalledTimes(1);
-    expect(stored.byokAgentConfigProfiles).toEqual(expect.arrayContaining([expect.objectContaining({ id: DEFAULT_JEV_PROFILE_ID, jev: { mode: "only", apiKey: "saved-jev-key" } })]));
-  });
+  function typeJevKey(value: string) {
+    const input = container.querySelector<HTMLInputElement>(".jev-settings input[type=password]")!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
 
-  it("does not overwrite the default Jev profile with an LLM-only configuration", async () => {
-    const { save } = await renderSettings(DEFAULT_SETTINGS);
-    expect(button("Update").disabled).toBe(true);
-    await act(async () => button("Save").click());
-    expect(save).toHaveBeenCalledTimes(1);
-    expect(chrome.storage.local.set).not.toHaveBeenCalled();
-  });
-
-  it("selects Jev Only without erasing the hidden LLM configuration", async () => {
-    const settings: AgentSettings = { ...DEFAULT_SETTINGS, apiKey: "llm-key", model: "saved-planner", jev: { mode: "off", apiKey: "jev-key" } };
-    const { changed } = await renderSettings(settings);
-    const provider = Array.from(container.querySelectorAll("select")).find((select) => Array.from(select.options).some((option) => option.value === "jev-only"))!;
-    await act(async () => { provider.value = "jev-only"; provider.dispatchEvent(new Event("change", { bubbles: true })); });
-    expect(changed).toHaveBeenLastCalledWith({ ...settings, jev: { mode: "only", apiKey: "jev-key" } });
-    expect(provider.value).toBe("jev-only");
+  it("offers only LLM providers and no separate planner selector", async () => {
+    await renderSettings({ ...DEFAULT_SETTINGS, jev: { mode: "fast", apiKey: "jev-key" } });
+    expect(Array.from(providerSelect().options).map((option) => option.value)).toEqual(["openai", "gemini", "groq", "custom"]);
+    expect(providerSelect().value).toBe("openai");
     expect(container.textContent).not.toContain("LLM planner provider");
-    expect(container.textContent).not.toContain("AI timeout seconds");
-    expect(Array.from(container.querySelectorAll("input")).some((input) => input.value === "saved-planner")).toBe(false);
-    expect(container.textContent).not.toContain("Max steps");
-    expect(container.textContent).not.toContain("Max navigation steps");
-    await act(async () => { provider.value = "jev"; provider.dispatchEvent(new Event("change", { bubbles: true })); });
-    expect(changed).toHaveBeenLastCalledWith({ ...settings, jev: { mode: "fast", apiKey: "jev-key" } });
-    expect(Array.from(container.querySelectorAll("input")).some((input) => input.value === "saved-planner")).toBe(true);
+    expect(container.textContent).not.toContain("Jev Only");
   });
 
-  it("tests Jev Only without requiring or testing an LLM key", async () => {
-    const settings: AgentSettings = { ...DEFAULT_SETTINGS, apiKey: "", model: "", jev: { mode: "only", apiKey: "jev-key" } };
-    const { testConnection } = await renderSettings(settings);
-    expect(button("Test Connection").disabled).toBe(false);
-    await act(async () => button("Test Connection").click());
-    expect(testConnection).toHaveBeenCalledExactlyOnceWith(settings, "jev");
-  });
-
-  it("keeps Jev Only selected when its key is missing", async () => {
-    await renderSettings({ ...DEFAULT_SETTINGS, apiKey: "available-llm-key", jev: { mode: "only", apiKey: "" } });
-    const provider = Array.from(container.querySelectorAll("select")).find((select) => Array.from(select.options).some((option) => option.value === "jev-only"))!;
-    expect(provider.value).toBe("jev-only");
-    expect(button("Test Connection").disabled).toBe(true);
-    expect(button("Test Jev").disabled).toBe(true);
-  });
-
-  it("selects Jev hybrid without replacing the LLM credentials or model", async () => {
-    const settings: AgentSettings = { ...DEFAULT_SETTINGS, provider: "custom", apiBaseUrl: "https://planner.example/v1", apiKey: "llm-key", model: "planner-model", jev: { mode: "off", apiKey: "jev-key" } };
-    const { changed } = await renderSettings(settings);
-    const provider = Array.from(container.querySelectorAll("select")).find((select) => Array.from(select.options).some((option) => option.value === "jev"))!;
-    expect(provider).toBeDefined();
-    await act(async () => {
-      provider.value = "jev";
-      provider.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    expect(changed).toHaveBeenLastCalledWith({ ...settings, jev: { mode: "fast", apiKey: "jev-key" } });
-    expect(provider.value).toBe("jev");
-    expect(container.textContent).toContain("LLM planner provider");
-    expect(container.textContent).toContain("LLM API key");
-  });
-
-  it("changes the planner independently and turns Jev off when selecting a normal provider", async () => {
+  it("keeps Jev settings when the provider changes", async () => {
     const settings: AgentSettings = { ...DEFAULT_SETTINGS, apiKey: "llm-key", jev: { mode: "shadow", apiKey: "jev-key" } };
     const { changed } = await renderSettings(settings);
-    const selects = () => Array.from(container.querySelectorAll("select"));
-    const provider = selects().find((select) => Array.from(select.options).some((option) => option.value === "jev"))!;
-    expect(provider.value).toBe("jev");
-    const planner = selects().find((select) => select.parentElement?.textContent?.startsWith("LLM planner provider"))!;
-    expect(planner).toBeDefined();
-    await act(async () => { planner.value = "groq"; planner.dispatchEvent(new Event("change", { bubbles: true })); });
+    await act(async () => { providerSelect().value = "groq"; providerSelect().dispatchEvent(new Event("change", { bubbles: true })); });
     expect(changed.mock.lastCall?.[0]).toMatchObject({ provider: "groq", apiKey: "llm-key", jev: settings.jev });
-    expect(provider.value).toBe("jev");
-    await act(async () => { provider.value = "openai"; provider.dispatchEvent(new Event("change", { bubbles: true })); });
-    expect(changed.mock.lastCall?.[0]).toMatchObject({ provider: "openai", apiKey: "llm-key", jev: { mode: "off", apiKey: "jev-key" } });
-    expect(container.textContent).not.toContain("LLM planner provider");
+  });
+
+  it("turns Fast on when a key is entered and Jev off when the key is cleared", async () => {
+    const { changed } = await renderSettings();
+    await act(async () => typeJevKey("new-jev-key"));
+    expect(changed.mock.lastCall?.[0].jev).toEqual({ mode: "fast", apiKey: "new-jev-key" });
+    expect(button("Fast").getAttribute("aria-pressed")).toBe("true");
+    await act(async () => typeJevKey(""));
+    expect(changed.mock.lastCall?.[0].jev).toEqual({ mode: "off", apiKey: "" });
+    expect(button("Fast").disabled).toBe(true);
+  });
+
+  it("keeps an explicit Off choice while an existing key is edited", async () => {
+    const { changed } = await renderSettings({ ...DEFAULT_SETTINGS, jev: { mode: "off", apiKey: "jev-key" } });
+    await act(async () => typeJevKey("jev-key-2"));
+    expect(changed.mock.lastCall?.[0].jev).toEqual({ mode: "off", apiKey: "jev-key-2" });
+  });
+
+  it("keeps the current Jev settings when applying a profile", async () => {
+    seedProfile();
+    const settings: AgentSettings = { ...DEFAULT_SETTINGS, model: "current-model", jev: { mode: "fast", apiKey: "current-jev-key" } };
+    const { changed } = await renderSettings(settings);
+    await act(async () => button("Apply").click());
+    expect(changed.mock.lastCall?.[0]).toMatchObject({ model: "saved-model", jev: settings.jev });
+    expect(stored.byokAgentSettings).toMatchObject({ model: "saved-model", jev: settings.jev });
+    expect(JSON.stringify(stored.byokAgentConfigProfiles)).not.toContain("current-jev-key");
   });
 
   it("defaults off and requires a key for active modes and connection testing", async () => {

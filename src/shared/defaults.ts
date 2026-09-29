@@ -1,10 +1,8 @@
-import type { AgentSettings } from "./types";
+import type { AgentSettings, OpenAiApi } from "./types";
 
 export const MIN_REQUEST_TIMEOUT_SECONDS = 10;
 export const MAX_REQUEST_TIMEOUT_SECONDS = 300;
 export const JEV_MODEL = "jev-1.13.0";
-export const DEFAULT_JEV_PROFILE_ID = "profile-jev-default";
-export const DEFAULT_JEV_PROFILE_NAME = "Jev Only (default)";
 
 export const DEFAULT_SETTINGS: AgentSettings = {
   provider: "openai",
@@ -33,6 +31,20 @@ export const PROVIDER_DEFAULT_MODELS = {
   groq: "llama-3.3-70b-versatile",
   custom: ""
 } as const;
+
+// OpenAI's explicit choice wins; otherwise an explicit URL path, then api.openai.com -> Responses.
+export function resolveModelApi(settings: Pick<AgentSettings, "provider" | "apiBaseUrl" | "openAiApi">): OpenAiApi {
+  if (settings.provider === "openai" && settings.openAiApi) return settings.openAiApi;
+  let url: URL;
+  try {
+    url = new URL(settings.apiBaseUrl.replace(/\/+$/, ""));
+  } catch {
+    return "chat";
+  }
+  if (url.pathname.endsWith("/chat/completions")) return "chat";
+  if (url.pathname.endsWith("/responses")) return "responses";
+  return url.hostname.toLowerCase() === "api.openai.com" ? "responses" : "chat";
+}
 
 export const MAX_PAGE_TEXT_CHARS = 10000;
 export const MAX_DOM_ELEMENTS = 80;

@@ -56,17 +56,14 @@ function button(label: string): HTMLButtonElement {
 }
 
 describe("task configuration snapshot", () => {
-  it("submits unsaved Jev Only selection instead of the saved LLM provider", async () => {
+  it("submits the unsaved Jev mode instead of the saved one", async () => {
     await act(async () => root.render(<App />));
     await act(async () => button("Settings").click());
-    const provider = Array.from(container.querySelectorAll("select")).find((select) => Array.from(select.options).some((option) => option.value === "jev-only"))!;
-    expect(provider).toBeDefined();
-    await act(async () => {
-      provider.value = "jev-only";
-      provider.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    const provider = Array.from(container.querySelectorAll("select")).find((select) => select.closest("label")?.textContent?.startsWith("Provider"))!;
+    expect(Array.from(provider.options).map((option) => option.value)).toEqual(["openai", "gemini", "groq", "custom"]);
+    await act(async () => button("Fast").click());
     await act(async () => button("Chat").click());
-    expect(container.querySelector('[aria-label="Jev capabilities"]')?.textContent).toContain("No LLM is used");
+    expect(container.querySelector('[aria-label="Jev capabilities"]')?.textContent).toContain("Jev Fast + LLM");
     const input = container.querySelector("textarea")!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "Find the installation guide");
@@ -76,7 +73,7 @@ describe("task configuration snapshot", () => {
     await act(async () => button("Send message").click());
     const tasks = sent.filter((message) => message.type === "SIDEPANEL_SEND_CHAT");
     expect(tasks).toHaveLength(1);
-    expect(tasks[0]).toMatchObject({ message: "Find the installation guide", settings: { jev: { mode: "only", apiKey: "jev-key" } } });
+    expect(tasks[0]).toMatchObject({ message: "Find the installation guide", settings: { apiKey: "old-llm-key", jev: { mode: "fast", apiKey: "jev-key" } } });
     expect(stored.byokAgentSettings).toMatchObject({ model: "gemma-4-31b", jev: { mode: "off" } });
   });
 });
