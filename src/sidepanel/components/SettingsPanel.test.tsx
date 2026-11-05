@@ -230,6 +230,58 @@ describe("Jev settings", () => {
     expect(changed.mock.lastCall?.[0].jev).toEqual({ mode: "off", apiKey: "jev-key-2" });
   });
 
+  function jevInput(label: string): HTMLInputElement {
+    const found = Array.from(container.querySelectorAll<HTMLInputElement>(".jev-settings label")).find((element) => element.textContent?.startsWith(label))?.querySelector("input");
+    expect(found).toBeTruthy();
+    return found as HTMLInputElement;
+  }
+
+  function type(input: HTMLInputElement, value: string) {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("lets the user opt in to replacing filled fields, off by default, and removes the key when turned off", async () => {
+    const { changed } = await renderSettings({ ...DEFAULT_SETTINGS, jev: { mode: "fast", apiKey: "jev-key" } });
+    const toggle = Array.from(container.querySelectorAll<HTMLLabelElement>(".jev-settings label")).find((label) => label.textContent?.includes("replace existing text"))?.querySelector("input") as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    await act(async () => toggle.click());
+    expect(changed.mock.lastCall?.[0].jev).toStrictEqual({ mode: "fast", apiKey: "jev-key", replaceFilledFields: true });
+    await act(async () => toggle.click());
+    expect(changed.mock.lastCall?.[0].jev).toStrictEqual({ mode: "fast", apiKey: "jev-key" });
+  });
+
+  it("edits the Jev model, request budget and minimum confidence, and clears them back to the defaults", async () => {
+    const { changed } = await renderSettings({ ...DEFAULT_SETTINGS, jev: { mode: "fast", apiKey: "jev-key" } });
+    expect(jevInput("Jev model").placeholder).toBe("jev-1.13.0");
+    expect(jevInput("Jev requests per run").placeholder).toBe("120");
+    expect(jevInput("Jev minimum confidence").placeholder).toBe("0.95");
+    await act(async () => type(jevInput("Jev model"), "jev-custom"));
+    await act(async () => type(jevInput("Jev requests per run"), "40"));
+    await act(async () => type(jevInput("Jev minimum confidence"), "0.97"));
+    expect(changed.mock.lastCall?.[0].jev).toEqual({ mode: "fast", apiKey: "jev-key", model: "jev-custom", maxRequests: 40, confidenceFloor: 0.97 });
+    await act(async () => type(jevInput("Jev model"), ""));
+    await act(async () => type(jevInput("Jev requests per run"), ""));
+    await act(async () => type(jevInput("Jev minimum confidence"), ""));
+    expect(changed.mock.lastCall?.[0].jev).toStrictEqual({ mode: "fast", apiKey: "jev-key" });
+  });
+
+  it("limits the confidence control to values at or above the default gate", async () => {
+    await renderSettings({ ...DEFAULT_SETTINGS, jev: { mode: "fast", apiKey: "jev-key" } });
+    const confidence = jevInput("Jev minimum confidence");
+    expect(Number(confidence.min)).toBe(0.95);
+    expect(Number(confidence.max)).toBe(0.99);
+    expect(Number(jevInput("Jev requests per run").min)).toBe(1);
+  });
+
+  it("keeps a configured Jev request budget when the key or mode is edited", async () => {
+    const { changed } = await renderSettings({ ...DEFAULT_SETTINGS, jev: { mode: "fast", apiKey: "jev-key", maxRequests: 40 } });
+    await act(async () => typeJevKey("jev-key-2"));
+    expect(changed.mock.lastCall?.[0].jev).toEqual({ mode: "fast", apiKey: "jev-key-2", maxRequests: 40 });
+    await act(async () => button("Shadow").click());
+    expect(changed.mock.lastCall?.[0].jev).toEqual({ mode: "shadow", apiKey: "jev-key-2", maxRequests: 40 });
+  });
+
   it("keeps the current Jev settings when applying a profile", async () => {
     seedProfile();
     const settings: AgentSettings = { ...DEFAULT_SETTINGS, model: "current-model", jev: { mode: "fast", apiKey: "current-jev-key" } };
@@ -291,5 +343,68 @@ describe("Jev settings", () => {
     expect(markup).toContain("200ms");
     expect(markup).toContain("$0.000004");
     expect(markup).toContain("$0.1000");
+  });
+
+  describe("Jev trace download", () => {
+    const usage: AgentUsageSnapshot = {
+      requestCount: 0, successfulRequestCount: 0, cacheHitRequestCount: 0, promptTokens: 0, cachedPromptTokens: 0,
+      completionTokens: 0, totalTokens: 0, totalLatencyMs: 0, costConfigured: false,
+      jev: { requests: 1, fastDecisions: 1, shadowDecisions: 0, fallbacks: 0, inputTokens: 1, outputTokens: 1, totalLatencyMs: 100, estimatedCostUsd: 0 },
+    };
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      Reflect.deleteProperty(URL, "createObjectURL");
+      Reflect.deleteProperty(URL, "revokeObjectURL");
+    });
+
+    async function renderDashboard(trace: unknown[]) {
+      const sendMessage = vi.fn((_message: unknown, callback: (response: unknown) => void) => callback({ ok: true, trace }));
+      vi.stubGlobal("chrome", { runtime: { sendMessage, lastError: undefined } });
+      const blobs: Blob[] = [];
+      Object.assign(URL, {
+        createObjectURL: vi.fn((blob: Blob) => { blobs.push(blob); return "blob:trace"; }),
+        revokeObjectURL: vi.fn(),
+      });
+      const clicks: string[] = [];
+      vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) { clicks.push(this.download); });
+      await act(async () => root.render(<UsageDashboard usage={usage} />));
+      await act(async () => button("Download Jev trace").click());
+      return { sendMessage, blobs, clicks };
+    }
+
+    it("downloads the recorded trace as JSON", async () => {
+      const entry = { at: 1, url: "https://example.test/docs", kind: "action", operation: "click", outcome: "fast", reason: "Jev selected click.", heads: [] };
+      const { sendMessage, blobs, clicks } = await renderDashboard([entry]);
+      expect(sendMessage.mock.calls[0][0]).toEqual({ type: "SIDEPANEL_GET_JEV_TRACE" });
+      expect(clicks).toHaveLength(1);
+      expect(clicks[0]).toMatch(/^jev-trace-.*\.json$/);
+      const exported = JSON.parse(await blobs[0].text());
+      expect(exported).toMatchObject({ format: "byok-browser-agent-jev-trace", version: 1, entries: [entry] });
+      expect(container.querySelector('[role="status"]')?.textContent).toContain("Exported 1 decisions");
+    });
+
+    it("downloads nothing when no decisions were recorded", async () => {
+      const { blobs, clicks } = await renderDashboard([]);
+      expect(blobs).toHaveLength(0);
+      expect(clicks).toHaveLength(0);
+      expect(container.querySelector('[role="status"]')?.textContent).toBe("No Jev decisions to export yet.");
+    });
+  });
+
+  it("shows Jev step timings only when stages were recorded", () => {
+    const base: AgentUsageSnapshot = {
+      requestCount: 0, successfulRequestCount: 0, cacheHitRequestCount: 0, promptTokens: 0, cachedPromptTokens: 0,
+      completionTokens: 0, totalTokens: 0, totalLatencyMs: 0, costConfigured: false,
+      jev: { requests: 1, fastDecisions: 1, shadowDecisions: 0, fallbacks: 0, inputTokens: 1, outputTokens: 1, totalLatencyMs: 100, estimatedCostUsd: 0 },
+    };
+    expect(renderToStaticMarkup(<UsageDashboard usage={base} />)).not.toContain("Jev step timings");
+    const withTimings = { ...base, jev: { ...base.jev!, timings: { snapshot: { count: 2, totalMs: 100, maxMs: 70 }, llm: { count: 1, totalMs: 5000, maxMs: 5000 } } } };
+    const markup = renderToStaticMarkup(<UsageDashboard usage={withTimings} />);
+    expect(markup).toContain("Jev step timings");
+    expect(markup).toContain("Page snapshot (2)");
+    expect(markup).toContain("avg 50ms / max 70ms");
+    expect(markup).toContain("LLM planner (1)");
+    expect(markup).not.toContain("Browser action");
   });
 });

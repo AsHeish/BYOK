@@ -5,6 +5,9 @@ import {
   MAX_CHAT_SUGGESTIONS,
   MAX_REQUEST_TIMEOUT_SECONDS,
   MIN_REQUEST_TIMEOUT_SECONDS,
+  validJevConfidenceFloor,
+  validJevMaxRequests,
+  validJevModel,
 } from "./defaults";
 import type {
   AgentChatMessage,
@@ -77,11 +80,18 @@ function normalizeOpenAiApi(value: unknown): OpenAiApi | undefined {
 function normalizeJevSettings(value: unknown): JevSettings {
   const raw = value && typeof value === "object" ? value as Partial<JevSettings> : {};
   const apiKey = typeof raw.apiKey === "string" ? raw.apiKey.trim() : "";
+  const maxRequests = validJevMaxRequests(raw.maxRequests);
+  const model = validJevModel(raw.model);
+  const confidenceFloor = validJevConfidenceFloor(raw.confidenceFloor);
   return {
     apiKey,
     mode: apiKey && (raw.mode === "shadow" || raw.mode === "fast") ? raw.mode
       // Retired Jev Only settings keep Jev active as Fast.
       : apiKey && (raw.mode as string) === "only" ? "fast" : "off",
+    ...(maxRequests === undefined ? {} : { maxRequests }),
+    ...(model === undefined ? {} : { model }),
+    ...(confidenceFloor === undefined ? {} : { confidenceFloor }),
+    ...(raw.replaceFilledFields === true ? { replaceFilledFields: true } : {}),
   };
 }
 
@@ -810,6 +820,18 @@ function normalizeUsage(value: unknown): AgentUsageSnapshot {
   };
 }
 
+function normalizeJevTimings(value: unknown): JevUsageSnapshot["timings"] {
+  if (!value || typeof value !== "object") return undefined;
+  const result: NonNullable<JevUsageSnapshot["timings"]> = {};
+  for (const stage of ["snapshot", "jev", "action", "llm"] as const) {
+    const entry = (value as Record<string, unknown>)[stage];
+    if (!entry || typeof entry !== "object") continue;
+    const raw = entry as Record<string, unknown>;
+    result[stage] = { count: Math.max(0, finiteNumber(raw.count, 0)), totalMs: Math.max(0, finiteNumber(raw.totalMs, 0)), maxMs: Math.max(0, finiteNumber(raw.maxMs, 0)) };
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
 function normalizeJevUsage(value: unknown): JevUsageSnapshot | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
@@ -818,6 +840,9 @@ function normalizeJevUsage(value: unknown): JevUsageSnapshot | undefined {
   return {
     requests: Math.max(0, finiteNumber(raw.requests, 0)),
     ...(raw.helperRequests === undefined ? {} : { helperRequests: Math.max(0, finiteNumber(raw.helperRequests, 0)) }),
+    ...(validJevModel(raw.lastModel) ? { lastModel: validJevModel(raw.lastModel) } : {}),
+    ...(raw.retries === undefined ? {} : { retries: Math.max(0, finiteNumber(raw.retries, 0)) }),
+    ...(normalizeJevTimings(raw.timings) ? { timings: normalizeJevTimings(raw.timings) } : {}),
     ...(Array.isArray(raw.lastDecision) ? { lastDecision: raw.lastDecision.filter((entry) => entry && typeof entry === "object").slice(0, 12).map((entry) => ({
       question: String(entry.question || "").slice(0, 80), choice: String(entry.choice || "").slice(0, 120),
       confidence: Math.min(1, Math.max(0, finiteNumber(entry.confidence, 0))),

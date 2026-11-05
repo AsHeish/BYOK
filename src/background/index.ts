@@ -18,9 +18,10 @@ import {
   type ModelRequestNotice,
 } from "./modelClient";
 import { registerModelTransportBroker, requestModelThroughSidePanel } from "./modelTransport";
-import { addJevUsage } from "./jevNavigation";
+import { addJevTiming, addJevUsage } from "./jevNavigation";
 import { JevDecisionError, testJevConnection } from "./jevClient";
-import { jevFieldContext, progressKey, requestJevAction, semanticPageKey, type JevActionDecision, type JevHistoryEntry } from "./jevActions";
+import { appendJevTrace, createJevTraceEntry } from "./jevTrace";
+import { describeJevOutcome, jevFieldContext, JEV_NO_VISIBLE_CHANGE, JEV_UNCHANGED_ACTION_LIMIT, progressKey, requestJevAction, semanticPageKey, type JevActionDecision, type JevHistoryEntry } from "./jevActions";
 import { guardObservedAction, validateAgentAction } from "./safety";
 import { extractPdfText } from "./pdfText";
 import { captureAndResizeVisibleTab, isVisibleOwnedTab } from "./screenshot";
@@ -44,7 +45,7 @@ import {
 } from "./chatRouting";
 
 import { dataUrlToUint8Array, formatFileSize } from "../shared/fileData";
-import { MAX_CHAT_MESSAGES, MAX_LOG_ENTRIES, MAX_TRACKED_TABS } from "../shared/defaults";
+import { JEV_DEFAULT_MAX_REQUESTS, MAX_CHAT_MESSAGES, MAX_LOG_ENTRIES, MAX_TRACKED_TABS, validJevMaxRequests, validJevModel } from "../shared/defaults";
 import { createId } from "../shared/ids";
 import {
   clearChatMessages,
@@ -68,6 +69,8 @@ import type {
   ContentActionResult,
   DomElementInfo,
   FullPageDocument,
+  JevTimingStage,
+  JevTraceEntry,
   ModelRetryStatus,
   ModelUsageEvent,
   PageObservation,
@@ -96,6 +99,8 @@ interface RunningSession {
   visionDisabled?: boolean;
   consecutiveFailedSteps: number;
   autoScreenshots: number;
+  jevRequests: number;
+  jevChoiceAnswers: number;
   nextTabNumber: number;
   stopped: boolean;
   runPersistenceEnabled: boolean;
@@ -123,6 +128,7 @@ let pendingChatContinuation: { instruction: string; question: string } | undefin
 let logs: AgentLogEntry[] = [];
 let chatMessages: AgentChatMessage[] = [];
 let usageSnapshot: AgentUsageSnapshot = createEmptyUsageSnapshot();
+let jevTrace: JevTraceEntry[] = [];
 let runReportWriteQueue: Promise<void> = Promise.resolve();
 let chatMessageWriteQueue: Promise<void> = Promise.resolve();
 let pendingModelRequestCount = 0;
@@ -151,6 +157,8 @@ const WAIT_POLL_INTERVAL_MS = 200;
 const DOM_STABLE_SAMPLE_COUNT = 3;
 const STUCK_STEPS_BEFORE_SCREENSHOT = 2;
 const MAX_AUTO_SCREENSHOTS_PER_RUN = 3;
+const JEV_OBSERVE_ELEMENTS = 250;
+const LLM_OBSERVE_ELEMENTS = 80;
 const MAX_COMPLETION_CHECK_ATTEMPTS = 2;
 const STUCK_SCREENSHOT_NOTE = `The last ${STUCK_STEPS_BEFORE_SCREENSHOT} steps failed, so a screenshot of what is on screen is attached. Use it to find what blocks progress, such as an overlay, dialog, clipped panel, or wrong section, before choosing the next action.`;
 const AGENT_TAB_GROUP_TITLE = "AI Agent";
@@ -281,7 +289,7 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
 
     case "SIDEPANEL_TEST_MODEL_CONNECTION":
       return message.target === "jev"
-        ? testJevConnection(message.settings.jev?.apiKey || "", requestModelThroughSidePanel)
+        ? testJevConnection(message.settings.jev?.apiKey || "", requestModelThroughSidePanel, validJevModel(message.settings.jev?.model))
         : testModelConnection(message.settings);
 
     case "SIDEPANEL_STOP_TASK":
@@ -294,6 +302,9 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
       await enqueueChatMessagesClear();
       notifySidePanel({ type: "AGENT_CHAT_CLEARED" } satisfies BackgroundToSidePanelMessage);
       return { ok: true };
+
+    case "SIDEPANEL_GET_JEV_TRACE":
+      return { ok: true, trace: jevTrace };
 
     case "SIDEPANEL_GET_STATE":
       return {
@@ -362,6 +373,7 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
     }
 
     usageSnapshot = createEmptyUsageSnapshot(settings);
+    jevTrace = [];
     runningSession = createRunningSession(
       taskId,
       submittedTask,
@@ -419,8 +431,8 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
         pendingModelRequestCount += 1;
         emitModelStatus();
         try {
-          const decision = await requestJevAction({ apiKey: settings.jev.apiKey, goal: agentInstruction, observation, history: [], allowTextHelper: true, signal: session.abortSignal }, requestModelThroughSidePanel);
-          recordJevDecision(session, decision, "shadow");
+          const decision = await requestJevAction({ apiKey: settings.jev.apiKey, model: validJevModel(settings.jev.model), confidenceFloor: settings.jev.confidenceFloor, replaceFilledFields: settings.jev.replaceFilledFields, goal: agentInstruction, observation, history: [], allowTextHelper: true, signal: session.abortSignal }, requestModelThroughSidePanel);
+          recordJevDecision(session, decision, "shadow", undefined, observation.url);
         } catch (error) {
           if (session.abortSignal.aborted) throw new ModelRequestCancelledError();
           appendLog("warning", "Jev shadow decision unavailable; the LLM remains in control.");
@@ -629,9 +641,11 @@ async function runJevActionTask(
   const tabId = session.activeTabId;
   const initialHistoryLength = history.length;
   const repetitions = new Map<string, number>();
-  let nextObservation = initialObservation;
+  let nextObservation = reusableJevObservation(initialObservation);
   let staleRetries = 0;
   let waitingSteps = 0;
+  let unchangedActions = 0;
+  let lastActed: { entry: JevHistoryEntry; before: PageObservation; reused: boolean } | undefined;
   let pendingText: { key: string; text: string } | undefined;
   const stop = (message: string) => {
     applyRequirementUpdates(session, session.run.requirements.map((requirement) => ({
@@ -655,14 +669,15 @@ async function runJevActionTask(
     if (session.activeTabId !== tabId) {
       throw new Error("The Jev starting tab is no longer active for this run.");
     }
-    return observePage(tabId);
+    return timeJevStage(session, "snapshot", () => observePage(tabId, JEV_OBSERVE_ELEMENTS));
   };
   const decide = async (observation: PageObservation) => {
+    session.jevRequests += 1;
     pendingModelRequestCount += 1;
     emitModelStatus();
     try {
-      const decision = await requestJevAction({ apiKey: settings.jev!.apiKey, goal: session.instruction, observation, history, allowTextHelper: true, signal: session.abortSignal }, requestModelThroughSidePanel);
-      recordJevDecision(session, decision, decision.kind === "fallback" ? "fallback" : "fast");
+      const decision = await timeJevStage(session, "jev", () => requestJevAction({ apiKey: settings.jev!.apiKey, model: validJevModel(settings.jev!.model), confidenceFloor: settings.jev!.confidenceFloor, replaceFilledFields: settings.jev!.replaceFilledFields, goal: session.instruction, observation, history, allowTextHelper: true, signal: session.abortSignal }, requestModelThroughSidePanel));
+      recordJevDecision(session, decision, decision.kind === "fallback" ? "fallback" : "fast", undefined, observation.url);
       return decision;
     } finally {
       pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
@@ -679,17 +694,41 @@ async function runJevActionTask(
     if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
     assertOwnedTabId(session, tabId);
     if (session.activeTabId !== tabId) return defer("The active owned tab changed.");
-    const observation = nextObservation || await readOwnedPage();
+    let observation = nextObservation || await readOwnedPage();
     nextObservation = undefined;
+    if (lastActed) {
+      let outcome = describeJevOutcome(lastActed.before, observation);
+      if (outcome === JEV_NO_VISIBLE_CHANGE && lastActed.reused) {
+        // The action reply can precede an asynchronous page response; look once more before calling it a no-op.
+        await sleep(250);
+        if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+        observation = await readOwnedPage();
+        outcome = describeJevOutcome(lastActed.before, observation);
+      }
+      lastActed.entry.outcome = outcome;
+      unchangedActions = outcome === JEV_NO_VISIBLE_CHANGE ? unchangedActions + 1 : 0;
+      lastActed = undefined;
+    }
     updateTrackedTabFromObservation(session, tabId, observation);
     recordObservationEvidence(session, observation);
+    if (unchangedActions >= JEV_UNCHANGED_ACTION_LIMIT) {
+      const reason = `The last ${unchangedActions} Jev actions left the page unchanged.`;
+      appendLog("warning", reason);
+      return defer(reason);
+    }
+    const requestBudget = validJevMaxRequests(settings.jev?.maxRequests) ?? JEV_DEFAULT_MAX_REQUESTS;
+    if (session.jevRequests >= requestBudget) {
+      const reason = `Jev reached its budget of ${requestBudget} requests for this run.`;
+      appendLog("warning", reason);
+      return defer(reason, false);
+    }
     let result: JevActionDecision;
     try {
       result = await decide(observation);
     } catch (error) {
       if (session.abortSignal.aborted) throw new ModelRequestCancelledError();
       if (error instanceof JevDecisionError) {
-        recordJevDecision(session, { kind: "fallback", operation: "fallback", reason: error.message }, "fallback", error.elapsedMs);
+        recordJevDecision(session, { kind: "fallback", operation: "fallback", reason: error.message }, "fallback", error.elapsedMs, observation.url);
       }
       return defer(error instanceof Error ? error.message : "Jev request failed.", false);
     }
@@ -703,6 +742,13 @@ async function runJevActionTask(
         if (++staleRetries > 2) return defer("The page kept changing during completion verification.");
         nextObservation = fresh;
         continue;
+      }
+      // Independent of the model: radio groups left unanswered refuse completion once this run has answered a choice.
+      const openChoices = fresh.choiceGroups;
+      if (session.jevChoiceAnswers > 0 && openChoices && openChoices.unanswered > 0) {
+        const reason = `${openChoices.unanswered} of ${openChoices.total} choice questions on this page have no selected answer.`;
+        appendLog("warning", reason);
+        return defer(reason);
       }
       recordObservationEvidence(session, fresh);
       const evidence = session.run.evidence.at(-1);
@@ -773,32 +819,58 @@ async function runJevActionTask(
     }
     if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
     assertOwnedTabId(session, tabId);
-    const executed = await executeAction(tabId, action);
+    const executed = await timeJevStage(session, "action", () => executeAction(tabId, action));
     if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
     if (!executed.ok || executed.recoverable) {
-      if (executed.notExecuted && ++staleRetries <= 2) { nextObservation = executed.observation; continue; }
+      if (executed.notExecuted && ++staleRetries <= 2) { nextObservation = reusableJevObservation(executed.observation); continue; }
       stop(`Jev stopped after an unverified action: ${executed.message}`);
       return { madeProgress: history.length > initialHistoryLength };
     }
     staleRetries = 0;
     pendingText = undefined;
     history.push({ action: action.type, target: action.elementId, url: observation.url, result: executed.message.slice(0, 300) });
+    const acted = history[history.length - 1];
+    const actedTarget = observation.elements.find((element) => element.id === action.elementId);
+    if (actedTarget?.type === "radio" || actedTarget?.role === "radio") session.jevChoiceAnswers += 1;
     if (executed.observation) {
       updateTrackedTabFromObservation(session, tabId, executed.observation);
     }
     recordActionEvidence(session, action, executed.message, observation.elements.find((element) => element.id === action.elementId));
     queueRunReportSave(session.run);
-    nextObservation = executed.observation;
+    nextObservation = reusableJevObservation(executed.observation);
+    lastActed = { entry: acted, before: observation, reused: Boolean(nextObservation) };
   }
   return { madeProgress: history.length > initialHistoryLength };
 }
 
-function recordJevDecision(session: RunningSession, decision: JevActionDecision, outcome: "fast" | "shadow" | "fallback", elapsedMs?: number): void {
+// Action results are capped at the LLM limit; reuse one only when it lost nothing, otherwise re-read at the Jev limit.
+function reusableJevObservation(observation: PageObservation | undefined): PageObservation | undefined {
+  if (!observation) return undefined;
+  const total = observation.interactiveElementCount ?? observation.elements.length;
+  return total <= LLM_OBSERVE_ELEMENTS ? observation : undefined;
+}
+
+async function timeJevStage<T>(session: RunningSession, stage: JevTimingStage, work: () => Promise<T>): Promise<T> {
+  const startedAt = performance.now();
+  try {
+    return await work();
+  } finally {
+    recordJevTiming(session, stage, performance.now() - startedAt);
+  }
+}
+
+function recordJevTiming(session: RunningSession, stage: JevTimingStage, elapsedMs: number): void {
+  usageSnapshot = { ...usageSnapshot, jev: addJevTiming(usageSnapshot.jev, stage, elapsedMs), updatedAt: Date.now() };
+  session.run.usage = usageSnapshot;
+}
+
+function recordJevDecision(session: RunningSession, decision: JevActionDecision, outcome: "fast" | "shadow" | "fallback", elapsedMs?: number, url?: string): void {
+  jevTrace = appendJevTrace(jevTrace, createJevTraceEntry({ decision, outcome, elapsedMs, url, at: Date.now() }));
   const answer = decision.result?.answers.operation;
   if (answer || elapsedMs !== undefined) {
     usageSnapshot = { ...usageSnapshot, jev: addJevUsage(usageSnapshot.jev, {
       outcome, message: decision.reason, elapsedMs,
-      decision: answer && decision.result ? { ...answer, elapsedMs: decision.result.elapsedMs, inputTokens: decision.result.inputTokens, outputTokens: decision.result.outputTokens } : undefined,
+      decision: answer && decision.result ? { ...answer, elapsedMs: decision.result.elapsedMs, inputTokens: decision.result.inputTokens, outputTokens: decision.result.outputTokens, attempts: decision.result.attempts, model: decision.result.model } : undefined,
     }), updatedAt: Date.now() };
     if (usageSnapshot.jev && decision.result) {
       usageSnapshot.jev.lastDecision = Object.entries(decision.result.answers).map(([question, choice]) => ({
@@ -817,7 +889,10 @@ function recordJevDecision(session: RunningSession, decision: JevActionDecision,
       appendLog("info", `Jev ignored invalid unused answers: ${decision.result.ignoredAnswers.join(", ")}. The selected operation and required answers were validated.`);
     }
     const distributions = Object.entries(decision.result.answers).map(([name, choice]) => `${name}: ${choice.choice} (${Math.round(choice.confidence * 100)}%); ${Object.entries(choice.probabilities).sort((first, second) => second[1] - first[1]).slice(0, 3).map(([option, probability]) => `${option}=${probability.toFixed(2)}`).join(", ")}`).join(" | ");
-    appendLog("info", `Jev decision details: ${distributions}`);
+    appendLog("info", `Jev decision details${decision.result.model ? ` (model ${decision.result.model})` : ""}: ${distributions}`);
+    if ((decision.result.attempts || 1) > 1) {
+      appendLog("info", `Jev answered after ${decision.result.attempts} attempts; earlier attempts were rate limited or unavailable.`);
+    }
   }
 }
 
@@ -1125,14 +1200,15 @@ async function handleSingleAction(
   };
 }
 
-async function observePage(tabId: number): Promise<PageObservation> {
+async function observePage(tabId: number, maxElements?: number): Promise<PageObservation> {
+  const message = maxElements === undefined ? { type: "CONTENT_OBSERVE" as const } : { type: "CONTENT_OBSERVE" as const, maxElements };
   try {
-    return await sendTabMessage<PageObservation>(tabId, { type: "CONTENT_OBSERVE" });
+    return await sendTabMessage<PageObservation>(tabId, message);
   } catch (firstError) {
     try {
       await tryInjectContentScript(tabId);
       await sleep(250);
-      return await sendTabMessage<PageObservation>(tabId, { type: "CONTENT_OBSERVE" });
+      return await sendTabMessage<PageObservation>(tabId, message);
     } catch {
       throw new Error(
         `Could not read this page. It may be a browser page, protected store page, PDF, or missing host permission. ${getErrorMessage(
@@ -1376,6 +1452,8 @@ function createRunningSession(
     nextTabNumber: 2,
     consecutiveFailedSteps: 0,
     autoScreenshots: 0,
+    jevRequests: 0,
+    jevChoiceAnswers: 0,
     stopped: false,
     runPersistenceEnabled,
     abortSignal,
@@ -2043,7 +2121,7 @@ async function validateCompletionWithModel(
         `Fresh URL: ${observation.url}`,
         `Fresh title: ${observation.title}`,
         `Fresh text: ${observation.text.slice(0, 6_000)}`,
-        `Fresh controls: ${JSON.stringify(observation.elements.slice(0, 40))}`,
+        `Fresh controls: ${JSON.stringify(observation.elements.slice(0, 40).map(({ scopeState: _scopeState, ...element }) => element))}`,
       ].join("\n"),
     },
   ];
@@ -2125,9 +2203,13 @@ async function requestModelStep(
   pendingModelRequestCount += 1;
   setModelRetryStatus(undefined);
   emitModelStatus();
+  const startedAt = performance.now();
   try {
     return await requestAgentStep(settings, messages, reportModelNotice, signal);
   } finally {
+    if (settings.jev?.mode === "fast" && settings.jev.apiKey.trim() && runningSession) {
+      recordJevTiming(runningSession, "llm", performance.now() - startedAt);
+    }
     pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
     if (pendingModelRequestCount === 0) {
       setModelRetryStatus(undefined);
@@ -2606,6 +2688,7 @@ async function answerDirectChat(
 ): Promise<void> {
   directChatTaskId = taskId;
   usageSnapshot = createEmptyUsageSnapshot(settings);
+  jevTrace = [];
   emitUsage();
   emitStatus();
   appendLog("info", "Answering a conversational request without browser access.");

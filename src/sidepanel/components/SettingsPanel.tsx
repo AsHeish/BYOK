@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Download, LoaderCircle, RefreshCw, Save, Trash2, Upload, Wifi } from "lucide-react";
 import {
+  JEV_CONFIDENCE_CEILING,
+  JEV_CONFIDENCE_FLOOR,
+  JEV_DEFAULT_MAX_REQUESTS,
+  JEV_MAX_REQUESTS_LIMIT,
   JEV_MODEL,
   MAX_REQUEST_TIMEOUT_SECONDS,
   MIN_REQUEST_TIMEOUT_SECONDS,
@@ -580,7 +584,7 @@ export function SettingsPanel({
               aria-pressed={(settings.jev?.mode || "off") === mode}
               disabled={mode !== "off" && !settings.jev?.apiKey.trim()}
               title={mode === "off" ? "Use only the LLM" : mode === "shadow" ? "Record Jev choices without executing them" : "Jev chooses actions; the LLM supplies missing text or handles unsupported tasks"}
-              onClick={() => onChange({ ...settings, jev: { apiKey: settings.jev?.apiKey || "", mode } })}
+              onClick={() => onChange({ ...settings, jev: { ...settings.jev, apiKey: settings.jev?.apiKey || "", mode } })}
             >
               {mode === "off" ? "Off" : mode === "shadow" ? "Shadow" : "Fast"}
             </button>
@@ -588,8 +592,50 @@ export function SettingsPanel({
         </div>
         <label>
           Jev model
-          <input value={JEV_MODEL} readOnly />
+          <input
+            value={settings.jev?.model ?? ""}
+            placeholder={JEV_MODEL}
+            spellCheck={false}
+            maxLength={64}
+            onChange={(event) => onChange({ ...settings, jev: withJevOption(settings.jev, "model", event.target.value || undefined) })}
+          />
         </label>
+        <label>
+          Jev requests per run
+          <input
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={JEV_MAX_REQUESTS_LIMIT}
+            step={1}
+            value={settings.jev?.maxRequests ?? ""}
+            placeholder={String(JEV_DEFAULT_MAX_REQUESTS)}
+            onChange={(event) => onChange({ ...settings, jev: withJevOption(settings.jev, "maxRequests", parseOptionalNumber(event.target.value)) })}
+          />
+        </label>
+        <label>
+          Jev minimum confidence
+          <input
+            type="number"
+            inputMode="decimal"
+            min={JEV_CONFIDENCE_FLOOR}
+            max={JEV_CONFIDENCE_CEILING}
+            step={0.01}
+            value={settings.jev?.confidenceFloor ?? ""}
+            placeholder={String(JEV_CONFIDENCE_FLOOR)}
+            onChange={(event) => onChange({ ...settings, jev: withJevOption(settings.jev, "confidenceFloor", parseOptionalNumber(event.target.value)) })}
+          />
+        </label>
+        <p className="storage-note">After the request budget is used, the LLM planner finishes the task. Confidence can only be raised above 0.95; empty fields use the defaults.</p>
+        <label className="checkbox-setting">
+          <input
+            type="checkbox"
+            checked={settings.jev?.replaceFilledFields === true}
+            onChange={(event) => onChange({ ...settings, jev: withJevOption(settings.jev, "replaceFilledFields", event.target.checked ? true : undefined) })}
+          />
+          <span>Let Jev replace existing text in fields</span>
+        </label>
+        <p className="storage-note">Off by default: Jev skips fields that already have a value. When on, it may overwrite a filled text field if the task asks for a different value. Password and other sensitive fields, and read-only fields, are never overwritten, and the new value is checked after typing.</p>
         <button
           type="button"
           className="secondary-button button-with-icon"
@@ -612,9 +658,16 @@ export function SettingsPanel({
 
 // A newly entered key turns Jev on (Fast); clearing the key turns it off.
 function withJevApiKey(jev: JevSettings | undefined, apiKey: string): JevSettings {
-  if (!apiKey.trim()) return { apiKey, mode: "off" };
+  if (!apiKey.trim()) return { ...jev, apiKey, mode: "off" };
   const mode = jev?.mode || "off";
-  return { apiKey, mode: !jev?.apiKey.trim() && mode === "off" ? "fast" : mode };
+  return { ...jev, apiKey, mode: !jev?.apiKey.trim() && mode === "off" ? "fast" : mode };
+}
+
+function withJevOption<K extends "model" | "maxRequests" | "confidenceFloor" | "replaceFilledFields">(jev: JevSettings | undefined, key: K, value: JevSettings[K]): JevSettings {
+  const next: JevSettings = { apiKey: "", mode: "off", ...jev };
+  if (value === undefined) delete next[key];
+  else (next as unknown as Record<string, unknown>)[key] = value;
+  return next;
 }
 
 function parseOptionalNumber(value: string): number | undefined {

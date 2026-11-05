@@ -1,13 +1,34 @@
-import type { AgentUsageSnapshot } from "../../shared/types";
+import { useState } from "react";
+import type { AgentUsageSnapshot, JevStageTiming, JevTimingStage } from "../../shared/types";
+import { buildJevTraceExport, downloadJson, fetchJevTrace } from "../jevTraceExport";
+
+const TIMING_LABELS: Record<JevTimingStage, string> = {
+  snapshot: "Page snapshot", jev: "Jev request", action: "Browser action", llm: "LLM planner",
+};
 
 interface UsageDashboardProps {
   usage: AgentUsageSnapshot;
 }
 
 export function UsageDashboard({ usage }: UsageDashboardProps) {
+  const [traceNotice, setTraceNotice] = useState<string>();
   const cacheHitRate = usage.promptTokens
     ? Math.round((usage.cachedPromptTokens / usage.promptTokens) * 100)
     : 0;
+
+  async function exportTrace() {
+    try {
+      const entries = await fetchJevTrace();
+      if (!entries.length) {
+        setTraceNotice("No Jev decisions to export yet.");
+        return;
+      }
+      downloadJson(`jev-trace-${new Date().toISOString().replace(/[:.]/g, "-")}.json`, buildJevTraceExport(entries));
+      setTraceNotice(`Exported ${entries.length} decisions. The file has no task text, page text or field values.`);
+    } catch (error) {
+      setTraceNotice(error instanceof Error ? error.message : "Could not read the Jev trace.");
+    }
+  }
 
   return (
     <section className="panel usage-panel" aria-label="Token and cost dashboard">
@@ -46,6 +67,22 @@ export function UsageDashboard({ usage }: UsageDashboardProps) {
             <Metric label="Jev input tokens" value={formatInteger(usage.jev.inputTokens)} />
             <Metric label="Jev output tokens" value={formatInteger(usage.jev.outputTokens)} />
             <Metric label="Jev cost est." value={`$${usage.jev.estimatedCostUsd.toFixed(6)}`} />
+            <Metric label="Jev retries" value={formatInteger(usage.jev.retries || 0)} />
+            {usage.jev.lastModel ? <Metric label="Jev model" value={usage.jev.lastModel} /> : null}
+          </div>
+          <button type="button" className="secondary-button" onClick={() => void exportTrace()}>Download Jev trace</button>
+          {traceNotice ? <p className="storage-note" role="status">{traceNotice}</p> : null}
+        </details>
+      ) : null}
+
+      {usage.jev?.timings && Object.keys(usage.jev.timings).length ? (
+        <details className="usage-details">
+          <summary>Jev step timings</summary>
+          <div className="usage-grid usage-grid-secondary">
+            {(Object.entries(usage.jev.timings) as Array<[JevTimingStage, JevStageTiming]>).map(([stage, timing]) => (
+              <Metric key={stage} label={`${TIMING_LABELS[stage]} (${timing.count})`}
+                value={`avg ${formatDuration(timing.count ? timing.totalMs / timing.count : undefined)} / max ${formatDuration(timing.maxMs)}`} />
+            ))}
           </div>
         </details>
       ) : null}

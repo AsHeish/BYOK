@@ -87,6 +87,37 @@ describe("settings persistence", () => {
     expect((await loadSettings()).apiKey).toBe(PROFILE_SETTINGS.apiKey);
   });
 
+  it("keeps a valid Jev request budget and drops invalid ones", async () => {
+    await saveSettings({ ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "jev-key", maxRequests: 40 } });
+    expect((await loadSettings()).jev).toEqual({ mode: "fast", apiKey: "jev-key", maxRequests: 40 });
+    for (const invalid of [0, -1, 2.5, 1001, Number.NaN, "40", null]) {
+      stored.byokAgentSettings = { ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "jev-key", maxRequests: invalid } };
+      expect((await loadSettings()).jev).toEqual({ mode: "fast", apiKey: "jev-key" });
+    }
+    stored.byokAgentSettings = { ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "jev-key", maxRequests: 1000 } };
+    expect((await loadSettings()).jev?.maxRequests).toBe(1000);
+  });
+
+  it("keeps a valid Jev model name and drops unsafe ones", async () => {
+    await saveSettings({ ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "jev-key", model: " jev-1.14.0 " } });
+    expect((await loadSettings()).jev).toEqual({ mode: "fast", apiKey: "jev-key", model: "jev-1.14.0" });
+    for (const invalid of ["", "   ", "has space", "../x", "-leading", "a".repeat(65), 7, null]) {
+      stored.byokAgentSettings = { ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "jev-key", model: invalid } };
+      expect((await loadSettings()).jev).toEqual({ mode: "fast", apiKey: "jev-key" });
+    }
+  });
+
+  it("keeps a minimum confidence only between 0.95 and 0.99", async () => {
+    for (const valid of [0.95, 0.97, 0.99]) {
+      stored.byokAgentSettings = { ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "jev-key", confidenceFloor: valid } };
+      expect((await loadSettings()).jev?.confidenceFloor).toBe(valid);
+    }
+    for (const invalid of [0.94, 0.5, 0, 1, 1.5, Number.NaN, "0.97", null]) {
+      stored.byokAgentSettings = { ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "jev-key", confidenceFloor: invalid } };
+      expect((await loadSettings()).jev).toEqual({ mode: "fast", apiKey: "jev-key" });
+    }
+  });
+
   it("does not enable Jev for invalid settings or an absent key", async () => {
     stored.byokAgentSettings = { jev: { mode: "unknown", apiKey: "jev-key" } };
     expect((await loadSettings()).jev?.mode).toBe("off");
@@ -114,6 +145,34 @@ describe("settings persistence", () => {
 });
 
 describe("run report persistence", () => {
+  it("keeps only valid, non-negative Jev stage timings when reloading", async () => {
+    const usage = {
+      requestCount: 0, successfulRequestCount: 0, cacheHitRequestCount: 0, promptTokens: 0, cachedPromptTokens: 0,
+      completionTokens: 0, totalTokens: 0, totalLatencyMs: 0, costConfigured: false,
+      jev: { requests: 1, fastDecisions: 1, shadowDecisions: 0, fallbacks: 0, inputTokens: 1, outputTokens: 1, totalLatencyMs: 1, estimatedCostUsd: 0,
+        timings: { snapshot: { count: 3, totalMs: 90, maxMs: 50 }, llm: { count: 1, totalMs: -5, maxMs: Number.NaN }, bogus: { count: 1 } } },
+    } as unknown as RunReport["usage"];
+    await saveRunReport({ id: "timed", task: "t", status: "completed", startUrl: "https://example.com/", requirements: [], evidence: [], findings: [], usage, startedAt: 1, updatedAt: 1, endedAt: 1 });
+    const [reloaded] = await loadRunReports();
+    expect(reloaded.usage.jev?.timings).toEqual({ snapshot: { count: 3, totalMs: 90, maxMs: 50 }, llm: { count: 1, totalMs: 0, maxMs: 0 } });
+  });
+
+  it("keeps the Jev model revision and retry count in saved run reports and sanitizes bad values", async () => {
+    const make = (jev: Record<string, unknown>) => ({
+      requestCount: 0, successfulRequestCount: 0, cacheHitRequestCount: 0, promptTokens: 0, cachedPromptTokens: 0,
+      completionTokens: 0, totalTokens: 0, totalLatencyMs: 0, costConfigured: false,
+      jev: { requests: 1, fastDecisions: 1, shadowDecisions: 0, fallbacks: 0, inputTokens: 1, outputTokens: 1, totalLatencyMs: 1, estimatedCostUsd: 0, ...jev },
+    }) as unknown as RunReport["usage"];
+    const base = { task: "t", status: "completed" as const, startUrl: "https://example.com/", requirements: [], evidence: [], findings: [], startedAt: 1, updatedAt: 1, endedAt: 1 };
+    await saveRunReport({ ...base, id: "good", usage: make({ lastModel: "jev-1.13.0-r7", retries: 2 }) });
+    await saveRunReport({ ...base, id: "bad", usage: make({ lastModel: "has space <b>", retries: -4 }) });
+    const reports = await loadRunReports();
+    expect(reports.find((report) => report.id === "good")?.usage.jev).toMatchObject({ lastModel: "jev-1.13.0-r7", retries: 2 });
+    const bad = reports.find((report) => report.id === "bad")?.usage.jev;
+    expect(bad).not.toHaveProperty("lastModel");
+    expect(bad?.retries).toBe(0);
+  });
+
   it("survives reload and marks an unfinished run interrupted", async () => {
     const report: RunReport = {
       id: "task-1",
@@ -294,5 +353,16 @@ describe("configuration profile persistence", () => {
   it("rejects unsupported import files", async () => {
     await expect(importConfigurationProfiles({ version: 99, profiles: [] }))
       .rejects.toThrow("not supported");
+  });
+});
+
+describe("Jev replace-existing setting", () => {
+  it("keeps only an explicit true", async () => {
+    stored.byokAgentSettings = { ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "jev-key", replaceFilledFields: true } };
+    expect((await loadSettings()).jev).toEqual({ mode: "fast", apiKey: "jev-key", replaceFilledFields: true });
+    for (const other of [false, "true", 1, null]) {
+      stored.byokAgentSettings = { ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "jev-key", replaceFilledFields: other } };
+      expect((await loadSettings()).jev).toStrictEqual({ mode: "fast", apiKey: "jev-key" });
+    }
   });
 });

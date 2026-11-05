@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PageObservation } from "../shared/types";
-import { addJevUsage, getJevCandidates, getJevNavigationGoal, tryJevNavigation } from "./jevNavigation";
+import { addJevTiming, addJevUsage, getJevCandidates, getJevNavigationGoal, tryJevNavigation } from "./jevNavigation";
+import { JEV_MODEL } from "../shared/defaults";
 
 function observation(): PageObservation {
   return {
@@ -24,6 +25,33 @@ function setup(mode: "fast" | "shadow" | "off" = "fast", choice = "link_1", conf
     }),
   };
 }
+
+describe("Jev step timings", () => {
+  it("accumulates count, total and maximum per stage without touching other counters", () => {
+    const first = addJevTiming(undefined, "snapshot", 40.4);
+    const second = addJevTiming(first, "snapshot", 90);
+    expect(second.timings?.snapshot).toEqual({ count: 2, totalMs: 130, maxMs: 90 });
+    expect(second.requests).toBe(0);
+    expect(addJevTiming(second, "llm", 5000).timings).toMatchObject({ snapshot: { count: 2 }, llm: { count: 1, totalMs: 5000, maxMs: 5000 } });
+  });
+
+  it("clamps invalid elapsed values and survives later usage updates", () => {
+    const timed = addJevTiming(undefined, "action", Number.NaN);
+    expect(timed.timings?.action).toEqual({ count: 1, totalMs: 0, maxMs: 0 });
+    const result = { decision: { choice: "a", confidence: 1, probabilities: {}, elapsedMs: 10, inputTokens: 5, outputTokens: 1 }, outcome: "fast" as const, message: "ok" };
+    expect(addJevUsage(timed, result)?.timings).toEqual(timed.timings);
+  });
+
+  it("accumulates retries and keeps the last reported model revision", () => {
+    const decision = (attempts: number, model?: string) => ({ decision: { choice: "a", confidence: 1, probabilities: {}, elapsedMs: 10, attempts, model }, outcome: "fast" as const, message: "ok" });
+    const first = addJevUsage(undefined, decision(3, "rev-1"));
+    expect(first).toMatchObject({ retries: 2, lastModel: "rev-1" });
+    const second = addJevUsage(first, decision(1));
+    expect(second).toMatchObject({ retries: 2, lastModel: "rev-1" });
+    expect(addJevUsage(second, decision(2, "rev-2"))).toMatchObject({ retries: 3, lastModel: "rev-2" });
+    expect(addJevUsage(undefined, decision(1))).not.toHaveProperty("retries");
+  });
+});
 
 describe("bounded Jev navigation", () => {
   it("accepts delegation only with one low-risk browser navigation", () => {
@@ -84,9 +112,26 @@ describe("bounded Jev navigation", () => {
     expect(result.response).toBeUndefined();
   });
 
+  it("honours a stricter minimum confidence but never a looser one", async () => {
+    const strict = setup("fast", "link_1", 0.96);
+    expect((await tryJevNavigation({ ...strict, settings: { ...strict.settings, confidenceFloor: 0.97 } })).outcome).toBe("fallback");
+    const met = setup("fast", "link_1", 0.97);
+    expect((await tryJevNavigation({ ...met, settings: { ...met.settings, confidenceFloor: 0.97 } })).outcome).toBe("fast");
+    const loose = setup("fast", "link_1", 0.9);
+    expect((await tryJevNavigation({ ...loose, settings: { ...loose.settings, confidenceFloor: 0.5 } })).outcome).toBe("fallback");
+  });
+
+  it("sends the configured Jev model and ignores an invalid name", async () => {
+    const args = setup();
+    await tryJevNavigation({ ...args, settings: { ...args.settings, model: "jev-custom-2" } });
+    expect(JSON.parse(args.transport.mock.calls[0][0].body).model).toBe("jev-custom-2");
+    await tryJevNavigation({ ...args, settings: { ...args.settings, model: "bad model!" } });
+    expect(JSON.parse(args.transport.mock.calls[1][0].body).model).toBe(JEV_MODEL);
+  });
+
   it("disables Jev for the run after an API error", async () => {
     const args = setup();
-    args.transport.mockResolvedValue({ ok: false, status: 429, statusText: "rate limit", responseText: "" });
+    args.transport.mockResolvedValue({ ok: false, status: 401, statusText: "unauthorized", responseText: "" });
     const result = await tryJevNavigation(args);
     expect(result).toMatchObject({ disableForRun: true, outcome: "fallback" });
     expect(args.transport).toHaveBeenCalledTimes(1);

@@ -8,6 +8,7 @@ import type {
 } from "../shared/types";
 
 const MAX_DOM_ELEMENTS = 80;
+const MAX_JEV_DOM_ELEMENTS = 250;
 const MAX_PAGE_TEXT_CHARS = 10000;
 const MAX_ELEMENT_CONTEXT_CHARS = 900;
 const MAX_DOM_ROOTS = 30;
@@ -126,22 +127,30 @@ type HtmlConstructorName =
   | "HTMLAnchorElement"
   | "HTMLLabelElement";
 
-export function observePage(): PageObservation {
+export function observePage(maxElements = MAX_DOM_ELEMENTS): PageObservation {
   currentElements.clear();
   currentElementInfo.clear();
 
+  const limit = Number.isInteger(maxElements) ? Math.min(MAX_JEV_DOM_ELEMENTS, Math.max(1, maxElements)) : MAX_DOM_ELEMENTS;
   const contexts = collectDomContexts();
   const interactiveElements = getCandidateInteractiveElements(contexts)
     .filter(isVisibleElement)
     .sort(compareElementsForCurrentViewport);
-  const elements = interactiveElements
-    .slice(0, MAX_DOM_ELEMENTS)
-    .map(toElementInfo);
+  boundaryTextChecks = new WeakMap();
+  scopeStateCache = new WeakMap();
+  let elements: DomElementInfo[];
+  try {
+    elements = selectElementsWithinLimit(interactiveElements, limit).map(toElementInfo);
+  } finally {
+    boundaryTextChecks = undefined;
+    scopeStateCache = undefined;
+  }
   const privateValues = queryAllInContexts(contexts, "input,textarea,[contenteditable='true']")
     .filter(isSensitiveElement)
     .map((element) => "value" in element ? String(element.value || "") : element.textContent || "")
     .filter((value) => value.length > 0);
   const redact = (text: string) => privateValues.reduce((value, secret) => value.split(secret).join("[redacted]"), text);
+  const choiceGroups = getChoiceGroupSummary(contexts);
 
   return {
     documentId,
@@ -151,9 +160,10 @@ export function observePage(): PageObservation {
     title: redact(document.title),
     text: redact(getReadableText(contexts)),
     elements: elements.map((element) => Object.fromEntries(Object.entries(element).map(([key, value]) => [key,
-      key === "id" || key === "fingerprint" ? value : typeof value === "string" ? redact(value) : Array.isArray(value) ? value.map(redact) : value,
+      key === "id" || key === "fingerprint" || key === "scopeState" ? value : typeof value === "string" ? redact(value) : Array.isArray(value) ? value.map(redact) : value,
     ])) as unknown as DomElementInfo),
     interactiveElementCount: interactiveElements.length,
+    ...(choiceGroups ? { choiceGroups } : {}),
     viewport: getViewportInfo(contexts),
     frames: contexts.frames
   };
@@ -240,6 +250,38 @@ function hashText(value: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0).toString(36);
+}
+
+// Counts visible native radio groups and ARIA radiogroups with no selection; hidden custom widgets are not counted, so this can only under-report.
+function getChoiceGroupSummary(contexts: DomContextCollection): PageObservation["choiceGroups"] {
+  const groups = new Map<Node, Map<string, { visible: boolean; answered: boolean }>>();
+  for (const radio of queryAllInContexts(contexts, "input[type='radio']")) {
+    if (!isInputElement(radio) || !radio.name || radio.disabled) continue;
+    const scope: Node = radio.form || radio.getRootNode();
+    const byName = groups.get(scope) || new Map<string, { visible: boolean; answered: boolean }>();
+    groups.set(scope, byName);
+    const group = byName.get(radio.name) || { visible: false, answered: false };
+    byName.set(radio.name, group);
+    const labels: Element[] = radio.labels ? Array.from(radio.labels) : [];
+    group.visible ||= [radio as Element, ...labels].some((candidate) => isVisibleElement(candidate));
+    group.answered ||= radio.checked;
+  }
+  let total = 0;
+  let unanswered = 0;
+  for (const byName of groups.values()) {
+    for (const group of byName.values()) {
+      if (!group.visible) continue;
+      total += 1;
+      if (!group.answered) unanswered += 1;
+    }
+  }
+  for (const radioGroup of queryAllInContexts(contexts, "[role='radiogroup']")) {
+    const radios = queryDescendants(radioGroup, "[role='radio']").filter((radio) => radio.getAttribute("aria-disabled") !== "true");
+    if (!radios.length || !isVisibleElement(radioGroup)) continue;
+    total += 1;
+    if (!radios.some((radio) => radio.getAttribute("aria-checked") === "true")) unanswered += 1;
+  }
+  return total ? { total, unanswered } : undefined;
 }
 
 function getViewportInfo(contexts: DomContextCollection): PageObservation["viewport"] {
@@ -538,6 +580,46 @@ export function getFormStateFingerprint(): string {
     isDisabled(element), element.getAttribute("readonly"), element.getAttribute("aria-readonly")])));
 }
 
+const TIGHT_SCOPE = "fieldset,[role='radiogroup'],[role='group'],li,tr,[role='row'],dialog,[role='dialog']";
+const SCOPE_CONTROLS = "input,textarea,select,[contenteditable='true']";
+const MAX_SCOPE_CONTROLS = 40;
+// Set only while observePage runs; element matching and guards recompute so they never read a stale value.
+let scopeStateCache: WeakMap<Node, Map<string, string | undefined>> | undefined;
+
+// State of a native choice control's own group (radio/checkbox peers sharing a name, plus controls in its tight container) or of a select.
+// Uses list positions rather than element IDs so observing never mints IDs; undefined means "not scopable", and callers fall back to the full form state.
+export function getScopeFormState(element: HTMLElement): string | undefined {
+  const choice = isInputElement(element) && (element.type === "radio" || element.type === "checkbox") ? element : undefined;
+  if (!choice && !isSelectElement(element)) return undefined;
+  const container = element.closest(TIGHT_SCOPE) || element.parentElement;
+  if (!container) return undefined;
+  const cacheKey = choice ? `${choice.type}|${choice.name}` : undefined;
+  const cached = cacheKey ? scopeStateCache?.get(container) : undefined;
+  if (cacheKey && cached?.has(cacheKey)) return cached.get(cacheKey);
+
+  const controls = new Set<HTMLElement>(Array.from(container.querySelectorAll<HTMLElement>(SCOPE_CONTROLS)));
+  controls.add(element);
+  if (choice?.name) {
+    const scope: ParentNode = choice.form || (choice.getRootNode() as ParentNode);
+    for (const peer of Array.from(scope.querySelectorAll<HTMLInputElement>("input"))) {
+      if (peer.type === choice.type && peer.name === choice.name) controls.add(peer);
+    }
+  }
+  let state: string | undefined;
+  if (controls.size <= MAX_SCOPE_CONTROLS) {
+    const ordered = Array.from(controls).filter((control) => !isSensitiveElement(control))
+      .sort((first, second) => first === second ? 0 : first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+    state = String(hashText(JSON.stringify(ordered.map((control, index) => [index, getSafeValue(control), getCheckedState(control),
+      isDisabled(control), control.getAttribute("readonly"), control.getAttribute("aria-readonly")]))));
+  }
+  if (cacheKey && scopeStateCache) {
+    const bucket = scopeStateCache.get(container) || new Map<string, string | undefined>();
+    bucket.set(cacheKey, state);
+    scopeStateCache.set(container, bucket);
+  }
+  return state;
+}
+
 export function getElementFingerprint(element: HTMLElement): string {
   const scope = element.closest("form,dialog,[role='dialog'],li,tr,[role='row']") || element.parentElement;
   return String(hashText(JSON.stringify([
@@ -623,6 +705,7 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
   const info: DomElementInfo = {
     id,
     fingerprint: getElementFingerprint(element),
+    scopeState: scopeStateCache ? getScopeFormState(element) : undefined,
     tag,
     frameContext: elementContext.frameContext,
     rootContext: elementContext.rootContext === "document" ? undefined : elementContext.rootContext,
@@ -740,6 +823,22 @@ function getOrCreateElementId(element: Element): string {
   nextElementId += 1;
   weakIds.set(element, id);
   return id;
+}
+
+const ADVANCE_CONTROL = /^(?:continue|next|next question|next page|submit|finish|done|save and continue|previous|back)$/i;
+
+// At the default limit this is exactly the old viewport-order slice; only larger limits reserve room for navigation and state controls.
+function selectElementsWithinLimit(sorted: HTMLElement[], limit: number): HTMLElement[] {
+  if (sorted.length <= limit || limit <= MAX_DOM_ELEMENTS) return sorted.slice(0, limit);
+  const kept = new Set(sorted.slice(0, limit));
+  const important = sorted.slice(limit).filter((element) => element.matches("button,[role='button'],input[type='button'],input[type='submit']")
+    && ADVANCE_CONTROL.test(normalizeText(element.getAttribute("aria-label") || element.textContent || (element as HTMLInputElement).value || "").replace(/[^\p{L}\p{N}\s]/gu, "").trim()));
+  if (!important.length) return sorted.slice(0, limit);
+  // Drop the farthest-from-viewport tail to make room, never an earlier-ranked control.
+  const room = Math.min(important.length, limit);
+  for (const element of sorted.slice(limit - room, limit)) kept.delete(element);
+  for (const element of important.slice(0, room)) kept.add(element);
+  return sorted.filter((element) => kept.has(element));
 }
 
 function getReadableText(contexts = collectDomContexts()): string {
@@ -1017,6 +1116,10 @@ function getElementQuestionContext(element: HTMLElement): { text: string; questi
   }
 
   const boundary = findQuestionContextBoundary(element) || getRootTextBoundary(element);
+  // Text before an element is a subset of its boundary's text, so no "Problem Statement N" there means no context; skip the costly Range read.
+  if (!boundaryMentionsProblemStatement(boundary)) {
+    return undefined;
+  }
   const beforeText = getTextBeforeElement(boundary, element);
   const questionText = extractNearestQuestionText(beforeText);
 
@@ -1075,6 +1178,19 @@ function isDropTargetElement(element: HTMLElement): boolean {
     role === "listbox" ||
     /drop|droppable|sortable|destination|target|answer/i.test(className)
   );
+}
+
+const PROBLEM_STATEMENT = /Problem Statement\s+\d+/i;
+// Scoped to one observePage pass as a safety margin: a found ancestor boundary always mentions the phrase, so a stale "no" can only ever sit on the body fallback.
+let boundaryTextChecks: WeakMap<Node, boolean> | undefined;
+
+function boundaryMentionsProblemStatement(boundary: HTMLElement | ShadowRoot): boolean {
+  const cached = boundaryTextChecks?.get(boundary);
+  if (cached !== undefined) return cached;
+  const text = "innerText" in boundary ? boundary.innerText || boundary.textContent || "" : boundary.textContent || "";
+  const mentions = PROBLEM_STATEMENT.test(normalizeText(text));
+  boundaryTextChecks?.set(boundary, mentions);
+  return mentions;
 }
 
 function findQuestionContextBoundary(element: HTMLElement): HTMLElement | undefined {

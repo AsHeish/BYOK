@@ -28,7 +28,7 @@ if (!window.__BYOK_AGENT_CONTENT_LOADED__) {
 
 async function handleMessage(message: BackgroundToContentMessage) {
   if (message.type === "CONTENT_OBSERVE") {
-    return observePage();
+    return observePage(message.maxElements);
   }
 
   if (message.type === "CONTENT_EXECUTE") {

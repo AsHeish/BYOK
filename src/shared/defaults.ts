@@ -3,6 +3,24 @@ import type { AgentSettings, OpenAiApi } from "./types";
 export const MIN_REQUEST_TIMEOUT_SECONDS = 10;
 export const MAX_REQUEST_TIMEOUT_SECONDS = 300;
 export const JEV_MODEL = "jev-1.13.0";
+export const JEV_DEFAULT_MAX_REQUESTS = 120;
+export const JEV_MAX_REQUESTS_LIMIT = 1000;
+// Users may only make Jev stricter than the default gate, never looser.
+export const JEV_CONFIDENCE_FLOOR = 0.95;
+export const JEV_CONFIDENCE_CEILING = 0.99;
+
+export function validJevConfidenceFloor(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= JEV_CONFIDENCE_FLOOR && value <= JEV_CONFIDENCE_CEILING ? value : undefined;
+}
+
+export function validJevMaxRequests(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= JEV_MAX_REQUESTS_LIMIT ? value : undefined;
+}
+
+export function validJevModel(value: unknown): string | undefined {
+  const model = typeof value === "string" ? value.trim() : "";
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(model) ? model : undefined;
+}
 
 export const DEFAULT_SETTINGS: AgentSettings = {
   provider: "openai",

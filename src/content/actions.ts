@@ -1,4 +1,4 @@
-import { extractPageData, getDocumentId, getElementFingerprint, getFormStateFingerprint, getMappedElement, getScrollContainer, observePage } from "./domMap";
+import { extractPageData, getDocumentId, getElementFingerprint, getFormStateFingerprint, getMappedElement, getScopeFormState, getScrollContainer, isSensitiveElement, observePage } from "./domMap";
 import type { AgentAction, ContentActionResult } from "../shared/types";
 
 type ElementLookup = { ok: true; value: HTMLElement } | { ok: false; message: string; recoverable?: boolean };
@@ -136,13 +136,16 @@ function validateActionGuard(action: AgentAction, afterFocus = false): string | 
   const guard = action.guard!;
   if (!afterFocus && consumedGuards.has(guard.id)) return "This action was already attempted. Observe before choosing another action.";
   if (guard.documentId !== getDocumentId() || guard.url !== location.href) return "The document changed. Observe before acting.";
-  if (guard.formState && guard.formState !== getFormStateFingerprint()) return "Form values changed. Observe before acting.";
+  if (!guard.scopes && guard.formState && guard.formState !== getFormStateFingerprint()) return "Form values changed. Observe before acting.";
   const targetIds = [action.elementId, ...(action.elementIds || []), action.targetElementId,
     ...(action.dragPairs || []).flatMap((pair) => [pair.elementId, pair.targetElementId])].filter((id): id is string => Boolean(id));
   for (const id of targetIds) {
     const target = getMappedElement(id);
     if (!target?.isConnected || !guard.targets[id] || getElementFingerprint(target) !== guard.targets[id]) {
       return "The selected target or its context changed. Observe before acting.";
+    }
+    if (guard.scopes && getScopeFormState(target) !== guard.scopes[id]) {
+      return "Form values in the selected control's group changed. Observe before acting.";
     }
     const choiceClick = (action.type === "click" || action.type === "multi_click")
       && isInputElement(target) && (target.type === "radio" || target.type === "checkbox");
@@ -505,7 +508,7 @@ async function typeIntoElement(elementId: string | undefined, text: string, acti
 
   if (isInputElement(editable)) {
     if (hasExistingEditableValue(editable)) {
-      return skipAlreadyFilledField(editable);
+      return canReplaceValue(editable, action) ? replaceEditableValue(editable, text) : skipAlreadyFilledField(editable);
     }
     setNativeValue(editable, text);
     dispatchFormEvents(editable);
@@ -517,7 +520,7 @@ async function typeIntoElement(elementId: string | undefined, text: string, acti
 
   if (isTextAreaElement(editable)) {
     if (hasExistingEditableValue(editable)) {
-      return skipAlreadyFilledField(editable);
+      return canReplaceValue(editable, action) ? replaceEditableValue(editable, text) : skipAlreadyFilledField(editable);
     }
     setNativeValue(editable, text);
     dispatchFormEvents(editable);
@@ -529,7 +532,7 @@ async function typeIntoElement(elementId: string | undefined, text: string, acti
 
   if (editable.isContentEditable) {
     if (hasExistingEditableValue(editable)) {
-      return skipAlreadyFilledField(editable);
+      return canReplaceValue(editable, action) ? replaceEditableValue(editable, text) : skipAlreadyFilledField(editable);
     }
     editable.textContent = text;
     dispatchInputEvent(editable);
@@ -616,6 +619,29 @@ function getEditableValue(element: TextEditableElement): string {
 
 function normalizeTypedValue(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+// Only a Jev guard issued under the opt-in setting may overwrite; read-only fields were already refused for guarded fills.
+function canReplaceValue(editable: TextEditableElement, action?: AgentAction): boolean {
+  return action?.guard?.replaceExisting === true && !isSensitiveElement(editable);
+}
+
+function replaceEditableValue(editable: TextEditableElement, text: string): ContentActionResult {
+  const wanted = normalizeTypedValue(text);
+  if (normalizeTypedValue(getEditableValue(editable)) === wanted) {
+    return { ok: true, message: `${describeElement(editable)} already holds that value; nothing was changed.` };
+  }
+  if (isInputElement(editable) || isTextAreaElement(editable)) {
+    setNativeValue(editable, text);
+    dispatchFormEvents(editable);
+  } else {
+    editable.textContent = text;
+    dispatchInputEvent(editable);
+  }
+  if (normalizeTypedValue(getEditableValue(editable)) !== wanted) {
+    return { ok: false, recoverable: true, message: `The page did not keep the replacement value in ${describeElement(editable)}.` };
+  }
+  return { ok: true, message: `Replaced the existing value in ${describeElement(editable)}.` };
 }
 
 function skipAlreadyFilledField(editable: TextEditableElement): ContentActionResult {

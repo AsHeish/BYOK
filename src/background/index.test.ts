@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_SETTINGS } from "../shared/defaults";
+import { DEFAULT_SETTINGS, JEV_MODEL } from "../shared/defaults";
 import type { AgentAction, AgentModelResponse, AgentSettings, JevSettings, RunReport, SidePanelToBackgroundMessage } from "../shared/types";
 import type { ModelHttpRequest } from "./modelClient";
 
@@ -564,7 +564,7 @@ describe("Jev background loop integration", () => {
     { mode: "shadow", confidence: 0.99, status: 200, llmCalls: 3, jevCalls: 3, skipped: 0 },
     { mode: "off", confidence: 0.99, status: 200, llmCalls: 3, jevCalls: 0, skipped: 0 },
     { mode: "fast", confidence: 0.6, status: 200, llmCalls: 3, jevCalls: 3, skipped: 0 },
-    { mode: "fast", confidence: 0.99, status: 429, llmCalls: 3, jevCalls: 1, skipped: 0 },
+    { mode: "fast", confidence: 0.99, status: 401, llmCalls: 3, jevCalls: 1, skipped: 0 },
   ] as const)("runs $mode with confidence $confidence and HTTP $status", async (scenario) => {
     jevConfidence = scenario.confidence;
     jevStatus = scenario.status;
@@ -578,10 +578,19 @@ describe("Jev background loop integration", () => {
     expect(tab.url).toBe("https://example.test/docs/setup");
     const executed = mocks.sendTabMessage.mock.calls.filter(([, message]) => message.type === "CONTENT_EXECUTE");
     expect(executed.map(([, message]) => message.action.type)).toEqual(scenario.llmCalls ? ["navigate", "navigate"] : ["click"]);
-    const state = await send({ type: "SIDEPANEL_GET_STATE" }) as { running: boolean; usage: { jev?: { fastDecisions: number; requests: number } } };
+    const state = await send({ type: "SIDEPANEL_GET_STATE" }) as { running: boolean; usage: { jev?: { fastDecisions: number; requests: number; timings?: Record<string, { count: number; maxMs: number }> } } };
     expect(state.running).toBe(false);
     expect(state.usage.jev?.fastDecisions || 0).toBe(scenario.skipped);
     expect(state.usage.jev?.requests || 0).toBe(scenario.jevCalls);
+    const timings = state.usage.jev?.timings;
+    if (scenario.mode === "fast") {
+      expect(timings?.jev?.count).toBe(scenario.jevCalls);
+      expect(timings?.snapshot?.count).toBeGreaterThanOrEqual(1);
+      expect(timings?.llm?.count || 0).toBe(scenario.llmCalls);
+      expect(timings?.action?.count || 0).toBe(scenario.llmCalls ? 0 : 1);
+    } else {
+      expect(timings).toBeUndefined();
+    }
   });
 
   it("cancels fast mode on Stop without starting another LLM call", async () => {
@@ -744,5 +753,344 @@ describe("Jev runtime selection", () => {
     expect(requests("llm")[0].signal.aborted).toBe(true);
     expect(fieldValue).toBe("");
     expect(mocks.sendTabMessage.mock.calls.filter(([, message]) => message.type === "CONTENT_EXECUTE")).toHaveLength(0);
+  });
+
+  it("reads at the 250-element Jev limit while the LLM planner keeps the default, and re-reads a truncated action result", async () => {
+    jevConfidence = 0.6;
+    const observeLimits: Array<number | undefined> = [];
+    const original = mocks.sendTabMessage.getMockImplementation()!;
+    mocks.sendTabMessage.mockImplementation(async (tabId: number, message: { type: string; maxElements?: number; action?: AgentAction }) => {
+      if (message.type === "CONTENT_OBSERVE") {
+        observeLimits.push(message.maxElements);
+        return { ...observation(), interactiveElementCount: 300 };
+      }
+      if (message.type === "CONTENT_EXECUTE") {
+        const result = await original(tabId, message as never) as Record<string, unknown>;
+        return { ...result, observation: { ...(result.observation as object), interactiveElementCount: 300 } };
+      }
+      return original(tabId, message as never);
+    });
+    const originalTransport = mocks.transport.getMockImplementation()!;
+    mocks.transport.mockImplementation(async (request: ModelHttpRequest) => {
+      const result = await originalTransport(request);
+      if (!request.endpoint.includes("api.typesafe.ai")) jevConfidence = 0.99;
+      return result;
+    });
+    await start("fast");
+    await waitForAnswer("Jev verified");
+    expect(observeLimits.length).toBeGreaterThan(1);
+    expect(observeLimits[0]).toBe(250);
+    expect(observeLimits).toContain(undefined);
+    expect(observeLimits.filter((limit) => limit === 250).length).toBeGreaterThan(1);
+  });
+});
+
+function jevAnswer(request: ModelHttpRequest, pick: (name: string) => string | undefined) {
+  const questions = JSON.parse(request.body).questions as Record<string, { criteria: Record<string, string> }>;
+  return {
+    ok: true, status: 200, statusText: "OK",
+    responseText: JSON.stringify({ answers: Object.fromEntries(Object.entries(questions).map(([name, question]) => {
+      const choice = pick(name) ?? Object.keys(question.criteria)[0];
+      return [name, { type: "choice", choice, confidence: 0.99, probabilities: Object.fromEntries(Object.keys(question.criteria).map((option) => [option, Number(option === choice)])) }];
+    })), usage: { input_tokens: 100, output_tokens: 20 } }),
+  };
+}
+
+// Four buttons whose clicks never navigate; the page only changes when a test edits tab.title.
+function flatPage() {
+  return {
+    documentId: `doc:${tab.url}`, isLoading: false, url: tab.url, title: tab.title, text: "Static page",
+    elements: [1, 2, 3, 4].map((n) => ({ id: `el-${n}`, fingerprint: `button:${n}`, tag: "button", text: `Button ${n}`, isDisabled: false, isSensitive: false })),
+  };
+}
+
+function useFlatPage(onClick?: (executed: number) => void) {
+  const original = mocks.sendTabMessage.getMockImplementation()!;
+  let executed = 0;
+  mocks.sendTabMessage.mockImplementation(async (tabId: number, message: { type: string }) => {
+    if (message.type === "CONTENT_EXECUTE") {
+      executed += 1;
+      const reply = flatPage();
+      onClick?.(executed);
+      return { ok: true, message: "Clicked", observation: reply };
+    }
+    return message.type === "CONTENT_OBSERVE" ? flatPage() : original(tabId, message);
+  });
+}
+
+function executedActions() {
+  return mocks.sendTabMessage.mock.calls.filter(([, message]) => message.type === "CONTENT_EXECUTE");
+}
+
+function hasLog(text: string) {
+  return mocks.notify.mock.calls.some(([message]) => message.type === "AGENT_LOG" && message.entry.message.includes(text));
+}
+
+describe("Jev outcome feedback, unchanged-page handoff and request budget", () => {
+  it("records what each executed action changed", async () => {
+    journeyLength = 3;
+    await start("fast");
+    await waitForAnswer("Jev verified");
+    const recent = JSON.parse(requests("jev")[1].body).state.recentActions;
+    expect(recent[0]).toMatchObject({ action: "click", outcome: "navigated to https://example.test/step-1" });
+  });
+
+  it("describes a same-URL change as a page change", async () => {
+    useField = true;
+    await start("fast", {}, 'Search for "typescript" and open the result');
+    await waitForAnswer("Jev verified");
+    const recent = JSON.parse(requests("jev")[1].body).state.recentActions;
+    expect(recent[0]).toMatchObject({ action: "fill", outcome: "page changed" });
+  });
+
+  it("hands over to the LLM after three different actions leave the page unchanged", async () => {
+    useFlatPage();
+    let jevCalls = 0;
+    mocks.transport.mockImplementation(async (request: ModelHttpRequest) => {
+      if (request.endpoint.includes("api.typesafe.ai")) {
+        jevCalls += 1;
+        return jevAnswer(request, (name) => name === "operation" ? "click" : name === "click_target" ? `el-${jevCalls}` : name === "stuck" ? "progressing" : undefined);
+      }
+      return llmActionResponse({ type: "ask_user", text: "Handed over after unchanged pages." });
+    });
+    await start("fast");
+    await waitForAnswer("Handed over after unchanged pages.");
+    expect(requests("jev")).toHaveLength(3);
+    expect(executedActions()).toHaveLength(3);
+    expect(requests("llm")).toHaveLength(1);
+    expect(hasLog("left the page unchanged")).toBe(true);
+    expect(requests("llm")[0].body).toContain("no visible change");
+  });
+
+  it("looks again before calling an action a no-op, since the reply can precede the page response", async () => {
+    useFlatPage((executed) => { if (executed === 1) tab.title = "Late change"; });
+    let jevCalls = 0;
+    mocks.transport.mockImplementation(async (request: ModelHttpRequest) => {
+      if (!request.endpoint.includes("api.typesafe.ai")) return llmActionResponse({ type: "ask_user", text: "Late change seen." });
+      jevCalls += 1;
+      return jevAnswer(request, (name) => name === "operation" ? (jevCalls === 1 ? "click" : "fallback") : name === "click_target" ? "el-1" : undefined);
+    });
+    await start("fast");
+    await waitForAnswer("Late change seen.");
+    const second = JSON.parse(requests("jev")[1].body).state;
+    expect(second.page.title).toBe("Late change");
+    expect(second.recentActions[0]).toMatchObject({ action: "click", outcome: "page changed" });
+  });
+
+  it("restarts the unchanged count when an action does change the page", async () => {
+    useFlatPage((executed) => { if (executed === 3) tab.title = "Changed by the third click"; });
+    let jevCalls = 0;
+    mocks.transport.mockImplementation(async (request: ModelHttpRequest) => {
+      if (!request.endpoint.includes("api.typesafe.ai")) return llmActionResponse({ type: "ask_user", text: "Unexpected handoff." });
+      jevCalls += 1;
+      return jevAnswer(request, (name) => name === "operation" ? (jevCalls >= 6 ? "done" : "click") : name === "click_target" ? `el-${(jevCalls - 1) % 4 + 1}`
+        : name === "completion" ? "verified" : name === "stuck" ? "progressing" : undefined);
+    });
+    await start("fast");
+    await waitForAnswer("Jev verified");
+    expect(executedActions()).toHaveLength(5);
+    expect(requests("llm")).toHaveLength(0);
+    expect(hasLog("left the page unchanged")).toBe(false);
+  });
+
+  it("stops asking Jev once its request budget is spent and keeps the LLM in control", async () => {
+    journeyLength = 5;
+    let plannerCalls = 0;
+    const original = mocks.transport.getMockImplementation()!;
+    mocks.transport.mockImplementation(async (request: ModelHttpRequest) => {
+      if (request.endpoint.includes("api.typesafe.ai")) return original(request);
+      plannerCalls += 1;
+      return llmActionResponse(plannerCalls === 1 ? { type: "navigate", url: "https://example.test/docs/elsewhere" } : { type: "ask_user", text: "Budget handoff finished." });
+    });
+    await start("fast", { jev: { mode: "fast", apiKey: "jev-key", maxRequests: 2 } });
+    await waitForAnswer("Budget handoff finished.");
+    expect(requests("jev")).toHaveLength(2);
+    expect(executedActions().map(([, message]) => message.action.type)).toEqual(["click", "click", "navigate"]);
+    expect(plannerCalls).toBe(2);
+    expect(hasLog("budget of 2 requests")).toBe(true);
+    expect(hasLog("Returning control to Jev")).toBe(false);
+  });
+
+  it.each([0, -3, 1.5, 5000])("ignores an invalid request budget of %s and uses the default", async (maxRequests) => {
+    await start("fast", { jev: { mode: "fast", apiKey: "jev-key", maxRequests } });
+    await waitForAnswer("Jev verified");
+    expect(requests("jev")).toHaveLength(2);
+  });
+});
+
+describe("Jev retries and model", () => {
+  function rateLimitFirstCall(revision: string) {
+    const original = mocks.transport.getMockImplementation()!;
+    let jevCalls = 0;
+    mocks.transport.mockImplementation(async (request: ModelHttpRequest) => {
+      if (!request.endpoint.includes("api.typesafe.ai")) return original(request);
+      jevCalls += 1;
+      const answered = await original(request);
+      return jevCalls === 1 ? { ...answered, ok: false, status: 429 }
+        : { ...answered, responseText: JSON.stringify({ ...JSON.parse(answered.responseText), model: revision }) };
+    });
+  }
+
+  it("retries a rate-limited prediction, uses the configured model and records the answering revision", async () => {
+    rateLimitFirstCall("jev-custom-r7");
+    await start("fast", { jev: { mode: "fast", apiKey: "jev-key", model: "jev-custom" } });
+    await waitForAnswer("Jev verified");
+    expect(requests("llm")).toHaveLength(0);
+    expect(requests("jev").map((request) => JSON.parse(request.body).model)).toEqual(["jev-custom", "jev-custom", "jev-custom"]);
+    expect(executedActions()).toHaveLength(1);
+    const state = await send({ type: "SIDEPANEL_GET_STATE" }) as { usage: { jev?: { requests: number; retries?: number; lastModel?: string } } };
+    expect(state.usage.jev).toMatchObject({ requests: 2, retries: 1, lastModel: "jev-custom-r7" });
+    expect(hasLog("answered after 2 attempts")).toBe(true);
+    expect(hasLog("model jev-custom-r7")).toBe(true);
+  });
+
+  it("falls back to the pinned model when the configured name is not valid", async () => {
+    await start("fast", { jev: { mode: "fast", apiKey: "jev-key", model: "bad model!" } });
+    await waitForAnswer("Jev verified");
+    expect(requests("jev").every((request) => JSON.parse(request.body).model === JEV_MODEL)).toBe(true);
+  });
+});
+
+describe("Jev trace and minimum confidence", () => {
+  it("exports a redacted per-decision trace and starts a fresh one for the next run", async () => {
+    tab.url = "https://example.test/docs/home?token=secret#frag";
+    await start("fast", {}, 'Find the setup guide for "SECRET-VALUE"');
+    await waitForAnswer("Jev verified");
+    const response = await send({ type: "SIDEPANEL_GET_JEV_TRACE" }) as { ok: boolean; trace: Array<{ url: string; kind: string; operation: string; heads: Array<{ question: string }> }> };
+    expect(response.ok).toBe(true);
+    expect(response.trace.map((entry) => entry.kind)).toEqual(["action", "done"]);
+    expect(response.trace[0].url).toBe("https://example.test/docs/home");
+    expect(response.trace[0].heads.map((head) => head.question)).toEqual(expect.arrayContaining(["operation", "click_target"]));
+    const text = JSON.stringify(response);
+    expect(text).not.toContain("SECRET-VALUE");
+    expect(text).not.toContain("token=secret");
+    mocks.notify.mockClear();
+    await send({ type: "SIDEPANEL_RUN_TASK", task: "Find the setup guide again", settings: stored.byokAgentSettings as AgentSettings });
+    await waitForAnswer("Jev verified");
+    const second = await send({ type: "SIDEPANEL_GET_JEV_TRACE" }) as { trace: unknown[] };
+    expect(second.trace).toHaveLength(1);
+  });
+
+  it("returns an empty trace before any Jev decision", async () => {
+    await import("./index");
+    expect(await send({ type: "SIDEPANEL_GET_JEV_TRACE" })).toEqual({ ok: true, trace: [] });
+  });
+
+  it("applies the configured minimum confidence to run decisions", async () => {
+    jevConfidence = 0.96;
+    await start("fast", { jev: { mode: "fast", apiKey: "jev-key", confidenceFloor: 0.97 } });
+    await waitForAnswer("Setup guide reached.");
+    expect(requests("llm")).toHaveLength(3);
+    expect(executedActions().map(([, message]) => message.action.type)).toEqual(["navigate", "navigate"]);
+  });
+
+  it("applies the configured minimum confidence to shadow decisions", async () => {
+    jevConfidence = 0.96;
+    for (const [confidenceFloor, expected] of [[0.97, "fallback"], [undefined, "action"]] as const) {
+      vi.resetModules();
+      mocks.transport.mockClear();
+      mocks.notify.mockClear();
+      tab.url = "https://example.test/docs/home";
+      await start("shadow", { jev: { mode: "shadow", apiKey: "jev-key", ...(confidenceFloor === undefined ? {} : { confidenceFloor }) } });
+      await waitForAnswer("Setup guide reached.");
+      const trace = await send({ type: "SIDEPANEL_GET_JEV_TRACE" }) as { trace: Array<{ kind: string; outcome: string }> };
+      expect(trace.trace[0], `floor ${confidenceFloor}`).toMatchObject({ kind: expected, outcome: "shadow" });
+    }
+  });
+
+  it("acts at the same confidence under the default gate", async () => {
+    jevConfidence = 0.96;
+    await start("fast");
+    await waitForAnswer("Jev verified");
+    expect(requests("llm")).toHaveLength(0);
+  });
+});
+
+describe("Jev completion check on unanswered choice groups", () => {
+  function useChoicePage(radio: boolean | "aria", unanswered: number) {
+    const original = mocks.sendTabMessage.getMockImplementation()!;
+    const page = () => ({
+      documentId: `doc:${tab.url}`, isLoading: false, url: tab.url, title: tab.title, text: "Quiz page", choiceGroups: { total: 2, unanswered },
+      elements: [radio === "aria"
+        ? { id: "el-1", fingerprint: "choice:aria", tag: "div", role: "radio", label: "Option A", checkedState: "unchecked", isDisabled: false, isSensitive: false }
+        : radio
+        ? { id: "el-1", fingerprint: "choice:1", tag: "input", type: "radio", label: "Option A", checkedState: "unchecked", isDisabled: false, isSensitive: false }
+        : { id: "el-1", fingerprint: "button:1", tag: "button", text: "Option A", isDisabled: false, isSensitive: false }],
+    });
+    mocks.sendTabMessage.mockImplementation(async (tabId: number, message: { type: string }) => {
+      if (message.type === "CONTENT_EXECUTE") {
+        tab.title = "Answered";
+        return { ok: true, message: "Clicked", observation: page() };
+      }
+      return message.type === "CONTENT_OBSERVE" ? page() : original(tabId, message);
+    });
+    let jevCalls = 0;
+    mocks.transport.mockImplementation(async (request: ModelHttpRequest) => {
+      if (!request.endpoint.includes("api.typesafe.ai")) return llmActionResponse({ type: "ask_user", text: "Choice handoff." });
+      jevCalls += 1;
+      return jevAnswer(request, (name) => name === "operation" ? (jevCalls === 1 ? "click" : "done") : name === "click_target" ? "el-1"
+        : name === "completion" ? "verified" : name === "stuck" ? "progressing" : undefined);
+    });
+  }
+
+  it("refuses to finish while a radio group is unanswered after Jev answered a choice, and hands over", async () => {
+    useChoicePage(true, 1);
+    await start("fast");
+    await waitForAnswer("Choice handoff.");
+    expect(requests("jev")).toHaveLength(2);
+    expect(requests("llm")).toHaveLength(1);
+    expect(hasLog("1 of 2 choice questions")).toBe(true);
+    expect(requests("llm")[0].body).toContain("1 of 2 choice questions");
+  });
+
+  it("counts a custom ARIA radio as an answered choice", async () => {
+    useChoicePage("aria", 1);
+    await start("fast");
+    await waitForAnswer("Choice handoff.");
+    expect(hasLog("1 of 2 choice questions")).toBe(true);
+  });
+
+  it("completes when every radio group is answered", async () => {
+    useChoicePage(true, 0);
+    await start("fast");
+    await waitForAnswer("Jev verified");
+    expect(requests("llm")).toHaveLength(0);
+  });
+
+  it("does not gate completion when Jev never answered a choice", async () => {
+    useChoicePage(false, 1);
+    await start("fast");
+    await waitForAnswer("Jev verified");
+    expect(requests("llm")).toHaveLength(0);
+  });
+
+  it("sends the choice-group counts to Jev", async () => {
+    useChoicePage(true, 1);
+    await start("fast");
+    await waitForAnswer("Choice handoff.");
+    expect(JSON.parse(requests("jev")[0].body).state.choiceGroups).toEqual({ total: 2, unanswered: 1 });
+  });
+});
+
+describe("Jev replace-existing fill setting", () => {
+  const task = 'Search for "typescript" and open the result';
+
+  it("replaces a filled field with a flagged guard when the user opted in", async () => {
+    useField = true;
+    fieldValue = "old query";
+    operationChoice = "fill";
+    await start("fast", { jev: { mode: "fast", apiKey: "jev-key", replaceFilledFields: true } }, task);
+    await vi.waitFor(() => expect(fieldValue).toBe("typescript"));
+    const fill = executedActions().map(([, message]) => message.action).find((action) => action.type === "fill");
+    expect(fill).toMatchObject({ type: "fill", text: "typescript", guard: { replaceExisting: true } });
+  });
+
+  it("never sends a replacement flag when the setting is off", async () => {
+    useField = true;
+    fieldValue = "old query";
+    await start("fast", {}, task);
+    await waitForAnswer("Jev verified");
+    expect(fieldValue).toBe("old query");
+    expect(executedActions().every(([, message]) => message.action.guard?.replaceExisting !== true)).toBe(true);
   });
 });

@@ -1,4 +1,5 @@
-import type { AgentModelResponse, JevSettings, JevUsageSnapshot, PageObservation } from "../shared/types";
+import type { AgentModelResponse, JevSettings, JevTimingStage, JevUsageSnapshot, PageObservation } from "../shared/types";
+import { validJevConfidenceFloor, validJevModel } from "../shared/defaults";
 import { JevDecisionError, requestJevDecision, type JevDecision } from "./jevClient";
 import { ModelRequestCancelledError, type ModelRequestTransport } from "./modelClient";
 
@@ -80,6 +81,7 @@ export async function tryJevNavigation(args: {
   try {
     decision = await requestJevDecision({
       apiKey: args.settings.apiKey,
+      model: validJevModel(args.settings.model),
       signal: args.signal,
       state: { goal, url: args.observation.url, title: args.observation.title.slice(0, 200) },
       criteria: Object.fromEntries([
@@ -88,7 +90,7 @@ export async function tryJevNavigation(args: {
       ]),
     }, args.transport);
     const selected = candidates.find((candidate) => candidate.id === decision?.choice);
-    if (!selected || decision.confidence < MIN_CONFIDENCE) {
+    if (!selected || decision.confidence < (validJevConfidenceFloor(args.settings.confidenceFloor) ?? MIN_CONFIDENCE)) {
       return { decision, outcome: "fallback", message: "Jev deferred to the LLM planner." };
     }
     if (args.settings.mode === "shadow") {
@@ -133,9 +135,14 @@ export function addJevUsage(previous: JevUsageSnapshot | undefined, result: JevN
     return previous;
   }
   const inputTokens = result.decision?.inputTokens || 0;
+  const retries = (previous?.retries || 0) + Math.max(0, (result.decision?.attempts || 1) - 1);
+  const lastModel = result.decision?.model || previous?.lastModel;
   return {
     requests: (previous?.requests || 0) + 1,
     helperRequests: previous?.helperRequests,
+    ...(lastModel ? { lastModel } : {}),
+    ...(retries ? { retries } : {}),
+    ...(previous?.timings ? { timings: previous.timings } : {}),
     lastDecision: previous?.lastDecision,
     fastDecisions: (previous?.fastDecisions || 0) + Number(result.outcome === "fast"),
     shadowDecisions: (previous?.shadowDecisions || 0) + Number(result.outcome === "shadow"),
@@ -145,6 +152,15 @@ export function addJevUsage(previous: JevUsageSnapshot | undefined, result: JevN
     totalLatencyMs: (previous?.totalLatencyMs || 0) + (result.decision?.elapsedMs ?? result.elapsedMs ?? 0),
     estimatedCostUsd: (previous?.estimatedCostUsd || 0) + inputTokens * 0.042 / 1_000_000,
   };
+}
+
+export function addJevTiming(previous: JevUsageSnapshot | undefined, stage: JevTimingStage, elapsedMs: number): JevUsageSnapshot {
+  const base: JevUsageSnapshot = previous || { requests: 0, fastDecisions: 0, shadowDecisions: 0, fallbacks: 0, inputTokens: 0, outputTokens: 0, totalLatencyMs: 0, estimatedCostUsd: 0 };
+  const ms = Number.isFinite(elapsedMs) ? Math.max(0, Math.round(elapsedMs)) : 0;
+  const current = base.timings?.[stage];
+  return { ...base, timings: { ...base.timings, [stage]: {
+    count: (current?.count || 0) + 1, totalMs: (current?.totalMs || 0) + ms, maxMs: Math.max(current?.maxMs || 0, ms),
+  } } };
 }
 
 function publicContentUrl(value: string, base?: string): URL | undefined {

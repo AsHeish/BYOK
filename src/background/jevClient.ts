@@ -1,8 +1,11 @@
-import { ModelRequestCancelledError, type ModelRequestTransport } from "./modelClient";
+import { ModelRequestCancelledError, type ModelHttpResponse, type ModelRequestTransport } from "./modelClient";
 import { JEV_MODEL } from "../shared/defaults";
 
 export { JEV_MODEL };
 export const JEV_TIMEOUT_MS = 2_000;
+export const JEV_MAX_ATTEMPTS = 3;
+export const JEV_RETRY_BACKOFF_MS = 250;
+const JEV_RETRY_STATUSES: ReadonlySet<number> = new Set([429, 503, 529]);
 const PROBABILITY_SUM_TOLERANCE = 0.02;
 
 export interface JevChoice {
@@ -20,6 +23,9 @@ export interface JevQuestion {
 export interface JevQuestionsResult {
   answers: Record<string, JevChoice>;
   ignoredAnswers?: string[];
+  // Revision Jev reports for the answer, and the HTTP attempts used (more than 1 means retries).
+  model?: string;
+  attempts?: number;
   elapsedMs: number;
   inputTokens?: number;
   outputTokens?: number;
@@ -34,9 +40,10 @@ export class JevDecisionError extends Error {
   }
 }
 
-export async function testJevConnection(apiKey: string, transport: ModelRequestTransport): Promise<{ ok: true; latencyMs: number }> {
+export async function testJevConnection(apiKey: string, transport: ModelRequestTransport, model?: string): Promise<{ ok: true; latencyMs: number }> {
   const result = await requestJevDecision({
     apiKey,
+    model,
     signal: new AbortController().signal,
     state: { goal: "Find setup instructions", title: "Documentation index" },
     criteria: { guide: "Setup instructions", fallback: "No appropriate guide" },
@@ -50,6 +57,7 @@ export async function requestJevDecision(
     state: Record<string, unknown>;
     criteria: Record<string, string>;
     instructions?: string;
+    model?: string;
     signal: AbortSignal;
   },
   transport: ModelRequestTransport,
@@ -67,7 +75,7 @@ export async function requestJevDecision(
       },
     },
   }, transport);
-  return { ...result.answers.navigation, elapsedMs: result.elapsedMs, inputTokens: result.inputTokens, outputTokens: result.outputTokens };
+  return { ...result.answers.navigation, elapsedMs: result.elapsedMs, attempts: result.attempts, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens };
 }
 
 export async function requestJevQuestions(
@@ -76,6 +84,7 @@ export async function requestJevQuestions(
     state: Record<string, unknown>;
     questions: Record<string, JevQuestion>;
     requiredQuestions?: { selector: string; byChoice: Record<string, string[]> };
+    model?: string;
     signal: AbortSignal;
   },
   transport: ModelRequestTransport,
@@ -90,29 +99,43 @@ export async function requestJevQuestions(
   }
 
   const startedAt = Date.now();
-  const controller = new AbortController();
+  let controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let attempts = 0;
   const cancel = () => controller.abort();
   args.signal.addEventListener("abort", cancel, { once: true });
-  const timeout = setTimeout(cancel, JEV_TIMEOUT_MS);
   try {
-    const response = await transport({
-      endpoint: "https://api.typesafe.ai/v1/systemone",
-      headers: { Authorization: `Bearer ${args.apiKey.trim()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: JEV_MODEL,
-        state: args.state,
-        questions: args.questions,
-      }),
-      signal: controller.signal,
-    });
-    if (args.signal.aborted) {
-      throw new ModelRequestCancelledError();
-    }
-    if (controller.signal.aborted) {
-      throw new JevDecisionError("Jev decision timed out.", Date.now() - startedAt);
+    let response: ModelHttpResponse;
+    // Only this read-only prediction is retried; browser actions never go through here.
+    for (;;) {
+      attempts += 1;
+      controller = new AbortController();
+      timeout = setTimeout(cancel, JEV_TIMEOUT_MS);
+      response = await transport({
+        endpoint: "https://api.typesafe.ai/v1/systemone",
+        headers: { Authorization: `Bearer ${args.apiKey.trim()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: args.model || JEV_MODEL,
+          state: args.state,
+          questions: args.questions,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (args.signal.aborted) {
+        throw new ModelRequestCancelledError();
+      }
+      if (controller.signal.aborted) {
+        throw new JevDecisionError("Jev decision timed out.", Date.now() - startedAt);
+      }
+      if (response.ok || !JEV_RETRY_STATUSES.has(response.status) || attempts >= JEV_MAX_ATTEMPTS) break;
+      await pause(JEV_RETRY_BACKOFF_MS * 2 ** (attempts - 1), args.signal);
+      if (args.signal.aborted) {
+        throw new ModelRequestCancelledError();
+      }
     }
     if (!response.ok) {
-      throw new JevDecisionError(`Jev returned HTTP ${response.status}.`, Date.now() - startedAt, response.status);
+      throw new JevDecisionError(`Jev returned HTTP ${response.status}${attempts > 1 ? ` after ${attempts} attempts` : ""}.`, Date.now() - startedAt, response.status);
     }
     const data: unknown = JSON.parse(response.responseText);
     if (!isRecord(data) || !isRecord(data.answers)) {
@@ -165,6 +188,8 @@ export async function requestJevQuestions(
     return {
       answers,
       ...(ignoredAnswers.length ? { ignoredAnswers } : {}),
+      ...(typeof data.model === "string" && data.model.trim() ? { model: data.model.trim().slice(0, 80) } : {}),
+      attempts,
       elapsedMs: Date.now() - startedAt,
       inputTokens: tokenCount(usage.input_tokens),
       outputTokens: tokenCount(usage.output_tokens),
@@ -184,6 +209,18 @@ export async function requestJevQuestions(
     clearTimeout(timeout);
     args.signal.removeEventListener("abort", cancel);
   }
+}
+
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

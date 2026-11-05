@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { JEV_MODEL, JEV_TIMEOUT_MS, requestJevDecision, requestJevQuestions, testJevConnection } from "./jevClient";
+import { JEV_MAX_ATTEMPTS, JEV_MODEL, JEV_RETRY_BACKOFF_MS, JEV_TIMEOUT_MS, requestJevDecision, requestJevQuestions, testJevConnection } from "./jevClient";
 import type { ModelHttpRequest } from "./modelClient";
 
 afterEach(() => vi.useRealTimers());
@@ -111,10 +111,103 @@ describe("Jev decision client", () => {
     await expect(requestJevDecision(args(), vi.fn().mockResolvedValue(response(answer)))).rejects.toThrow("invalid");
   });
 
-  it.each([401, 429, 529])("does not retry HTTP %s on the fast path", async (status) => {
+  it.each([400, 401, 403, 500])("does not retry HTTP %s", async (status) => {
     const transport = vi.fn().mockResolvedValue({ ...response(), ok: false, status });
     await expect(requestJevDecision(args(), transport)).rejects.toMatchObject({ status });
     expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries rate limits and overload, then reports the attempts and answering model", async () => {
+    vi.useFakeTimers();
+    const transport = vi.fn()
+      .mockResolvedValueOnce({ ...response(), ok: false, status: 429 })
+      .mockResolvedValueOnce({ ...response(), ok: false, status: 503 })
+      .mockResolvedValueOnce(response());
+    const pending = requestJevDecision(args(), transport);
+    await vi.advanceTimersByTimeAsync(JEV_RETRY_BACKOFF_MS);
+    expect(transport).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(JEV_RETRY_BACKOFF_MS);
+    expect(transport).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(JEV_RETRY_BACKOFF_MS);
+    await expect(pending).resolves.toMatchObject({ choice: "guide", attempts: 3, model: JEV_MODEL });
+    expect(transport).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retries HTTP 529 and stops after the attempt limit", async () => {
+    vi.useFakeTimers();
+    const transport = vi.fn().mockResolvedValue({ ...response(), ok: false, status: 529 });
+    const pending = requestJevDecision(args(), transport);
+    const rejection = expect(pending).rejects.toMatchObject({ status: 529, message: "Jev returned HTTP 529 after 3 attempts." });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejection;
+    expect(transport).toHaveBeenCalledTimes(JEV_MAX_ATTEMPTS);
+  });
+
+  it("gives each attempt its own deadline", async () => {
+    vi.useFakeTimers();
+    const transport = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve({ ...response(), ok: false, status: 429 }), JEV_TIMEOUT_MS - 100)))
+      .mockResolvedValueOnce(response());
+    const pending = requestJevDecision(args(), transport);
+    await vi.advanceTimersByTimeAsync(JEV_TIMEOUT_MS - 100 + JEV_RETRY_BACKOFF_MS);
+    await expect(pending).resolves.toMatchObject({ attempts: 2 });
+    expect(transport.mock.calls[0][0].signal).not.toBe(transport.mock.calls[1][0].signal);
+    expect(transport.mock.calls[1][0].signal.aborted).toBe(false);
+  });
+
+  it("also bounds a retried attempt by the deadline", async () => {
+    vi.useFakeTimers();
+    const hang = (request: ModelHttpRequest) => new Promise<never>((_resolve, reject) => {
+      request.signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+    });
+    const transport = vi.fn()
+      .mockResolvedValueOnce({ ...response(), ok: false, status: 429 })
+      .mockImplementationOnce(hang);
+    const rejection = expect(requestJevDecision(args(), transport)).rejects.toThrow("timed out");
+    await vi.advanceTimersByTimeAsync(JEV_RETRY_BACKOFF_MS + JEV_TIMEOUT_MS);
+    await rejection;
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not retry a timeout or a transport failure", async () => {
+    vi.useFakeTimers();
+    const hanging = vi.fn((request: ModelHttpRequest) => new Promise<never>((_resolve, reject) => {
+      request.signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+    }));
+    const timedOut = expect(requestJevDecision(args(), hanging)).rejects.toThrow("timed out");
+    await vi.advanceTimersByTimeAsync(JEV_TIMEOUT_MS);
+    await timedOut;
+    expect(hanging).toHaveBeenCalledTimes(1);
+    const broken = vi.fn().mockRejectedValue(new Error("network down"));
+    await expect(requestJevDecision(args(), broken)).rejects.toThrow("failed or returned malformed JSON");
+    expect(broken).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats Stop during the retry pause as cancellation without another request", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const transport = vi.fn().mockResolvedValue({ ...response(), ok: false, status: 429 });
+    const pending = requestJevDecision({ ...args(), signal: controller.signal }, transport);
+    const rejection = expect(pending).rejects.toMatchObject({ name: "ModelRequestCancelledError" });
+    await vi.advanceTimersByTimeAsync(JEV_RETRY_BACKOFF_MS / 2);
+    expect(transport).toHaveBeenCalledTimes(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(JEV_RETRY_BACKOFF_MS * 4);
+    await rejection;
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("sends the configured model and defaults to the pinned one", async () => {
+    const transport = vi.fn().mockResolvedValue(response());
+    await requestJevDecision({ ...args(), model: "jev-custom-2" }, transport);
+    expect(JSON.parse(transport.mock.calls[0][0].body).model).toBe("jev-custom-2");
+    await requestJevDecision(args(), transport);
+    expect(JSON.parse(transport.mock.calls[1][0].body).model).toBe(JEV_MODEL);
+    await testJevConnection("jev-key", transport, "jev-custom-3");
+    expect(JSON.parse(transport.mock.calls[2][0].body).model).toBe("jev-custom-3");
   });
 
   it("bounds latency and propagates its deadline to the transport", async () => {

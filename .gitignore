@@ -23,4 +23,5 @@ pnpm-debug.log*
 Thumbs.db
 
 *.db
+*.bak
 *?instructions.md
