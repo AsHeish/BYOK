@@ -5,14 +5,15 @@ import type {
   RunEvidence,
   RunRequirement,
 } from "../shared/types";
-import { MAX_TRACKED_TABS } from "../shared/defaults";
+import {
+  DEFAULT_SETTINGS,
+  MAX_TRACKED_TABS,
+  normalizePositiveInteger,
+} from "../shared/defaults";
 import type { ChatMessage, ChatMessageContent } from "./modelClient";
 
-export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.2.31";
-const MAX_ACTIONS_PER_RESPONSE = 10;
-const MAX_OBSERVATION_INPUT_TOKENS = 4000;
+export const AGENT_PROMPT_CACHE_VERSION = "byok-agent-prompt-v0.2.34";
 const APPROX_CHARS_PER_TOKEN = 4;
-const MAX_OBSERVATION_CHARS = MAX_OBSERVATION_INPUT_TOKENS * APPROX_CHARS_PER_TOKEN;
 
 export interface PromptTabInfo {
   alias: string;
@@ -70,7 +71,17 @@ export function buildAgentMessages(args: {
   downloads?: PromptDownloadInfo[];
   allowChatMode?: boolean;
   allowJevNavigation?: boolean;
+  maxActionsPerResponse?: number;
+  observationTokenLimit?: number;
 }): ChatMessage[] {
+  const maxActionsPerResponse = normalizePositiveInteger(
+    args.maxActionsPerResponse,
+    DEFAULT_SETTINGS.maxActionsPerResponse!,
+  );
+  const observationTokenLimit = normalizePositiveInteger(
+    args.observationTokenLimit,
+    DEFAULT_SETTINGS.observationTokenLimit!,
+  );
   const currentContext = [
     formatAllowedResponseModes(Boolean(args.allowChatMode)),
     args.allowJevNavigation
@@ -80,8 +91,12 @@ export function buildAgentMessages(args: {
     args.tabs?.length
       ? `Tabs owned by this agent run (the only tabs you can use):\n${formatTabs(args.tabs, args.activeTabAlias)}`
       : "",
-    args.stagedFile ? `Staged upload file:\n${formatStagedFile(args.stagedFile)}` : "Staged upload file: none",
-    args.downloads?.length ? `Recent downloads:\n${formatDownloads(args.downloads)}` : "Recent downloads: none",
+    args.stagedFile
+      ? `Staged upload file:\n${formatStagedFile(args.stagedFile)}`
+      : "Staged upload file: none",
+    args.downloads?.length
+      ? `Recent downloads:\n${formatDownloads(args.downloads)}`
+      : "Recent downloads: none",
     formatRequirements(args.requirements),
     formatEvidence(args.evidence),
     formatFindings(args.findings, args.totalFindingCount),
@@ -89,7 +104,10 @@ export function buildAgentMessages(args: {
     args.previousResult ? `Previous action result: ${args.previousResult}` : "",
     "",
     `Current page observation${args.activeTabAlias ? ` for ${args.activeTabAlias}` : ""}:`,
-    formatObservation(args.observation),
+    formatObservation(
+      args.observation,
+      observationTokenLimit * APPROX_CHARS_PER_TOKEN,
+    ),
     args.screenshot
       ? `A one-shot screenshot of ${args.screenshot.tabAlias} is attached for visual inspection. URL=${quote(
           args.screenshot.url || "",
@@ -97,12 +115,17 @@ export function buildAgentMessages(args: {
         )} title=${quote(args.screenshot.title || "", 120)}`
       : "",
     "",
-    "Return the next response JSON now."
-  ].filter(Boolean).join("\n");
+    "Return the next response JSON now.",
+  ]
+    .filter(Boolean)
+    .join("\n");
   const currentContent: ChatMessageContent = args.screenshot
     ? [
         { type: "text", text: currentContext },
-        { type: "image_url", image_url: { url: args.screenshot.dataUrl, detail: "low" } },
+        {
+          type: "image_url",
+          image_url: { url: args.screenshot.dataUrl, detail: "low" },
+        },
       ]
     : currentContext;
 
@@ -124,7 +147,7 @@ export function buildAgentMessages(args: {
         "",
         "For text fields, prefer fill over separate click and type actions. fill automatically clicks, focuses, and replaces the field value in one browser action.",
         "- For custom form controls, an outer div may represent a textbox. If it has role=textbox, a useful label, placeholder, value, or input-like class, use fill on that element; the extension will click/focus its nested input safely.",
-        `- You may return actions instead of action when several UI steps can be done from the same current observation. Return at most ${MAX_ACTIONS_PER_RESPONSE} actions.`,
+        `- You may return actions instead of action when several UI steps can be done from the same current observation. Return at most ${maxActionsPerResponse} actions.`,
         "- The browser executes batches in fail-safe mode: it stops the remaining batch if an action fails, goes stale, asks the user, finishes, or navigates, then sends you the latest progress and page observation.",
         "- Good batches: fill an answer then click a visible Continue button; select several visible controls; drag several visible items to visible targets.",
         "- Use go_back when you need to return to the previous browser history page.",
@@ -147,7 +170,7 @@ export function buildAgentMessages(args: {
         "- Never use inspect_screenshot merely to read prose; use read_page. If vision is unavailable, continue with DOM/read_page or explain the limitation.",
         "- Use wait_for instead of guessing delays. Set waitCondition to document_ready, dom_stable, url_changed, text_present, text_absent, element_hidden, or element_enabled; include text or elementId when required and optional timeoutMs up to 15000.",
         "- For waitCondition=url_changed, set url to the page URL before the change when it is known.",
-        "- summarize_page and summarize_pdf do not end the run. Each result is saved as a finding and shown back to you under \"Findings collected so far\". After a summary you must keep going until the whole task is complete.",
+        '- summarize_page and summarize_pdf do not end the run. Each result is saved as a finding and shown back to you under "Findings collected so far". After a summary you must keep going until the whole task is complete.',
         "",
         "Requirement ledger:",
         "- On the first step, include a requirements array that decomposes the entire user task into independently verifiable outcomes. For every/all/each tasks, include expectedItemCount and item labels when visible.",
@@ -173,7 +196,7 @@ export function buildAgentMessages(args: {
         "- On long forms, answer the choice questions nearest the current viewport first. Batch independent visible radio clicks and checkbox multi_click actions when their question text and options are fully present.",
         "- After handling the current choice questions, scroll down when pageProgress is below 100% or the observation says additional interactive controls were omitted. Do not return done until you have inspected the bottom of the form and no unanswered question remains.",
         "- If a radio question already has one checked option, treat that single-choice question as answered and do not replace it. For checkboxes, preserve already checked correct options and click only additional required options.",
-        "- When multiple fields have the same label, use each element's problem and context fields to decide which question it belongs to. Do not rely only on repeated labels like \"Your Submission\".",
+        '- When multiple fields have the same label, use each element\'s problem and context fields to decide which question it belongs to. Do not rely only on repeated labels like "Your Submission".',
         "- Do not copy the same option number into multiple questions unless each field's own context independently supports that answer.",
         "- Do not fill any field that already has a non-empty value in the observation, even if the value differs from the answer you planned. Move to the next empty field or finish.",
         "- A skipped or repeated fill does not press Tab or advance focus. Choose the next empty field from the current observation explicitly.",
@@ -182,7 +205,7 @@ export function buildAgentMessages(args: {
         "- Never guess a field ID from earlier steps, question order, or ID numbering. Match each current field's problem/context to the intended question. If the needed field is above or below the viewport, scroll there first.",
         "- If the previous action result says the target is not editable, do not retry the same wrapper. Use the refreshed focused element or an empty fillable control from the page state summary.",
         "- If the previous action result says an action likely changed the page before the content script replied, treat it as a navigation/page-change recovery. Continue from the refreshed current page and do not repeat that click unless still visibly needed.",
-        "- If the user asks to keep pressing Tab or move to the next input, use press_key with key=\"Tab\". The next observation will mark the newly focused element with focused=true.",
+        '- If the user asks to keep pressing Tab or move to the next input, use press_key with key="Tab". The next observation will mark the newly focused element with focused=true.',
         "- To move up or down the page, use scroll with direction=up/down or press_key with PageUp/PageDown. Tab changes focus; it is not a page-scrolling substitute.",
         "",
         "Allowed action schema:",
@@ -190,7 +213,7 @@ export function buildAgentMessages(args: {
         "Action type must be one of: click, multi_click, drag, multi_drag, upload_file, fill, type, select, press_key, summarize_page, read_page, inspect_screenshot, summarize_pdf, list_downloads, scroll, navigate, go_back, go_forward, reload, open_tab, switch_tab, close_tab, wait_for, extract, ask_user, done.",
         "Top-level requirements format: [{ text, optional expectedItemCount, optional items: [{ label }] }].",
         "Top-level requirementUpdates format: [{ requirementId, optional status, optional evidenceIds, optional blockedReason, optional expectedItemCount, optional addItems: [{ label }], optional itemUpdates: [{ itemId, status, optional evidenceIds, optional blockedReason }] }].",
-        `For action batches, set actions to an array of up to ${MAX_ACTIONS_PER_RESPONSE} action objects.`,
+        `For action batches, set actions to an array of up to ${maxActionsPerResponse} action objects.`,
         "For multi_click, set elementIds to an array of the option IDs to select in the same browser action.",
         "For multi_drag, set dragPairs to an array of { elementId, targetElementId } pairs to drag in order.",
         "For drag, set elementId to the draggable source and targetElementId to the destination/drop zone.",
@@ -202,20 +225,22 @@ export function buildAgentMessages(args: {
         "For press_key, set key to Tab, Shift+Tab, PageUp, or PageDown. PageUp/PageDown scroll the active scroll container without advancing field focus. Unsupported keys are rejected, not substituted.",
         "For go_back, no elementId or url is needed.",
         "For open_tab, set url. The new tab becomes active and receives the next tab alias.",
-        "For switch_tab and close_tab, set tabAlias such as \"tab-2\". For reload, tabAlias is optional and defaults to the active tab.",
+        'For switch_tab and close_tab, set tabAlias such as "tab-2". For reload, tabAlias is optional and defaults to the active tab.',
         `Chat mode example:\n${JSON.stringify(exampleChatResponse(), null, 2)}`,
         "Browser mode example:",
-        JSON.stringify(exampleResponse(), null, 2)
-      ].join("\n")
+        JSON.stringify(exampleResponse(), null, 2),
+      ].join("\n"),
     },
     {
       role: "user",
-      content: ["Stable task context for this agent run:", args.task].join("\n")
+      content: ["Stable task context for this agent run:", args.task].join(
+        "\n",
+      ),
     },
     {
       role: "user",
       content: currentContent,
-    }
+    },
   ];
 }
 
@@ -240,7 +265,8 @@ function formatAllowedResponseModes(allowChatMode: boolean): string {
 function formatTabs(tabs: PromptTabInfo[], activeTabAlias?: string): string {
   return tabs
     .map((tab) => {
-      const activeMarker = tab.active || tab.alias === activeTabAlias ? "active " : "";
+      const activeMarker =
+        tab.active || tab.alias === activeTabAlias ? "active " : "";
       return `- ${tab.alias} ${activeMarker}title=${quote(tab.title || "Untitled", 90)} url=${quote(tab.url || "", 150)}`;
     })
     .join("\n");
@@ -250,7 +276,10 @@ function formatStagedFile(file: PromptStagedFileInfo): string {
   return `- fileId=${file.id} name=${quote(file.name, 120)} type=${quote(file.type || "application/octet-stream", 80)} size=${file.size}`;
 }
 
-function formatFindings(findings?: PromptFindingInfo[], totalFindingCount?: number): string {
+function formatFindings(
+  findings?: PromptFindingInfo[],
+  totalFindingCount?: number,
+): string {
   if (!findings?.length) {
     return "Findings collected so far: none. Nothing has been summarized or extracted yet.";
   }
@@ -264,7 +293,7 @@ function formatFindings(findings?: PromptFindingInfo[], totalFindingCount?: numb
     (finding, index) =>
       `${index + 1 + hiddenCount}. [${finding.tabAlias}] ${quote(finding.label, 120)}${
         finding.url ? ` url=${quote(finding.url, 150)}` : ""
-      }\n   ${finding.text}`
+      }\n   ${finding.text}`,
   );
 
   return [header, ...lines].join("\n");
@@ -276,13 +305,24 @@ function formatRequirements(requirements?: RunRequirement[]): string {
   }
 
   const lines = requirements.flatMap((requirement) => {
-    const count = requirement.expectedItemCount === undefined ? "" : ` expectedItems=${requirement.expectedItemCount}`;
-    const evidence = requirement.evidenceIds.length ? ` evidence=${requirement.evidenceIds.join(",")}` : "";
-    const reason = requirement.blockedReason ? ` blockedReason=${quote(requirement.blockedReason, 240)}` : "";
+    const count =
+      requirement.expectedItemCount === undefined
+        ? ""
+        : ` expectedItems=${requirement.expectedItemCount}`;
+    const evidence = requirement.evidenceIds.length
+      ? ` evidence=${requirement.evidenceIds.join(",")}`
+      : "";
+    const reason = requirement.blockedReason
+      ? ` blockedReason=${quote(requirement.blockedReason, 240)}`
+      : "";
     const header = `- ${requirement.id} status=${requirement.status}${count}${evidence}${reason} text=${quote(requirement.text, 300)}`;
     const items = (requirement.items || []).map((item) => {
-      const itemEvidence = item.evidenceIds.length ? ` evidence=${item.evidenceIds.join(",")}` : "";
-      const itemReason = item.blockedReason ? ` blockedReason=${quote(item.blockedReason, 180)}` : "";
+      const itemEvidence = item.evidenceIds.length
+        ? ` evidence=${item.evidenceIds.join(",")}`
+        : "";
+      const itemReason = item.blockedReason
+        ? ` blockedReason=${quote(item.blockedReason, 180)}`
+        : "";
       return `  - ${item.id} status=${item.status}${itemEvidence}${itemReason} label=${quote(item.label, 220)}`;
     });
     return [header, ...items];
@@ -298,10 +338,11 @@ function formatEvidence(evidence?: RunEvidence[]): string {
 
   const visible = evidence.slice(-40);
   const hiddenCount = evidence.length - visible.length;
-  const lines = visible.map((item) =>
-    `- ${item.id} kind=${item.kind}${item.tabAlias ? ` tab=${item.tabAlias}` : ""}${
-      item.url ? ` url=${quote(item.url, 150)}` : ""
-    } summary=${quote(item.summary, 500)}`
+  const lines = visible.map(
+    (item) =>
+      `- ${item.id} kind=${item.kind}${item.tabAlias ? ` tab=${item.tabAlias}` : ""}${
+        item.url ? ` url=${quote(item.url, 150)}` : ""
+      } summary=${quote(item.summary, 500)}`,
   );
   return `Evidence ledger${hiddenCount ? ` (${hiddenCount} earlier omitted)` : ""}:\n${lines.join("\n")}`;
 }
@@ -316,10 +357,14 @@ function formatDocument(document?: FullPageDocument): string {
     `Title: ${document.title}`,
     document.byline ? `Byline: ${document.byline}` : "",
     document.excerpt ? `Excerpt: ${document.excerpt}` : "",
-    document.truncated ? `Note: source was truncated from ${document.sourceCharacters} characters.` : "",
+    document.truncated
+      ? `Note: source was truncated from ${document.sourceCharacters} characters.`
+      : "",
     "Markdown:",
     document.markdown.slice(0, 24_000),
-  ].filter(Boolean).join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function formatDownloads(downloads: PromptDownloadInfo[]): string {
@@ -327,12 +372,16 @@ function formatDownloads(downloads: PromptDownloadInfo[]): string {
     .map((download) => {
       const parts = [
         `downloadId=${download.id}`,
-        download.filename ? `filename=${quote(getShortFilename(download.filename), 120)}` : "",
+        download.filename
+          ? `filename=${quote(getShortFilename(download.filename), 120)}`
+          : "",
         download.mime ? `mime=${quote(download.mime, 80)}` : "",
-        typeof download.totalBytes === "number" && download.totalBytes > 0 ? `bytes=${download.totalBytes}` : "",
+        typeof download.totalBytes === "number" && download.totalBytes > 0
+          ? `bytes=${download.totalBytes}`
+          : "",
         download.state ? `state=${download.state}` : "",
         typeof download.exists === "boolean" ? `exists=${download.exists}` : "",
-        download.url ? `url=${quote(download.url, 180)}` : ""
+        download.url ? `url=${quote(download.url, 180)}` : "",
       ].filter(Boolean);
       return `- ${parts.join(" ")}`;
     })
@@ -346,20 +395,20 @@ function exampleResponse(): AgentModelResponse {
     risk_level: "low",
     requirements: [
       {
-        text: "Complete the requested browser task"
-      }
+        text: "Complete the requested browser task",
+      },
     ],
     actions: [
       {
         type: "fill",
         elementId: "el-1",
-        text: "answer text"
+        text: "answer text",
       },
       {
         type: "click",
-        elementId: "el-2"
-      }
-    ]
+        elementId: "el-2",
+      },
+    ],
   };
 }
 
@@ -376,28 +425,61 @@ function exampleChatResponse(): AgentModelResponse {
   };
 }
 
-function formatObservation(observation: PageObservation): string {
-  const elementLines = orderElementsForPrompt(observation.elements).map(formatElementLine);
+function formatObservation(
+  observation: PageObservation,
+  maxObservationChars: number,
+): string {
+  const elementLines = orderElementsForPrompt(observation.elements).map(
+    formatElementLine,
+  );
   const stateSummary = formatObservationState(observation);
-  const header = [`URL: ${observation.url}`, `Title: ${observation.title}`, stateSummary, "", "Readable text:"]
+  const header = [
+    `URL: ${observation.url}`,
+    `Title: ${observation.title}`,
+    stateSummary,
+    "",
+    "Readable text:",
+  ]
     .filter(Boolean)
     .join("\n");
   const elementHeader = "\n\nInteractive elements:\n";
-  const reservedForElements = Math.min(7000, Math.max(2500, Math.floor(MAX_OBSERVATION_CHARS * 0.45)));
-  const textBudget = Math.max(1200, MAX_OBSERVATION_CHARS - header.length - elementHeader.length - reservedForElements);
+  const reservedForElements = Math.floor(maxObservationChars * 0.45);
+  const textBudget = Math.max(
+    0,
+    maxObservationChars -
+      header.length -
+      elementHeader.length -
+      reservedForElements,
+  );
   const readableText = truncateByChars(observation.text, textBudget);
-  const elementBudget = MAX_OBSERVATION_CHARS - header.length - readableText.length - elementHeader.length;
-  const elements = fitLinesWithinBudget(elementLines, elementBudget) || "(none found)";
+  const elementBudget =
+    maxObservationChars -
+    header.length -
+    readableText.length -
+    elementHeader.length;
+  const elements =
+    fitLinesWithinBudget(elementLines, elementBudget) || "(none found)";
 
-  return truncateByChars(`${header}\n${readableText}${elementHeader}${elements}`, MAX_OBSERVATION_CHARS);
+  return truncateByChars(
+    `${header}\n${readableText}${elementHeader}${elements}`,
+    maxObservationChars,
+  );
 }
 
 function formatObservationState(observation: PageObservation): string {
-  const focusedElement = observation.elements.find((element) => element.isFocused);
+  const focusedElement = observation.elements.find(
+    (element) => element.isFocused,
+  );
   const observedElementCount = observation.elements.length;
-  const interactiveElementCount = observation.interactiveElementCount ?? observedElementCount;
+  const interactiveElementCount =
+    observation.interactiveElementCount ?? observedElementCount;
   const emptyFillableElements = observation.elements
-    .filter((element) => isLikelyFillableElement(element) && !hasCompletedControlValue(element) && !element.isDisabled)
+    .filter(
+      (element) =>
+        isLikelyFillableElement(element) &&
+        !hasCompletedControlValue(element) &&
+        !element.isDisabled,
+    )
     .slice(0, 14);
   const completedControls = observation.elements
     .filter((element) => hasCompletedControlValue(element))
@@ -417,7 +499,9 @@ function formatObservationState(observation: PageObservation): string {
       ? `Interactive controls: showing the ${observedElementCount} nearest of ${interactiveElementCount}; scroll to inspect omitted controls.`
       : `Interactive controls: showing all ${observedElementCount} detected controls.`,
     "Element IDs are current only for this observation. Use the IDs below, not stale IDs from earlier steps.",
-    focusedElement ? `Focused element: ${formatCompactElementRef(focusedElement)}` : "",
+    focusedElement
+      ? `Focused element: ${formatCompactElementRef(focusedElement)}`
+      : "",
     emptyFillableElements.length
       ? `Empty fillable controls: ${emptyFillableElements.map((element) => formatCompactElementRef(element)).join(" | ")}`
       : "Empty fillable controls: none visible",
@@ -429,20 +513,31 @@ function formatObservationState(observation: PageObservation): string {
       : "",
     fileUploadElements.length
       ? `File upload controls: ${fileUploadElements.map((element) => formatCompactElementRef(element)).join(" | ")}`
-      : ""
+      : "",
   ]
     .filter(Boolean)
     .join("\n");
 }
 
-function orderElementsForPrompt(elements: PageObservation["elements"]): PageObservation["elements"] {
+function orderElementsForPrompt(
+  elements: PageObservation["elements"],
+): PageObservation["elements"] {
   const choiceControls = elements.filter(isDirectChoiceControl);
-  const otherControls = elements.filter((element) => !isDirectChoiceControl(element));
+  const otherControls = elements.filter(
+    (element) => !isDirectChoiceControl(element),
+  );
   return [...choiceControls, ...otherControls];
 }
 
-function isDirectChoiceControl(element: PageObservation["elements"][number]): boolean {
-  return element.type === "radio" || element.type === "checkbox" || element.role === "radio" || element.role === "checkbox";
+function isDirectChoiceControl(
+  element: PageObservation["elements"][number],
+): boolean {
+  return (
+    element.type === "radio" ||
+    element.type === "checkbox" ||
+    element.role === "radio" ||
+    element.role === "checkbox"
+  );
 }
 
 function formatViewportState(observation: PageObservation): string {
@@ -462,7 +557,9 @@ function formatFrameState(observation: PageObservation): string {
   const frames = observation.frames
     .slice(0, 12)
     .map((frame) => {
-      const status = frame.accessible ? "accessible" : `inaccessible:${frame.reason || "unknown"}`;
+      const status = frame.accessible
+        ? "accessible"
+        : `inaccessible:${frame.reason || "unknown"}`;
       const label = frame.title || frame.url || "";
       return `${frame.id} ${status}${label ? ` ${quote(label, 120)}` : ""}`;
     })
@@ -471,8 +568,17 @@ function formatFrameState(observation: PageObservation): string {
   return `Frames: ${frames}`;
 }
 
-function formatCompactElementRef(element: PageObservation["elements"][number], includeValue = false): string {
-  const descriptor = element.label || element.placeholder || element.text || element.name || element.role || element.tag;
+function formatCompactElementRef(
+  element: PageObservation["elements"][number],
+  includeValue = false,
+): string {
+  const descriptor =
+    element.label ||
+    element.placeholder ||
+    element.text ||
+    element.name ||
+    element.role ||
+    element.tag;
   const parts = [
     element.id,
     element.frameContext ? `frame=${quote(element.frameContext, 90)}` : "",
@@ -484,22 +590,38 @@ function formatCompactElementRef(element: PageObservation["elements"][number], i
     element.isDraggable ? "draggable=true" : "",
     element.isDropTarget ? "dropTarget=true" : "",
     includeValue && element.value ? `value=${quote(element.value, 80)}` : "",
-    includeValue && element.checkedState ? `checkedState=${element.checkedState}` : ""
+    includeValue && element.checkedState
+      ? `checkedState=${element.checkedState}`
+      : "",
   ].filter(Boolean);
 
   return parts.join(" ");
 }
 
-function isLikelyFillableElement(element: PageObservation["elements"][number]): boolean {
-  if (element.checkedState || element.href || element.isDraggable || element.isDropTarget) {
+function isLikelyFillableElement(
+  element: PageObservation["elements"][number],
+): boolean {
+  if (
+    element.checkedState ||
+    element.href ||
+    element.isDraggable ||
+    element.isDropTarget
+  ) {
     return false;
   }
 
-  if (element.type && /^(button|submit|reset|checkbox|radio|file|hidden)$/i.test(element.type)) {
+  if (
+    element.type &&
+    /^(button|submit|reset|checkbox|radio|file|hidden)$/i.test(element.type)
+  ) {
     return false;
   }
 
-  if (element.tag === "input" || element.tag === "textarea" || element.tag === "select") {
+  if (
+    element.tag === "input" ||
+    element.tag === "textarea" ||
+    element.tag === "select"
+  ) {
     return true;
   }
 
@@ -511,28 +633,57 @@ function isLikelyFillableElement(element: PageObservation["elements"][number]): 
     return true;
   }
 
-  const descriptor = [element.label, element.placeholder, element.text, element.context].filter(Boolean).join(" ");
-  return /answer|submission|input|field|textbox|response|option number/i.test(descriptor);
+  const descriptor = [
+    element.label,
+    element.placeholder,
+    element.text,
+    element.context,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return /answer|submission|input|field|textbox|response|option number/i.test(
+    descriptor,
+  );
 }
 
-function isLikelyFileUploadElement(element: PageObservation["elements"][number]): boolean {
+function isLikelyFileUploadElement(
+  element: PageObservation["elements"][number],
+): boolean {
   if (element.type === "file" || element.accept) {
     return true;
   }
 
-  const descriptor = [element.label, element.placeholder, element.text, element.context, element.name].filter(Boolean).join(" ");
-  return /upload|attach|choose file|select file|drop file|browse/i.test(descriptor);
+  const descriptor = [
+    element.label,
+    element.placeholder,
+    element.text,
+    element.context,
+    element.name,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return /upload|attach|choose file|select file|drop file|browse/i.test(
+    descriptor,
+  );
 }
 
-function hasCompletedControlValue(element: PageObservation["elements"][number]): boolean {
+function hasCompletedControlValue(
+  element: PageObservation["elements"][number],
+): boolean {
   if (element.checkedState) {
-    return element.checkedState === "checked" || element.checkedState === "mixed";
+    return (
+      element.checkedState === "checked" || element.checkedState === "mixed"
+    );
   }
 
-  return Boolean(element.value && !/\bunchecked\)?$/i.test(element.value.trim()));
+  return Boolean(
+    element.value && !/\bunchecked\)?$/i.test(element.value.trim()),
+  );
 }
 
-function formatElementLine(element: PageObservation["elements"][number]): string {
+function formatElementLine(
+  element: PageObservation["elements"][number],
+): string {
   const parts = [
     `id=${element.id}`,
     `tag=${element.tag}`,
@@ -549,11 +700,13 @@ function formatElementLine(element: PageObservation["elements"][number]): string
     element.value ? `value=${quote(element.value)}` : "",
     element.checkedState ? `checkedState=${element.checkedState}` : "",
     element.href ? `href=${quote(element.href)}` : "",
-    element.options?.length ? `options=${quote(element.options.join(" | "))}` : "",
+    element.options?.length
+      ? `options=${quote(element.options.join(" | "))}`
+      : "",
     element.isDraggable ? "draggable=true" : "",
     element.isDropTarget ? "dropTarget=true" : "",
     element.isFocused ? "focused=true" : "",
-    element.isDisabled ? "disabled=true" : ""
+    element.isDisabled ? "disabled=true" : "",
   ].filter(Boolean);
 
   return `- ${parts.join(" ")}`;

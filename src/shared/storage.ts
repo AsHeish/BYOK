@@ -5,6 +5,7 @@ import {
   MAX_CHAT_SUGGESTIONS,
   MAX_REQUEST_TIMEOUT_SECONDS,
   MIN_REQUEST_TIMEOUT_SECONDS,
+  normalizePositiveInteger,
 } from "./defaults";
 import type {
   AgentChatMessage,
@@ -36,7 +37,6 @@ const LEGACY_JEV_PROFILE_ID = "profile-jev-default";
 const STAGED_UPLOAD_FILE_KEY = "byokAgentStagedUploadFile";
 export const RUN_REPORTS_KEY = "byokAgentRunReports";
 const MIN_MAX_STEPS = 1;
-const MAX_MAX_STEPS = 60;
 const LEGACY_DEFAULT_MAX_STEPS = new Set([12, 30]);
 const MAX_RUN_REPORTS = 50;
 const MAX_RUN_REPORT_STORAGE_CHARS = 2_000_000;
@@ -75,13 +75,18 @@ function normalizeOpenAiApi(value: unknown): OpenAiApi | undefined {
 }
 
 function normalizeJevSettings(value: unknown): JevSettings {
-  const raw = value && typeof value === "object" ? value as Partial<JevSettings> : {};
+  const raw =
+    value && typeof value === "object" ? (value as Partial<JevSettings>) : {};
   const apiKey = typeof raw.apiKey === "string" ? raw.apiKey.trim() : "";
   return {
     apiKey,
-    mode: apiKey && (raw.mode === "shadow" || raw.mode === "fast") ? raw.mode
-      // Retired Jev Only settings keep Jev active as Fast.
-      : apiKey && (raw.mode as string) === "only" ? "fast" : "off",
+    mode:
+      apiKey && (raw.mode === "shadow" || raw.mode === "fast")
+        ? raw.mode
+        : // Retired Jev Only settings keep Jev active as Fast.
+          apiKey && (raw.mode as string) === "only"
+          ? "fast"
+          : "off",
   };
 }
 
@@ -91,12 +96,16 @@ function normalizeOptionalPrice(value: unknown): number | undefined {
   }
 
   const numericValue = Number(value);
-  return Number.isFinite(numericValue) && numericValue >= 0 ? numericValue : undefined;
+  return Number.isFinite(numericValue) && numericValue >= 0
+    ? numericValue
+    : undefined;
 }
 
 function clampMaxSteps(value: unknown): number {
   const numericValue = Number(value || DEFAULT_SETTINGS.maxSteps);
-  return Math.min(Math.max(numericValue, MIN_MAX_STEPS), MAX_MAX_STEPS);
+  return Number.isFinite(numericValue)
+    ? Math.max(Math.floor(numericValue), MIN_MAX_STEPS)
+    : DEFAULT_SETTINGS.maxSteps;
 }
 
 function normalizeStoredMaxSteps(value: unknown): number {
@@ -122,9 +131,19 @@ export async function loadSettings(): Promise<AgentSettings> {
     model: String(raw?.model || DEFAULT_SETTINGS.model),
     openAiApi: normalizeOpenAiApi(raw?.openAiApi),
     maxSteps: normalizeStoredMaxSteps(raw?.maxSteps),
+    observationTokenLimit: normalizePositiveInteger(
+      raw?.observationTokenLimit,
+      DEFAULT_SETTINGS.observationTokenLimit!,
+    ),
+    maxActionsPerResponse: normalizePositiveInteger(
+      raw?.maxActionsPerResponse,
+      DEFAULT_SETTINGS.maxActionsPerResponse!,
+    ),
     requestTimeoutSeconds: Math.min(
       Math.max(
-        Number(raw?.requestTimeoutSeconds || DEFAULT_SETTINGS.requestTimeoutSeconds),
+        Number(
+          raw?.requestTimeoutSeconds || DEFAULT_SETTINGS.requestTimeoutSeconds,
+        ),
         MIN_REQUEST_TIMEOUT_SECONDS,
       ),
       MAX_REQUEST_TIMEOUT_SECONDS,
@@ -132,9 +151,15 @@ export async function loadSettings(): Promise<AgentSettings> {
     promptCacheMode: normalizePromptCacheMode(raw?.promptCacheMode),
     disableThinking: raw?.disableThinking === true,
     jev: normalizeJevSettings(raw?.jev),
-    inputTokenCostPerMillion: normalizeOptionalPrice(raw?.inputTokenCostPerMillion),
-    cachedInputTokenCostPerMillion: normalizeOptionalPrice(raw?.cachedInputTokenCostPerMillion),
-    outputTokenCostPerMillion: normalizeOptionalPrice(raw?.outputTokenCostPerMillion),
+    inputTokenCostPerMillion: normalizeOptionalPrice(
+      raw?.inputTokenCostPerMillion,
+    ),
+    cachedInputTokenCostPerMillion: normalizeOptionalPrice(
+      raw?.cachedInputTokenCostPerMillion,
+    ),
+    outputTokenCostPerMillion: normalizeOptionalPrice(
+      raw?.outputTokenCostPerMillion,
+    ),
     saveRunHistory: raw?.saveRunHistory !== false,
     theme:
       raw?.theme === "light" || raw?.theme === "dark"
@@ -152,6 +177,14 @@ export async function saveSettings(settings: AgentSettings): Promise<void> {
       apiBaseUrl: settings.apiBaseUrl.replace(/\/+$/, ""),
       openAiApi: normalizeOpenAiApi(settings.openAiApi),
       maxSteps: clampMaxSteps(settings.maxSteps),
+      observationTokenLimit: normalizePositiveInteger(
+        settings.observationTokenLimit,
+        DEFAULT_SETTINGS.observationTokenLimit!,
+      ),
+      maxActionsPerResponse: normalizePositiveInteger(
+        settings.maxActionsPerResponse,
+        DEFAULT_SETTINGS.maxActionsPerResponse!,
+      ),
       requestTimeoutSeconds: Math.min(
         Math.max(settings.requestTimeoutSeconds, MIN_REQUEST_TIMEOUT_SECONDS),
         MAX_REQUEST_TIMEOUT_SECONDS,
@@ -159,9 +192,15 @@ export async function saveSettings(settings: AgentSettings): Promise<void> {
       promptCacheMode: normalizePromptCacheMode(settings.promptCacheMode),
       disableThinking: settings.disableThinking === true,
       jev: normalizeJevSettings(settings.jev),
-      inputTokenCostPerMillion: normalizeOptionalPrice(settings.inputTokenCostPerMillion),
-      cachedInputTokenCostPerMillion: normalizeOptionalPrice(settings.cachedInputTokenCostPerMillion),
-      outputTokenCostPerMillion: normalizeOptionalPrice(settings.outputTokenCostPerMillion),
+      inputTokenCostPerMillion: normalizeOptionalPrice(
+        settings.inputTokenCostPerMillion,
+      ),
+      cachedInputTokenCostPerMillion: normalizeOptionalPrice(
+        settings.cachedInputTokenCostPerMillion,
+      ),
+      outputTokenCostPerMillion: normalizeOptionalPrice(
+        settings.outputTokenCostPerMillion,
+      ),
     },
   });
 }
@@ -182,7 +221,9 @@ export async function loadChatMessages(): Promise<AgentChatMessage[]> {
   return normalizeChatMessages(stored[CHAT_MESSAGES_KEY]);
 }
 
-export async function saveChatMessages(messages: AgentChatMessage[]): Promise<void> {
+export async function saveChatMessages(
+  messages: AgentChatMessage[],
+): Promise<void> {
   await chrome.storage.local.set({
     [CHAT_MESSAGES_KEY]: normalizeChatMessages(messages),
   });
@@ -200,7 +241,9 @@ export async function loadChatSuggestions(): Promise<string[]> {
   return normalizeChatSuggestions(stored[CHAT_SUGGESTIONS_KEY]);
 }
 
-export async function saveChatSuggestions(suggestions: string[]): Promise<string[]> {
+export async function saveChatSuggestions(
+  suggestions: string[],
+): Promise<string[]> {
   const normalized = normalizeChatSuggestions(suggestions);
   await chrome.storage.local.set({ [CHAT_SUGGESTIONS_KEY]: normalized });
   return normalized;
@@ -211,12 +254,16 @@ export async function resetChatSuggestions(): Promise<string[]> {
   return [...DEFAULT_CHAT_SUGGESTIONS];
 }
 
-export async function loadStagedUploadFile(): Promise<StagedUploadFile | undefined> {
+export async function loadStagedUploadFile(): Promise<
+  StagedUploadFile | undefined
+> {
   const stored = await chrome.storage.local.get(STAGED_UPLOAD_FILE_KEY);
   return normalizeStagedUploadFile(stored[STAGED_UPLOAD_FILE_KEY]);
 }
 
-export async function saveStagedUploadFile(file: StagedUploadFile): Promise<void> {
+export async function saveStagedUploadFile(
+  file: StagedUploadFile,
+): Promise<void> {
   await chrome.storage.local.set({
     [STAGED_UPLOAD_FILE_KEY]: file,
   });
@@ -253,7 +300,9 @@ export async function clearRunReports(): Promise<void> {
   await chrome.storage.local.remove(RUN_REPORTS_KEY);
 }
 
-export async function markInterruptedRunReports(now = Date.now()): Promise<RunReport[]> {
+export async function markInterruptedRunReports(
+  now = Date.now(),
+): Promise<RunReport[]> {
   const reports = await loadRunReports();
   let changed = false;
   const nextReports = reports.map((report) => {
@@ -264,7 +313,9 @@ export async function markInterruptedRunReports(now = Date.now()): Promise<RunRe
     return {
       ...report,
       status: "interrupted" as const,
-      failureReason: report.failureReason || "The extension stopped before this run finished.",
+      failureReason:
+        report.failureReason ||
+        "The extension stopped before this run finished.",
       updatedAt: now,
       endedAt: now,
     };
@@ -296,7 +347,11 @@ export async function saveConfigurationProfile(
   const existing = profiles.find(
     (profile) => profile.name.toLowerCase() === trimmedName.toLowerCase(),
   );
-  const savedProfile = createConfigurationProfile(trimmedName, settings, existing);
+  const savedProfile = createConfigurationProfile(
+    trimmedName,
+    settings,
+    existing,
+  );
 
   const nextProfiles = existing
     ? profiles.map((profile) =>
@@ -320,7 +375,11 @@ export async function updateConfigurationProfile(
     throw new Error("Choose a saved profile first.");
   }
 
-  const updatedProfile = createConfigurationProfile(existing.name, settings, existing);
+  const updatedProfile = createConfigurationProfile(
+    existing.name,
+    settings,
+    existing,
+  );
   const nextProfiles = profiles.map((profile) =>
     profile.id === profileId ? updatedProfile : profile,
   );
@@ -332,12 +391,16 @@ export function serializeConfigurationProfiles(
   profiles: AiConfigurationProfile[],
   exportedAt = new Date().toISOString(),
 ): string {
-  return JSON.stringify({
-    format: CONFIGURATION_PROFILE_EXPORT_FORMAT,
-    version: CONFIGURATION_PROFILE_EXPORT_VERSION,
-    exportedAt,
-    profiles,
-  }, null, 2);
+  return JSON.stringify(
+    {
+      format: CONFIGURATION_PROFILE_EXPORT_FORMAT,
+      version: CONFIGURATION_PROFILE_EXPORT_VERSION,
+      exportedAt,
+      profiles,
+    },
+    null,
+    2,
+  );
 }
 
 export async function importConfigurationProfiles(
@@ -347,7 +410,11 @@ export async function importConfigurationProfiles(
     throw new Error("The profile file is not valid JSON export data.");
   }
 
-  const imported = value as { format?: unknown; version?: unknown; profiles?: unknown };
+  const imported = value as {
+    format?: unknown;
+    version?: unknown;
+    profiles?: unknown;
+  };
   if (
     imported.format !== CONFIGURATION_PROFILE_EXPORT_FORMAT ||
     imported.version !== CONFIGURATION_PROFILE_EXPORT_VERSION ||
@@ -362,7 +429,9 @@ export async function importConfigurationProfiles(
   }
 
   const profiles = await loadConfigurationProfiles();
-  const usedNames = new Set(profiles.map((profile) => profile.name.toLocaleLowerCase()));
+  const usedNames = new Set(
+    profiles.map((profile) => profile.name.toLocaleLowerCase()),
+  );
   const now = Date.now();
   const importedProfiles = normalizedImports.map((profile) => {
     const name = createImportedProfileName(profile.name, usedNames);
@@ -406,6 +475,14 @@ export function applyConfigurationProfile(
     model: profile.model,
     openAiApi: normalizeOpenAiApi(profile.openAiApi),
     maxSteps: profile.maxSteps,
+    observationTokenLimit: normalizePositiveInteger(
+      profile.observationTokenLimit,
+      DEFAULT_SETTINGS.observationTokenLimit!,
+    ),
+    maxActionsPerResponse: normalizePositiveInteger(
+      profile.maxActionsPerResponse,
+      DEFAULT_SETTINGS.maxActionsPerResponse!,
+    ),
     requestTimeoutSeconds: profile.requestTimeoutSeconds,
     promptCacheMode: profile.promptCacheMode,
     disableThinking: profile.disableThinking === true,
@@ -443,18 +520,35 @@ function normalizeProfiles(value: unknown): AiConfigurationProfile[] {
         model: String(raw.model || DEFAULT_SETTINGS.model),
         openAiApi: normalizeOpenAiApi(raw.openAiApi),
         maxSteps: normalizeStoredMaxSteps(raw.maxSteps),
+        observationTokenLimit: normalizePositiveInteger(
+          raw.observationTokenLimit,
+          DEFAULT_SETTINGS.observationTokenLimit!,
+        ),
+        maxActionsPerResponse: normalizePositiveInteger(
+          raw.maxActionsPerResponse,
+          DEFAULT_SETTINGS.maxActionsPerResponse!,
+        ),
         requestTimeoutSeconds: Math.min(
           Math.max(
-            Number(raw.requestTimeoutSeconds || DEFAULT_SETTINGS.requestTimeoutSeconds),
+            Number(
+              raw.requestTimeoutSeconds ||
+                DEFAULT_SETTINGS.requestTimeoutSeconds,
+            ),
             MIN_REQUEST_TIMEOUT_SECONDS,
           ),
           MAX_REQUEST_TIMEOUT_SECONDS,
         ),
         promptCacheMode: normalizePromptCacheMode(raw.promptCacheMode),
         disableThinking: raw.disableThinking === true,
-        inputTokenCostPerMillion: normalizeOptionalPrice(raw.inputTokenCostPerMillion),
-        cachedInputTokenCostPerMillion: normalizeOptionalPrice(raw.cachedInputTokenCostPerMillion),
-        outputTokenCostPerMillion: normalizeOptionalPrice(raw.outputTokenCostPerMillion),
+        inputTokenCostPerMillion: normalizeOptionalPrice(
+          raw.inputTokenCostPerMillion,
+        ),
+        cachedInputTokenCostPerMillion: normalizeOptionalPrice(
+          raw.cachedInputTokenCostPerMillion,
+        ),
+        outputTokenCostPerMillion: normalizeOptionalPrice(
+          raw.outputTokenCostPerMillion,
+        ),
         createdAt: Number(raw.createdAt || Date.now()),
         updatedAt: Number(raw.updatedAt || Date.now()),
       };
@@ -478,21 +572,38 @@ function createConfigurationProfile(
     model: settings.model,
     openAiApi: normalizeOpenAiApi(settings.openAiApi),
     maxSteps: clampMaxSteps(settings.maxSteps),
+    observationTokenLimit: normalizePositiveInteger(
+      settings.observationTokenLimit,
+      DEFAULT_SETTINGS.observationTokenLimit!,
+    ),
+    maxActionsPerResponse: normalizePositiveInteger(
+      settings.maxActionsPerResponse,
+      DEFAULT_SETTINGS.maxActionsPerResponse!,
+    ),
     requestTimeoutSeconds: Math.min(
       Math.max(settings.requestTimeoutSeconds, MIN_REQUEST_TIMEOUT_SECONDS),
       MAX_REQUEST_TIMEOUT_SECONDS,
     ),
     promptCacheMode: normalizePromptCacheMode(settings.promptCacheMode),
     disableThinking: settings.disableThinking === true,
-    inputTokenCostPerMillion: normalizeOptionalPrice(settings.inputTokenCostPerMillion),
-    cachedInputTokenCostPerMillion: normalizeOptionalPrice(settings.cachedInputTokenCostPerMillion),
-    outputTokenCostPerMillion: normalizeOptionalPrice(settings.outputTokenCostPerMillion),
+    inputTokenCostPerMillion: normalizeOptionalPrice(
+      settings.inputTokenCostPerMillion,
+    ),
+    cachedInputTokenCostPerMillion: normalizeOptionalPrice(
+      settings.cachedInputTokenCostPerMillion,
+    ),
+    outputTokenCostPerMillion: normalizeOptionalPrice(
+      settings.outputTokenCostPerMillion,
+    ),
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   };
 }
 
-function createImportedProfileName(name: string, usedNames: Set<string>): string {
+function createImportedProfileName(
+  name: string,
+  usedNames: Set<string>,
+): string {
   if (!usedNames.has(name.toLocaleLowerCase())) {
     return name;
   }
@@ -506,7 +617,9 @@ function createImportedProfileName(name: string, usedNames: Set<string>): string
   return candidate;
 }
 
-function normalizeStagedUploadFile(value: unknown): StagedUploadFile | undefined {
+function normalizeStagedUploadFile(
+  value: unknown,
+): StagedUploadFile | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
   }
@@ -516,7 +629,13 @@ function normalizeStagedUploadFile(value: unknown): StagedUploadFile | undefined
   const name = String(raw.name || "").trim();
   const dataUrl = String(raw.dataUrl || "");
   const size = Number(raw.size || 0);
-  if (!id || !name || !dataUrl.startsWith("data:") || !Number.isFinite(size) || size <= 0) {
+  if (
+    !id ||
+    !name ||
+    !dataUrl.startsWith("data:") ||
+    !Number.isFinite(size) ||
+    size <= 0
+  ) {
     return undefined;
   }
 
@@ -549,7 +668,10 @@ function normalizeChatMessages(value: unknown): AgentChatMessage[] {
         !id ||
         !content ||
         (role !== "user" && role !== "assistant") ||
-        (kind !== "message" && kind !== "answer" && kind !== "question" && kind !== "error")
+        (kind !== "message" &&
+          kind !== "answer" &&
+          kind !== "question" &&
+          kind !== "error")
       ) {
         return undefined;
       }
@@ -579,7 +701,12 @@ function normalizeChatSuggestions(value: unknown): string[] {
 
   const seen = new Set<string>();
   return value
-    .map((suggestion) => String(suggestion || "").replace(/\s+/g, " ").trim().slice(0, MAX_CHAT_SUGGESTION_CHARS))
+    .map((suggestion) =>
+      String(suggestion || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, MAX_CHAT_SUGGESTION_CHARS),
+    )
     .filter((suggestion) => {
       const normalized = suggestion.toLocaleLowerCase();
       if (!normalized || seen.has(normalized)) {
@@ -623,13 +750,19 @@ function normalizeRunReport(value: unknown): RunReport | undefined {
     startUrl,
     startTitle: optionalString(raw.startTitle),
     requirements: Array.isArray(raw.requirements)
-      ? raw.requirements.map(normalizeRequirement).filter((item): item is RunRequirement => Boolean(item))
+      ? raw.requirements
+          .map(normalizeRequirement)
+          .filter((item): item is RunRequirement => Boolean(item))
       : [],
     evidence: Array.isArray(raw.evidence)
-      ? raw.evidence.map(normalizeEvidence).filter((item): item is RunEvidence => Boolean(item))
+      ? raw.evidence
+          .map(normalizeEvidence)
+          .filter((item): item is RunEvidence => Boolean(item))
       : [],
     findings: Array.isArray(raw.findings)
-      ? raw.findings.map(normalizeFinding).filter((item): item is RunFinding => Boolean(item))
+      ? raw.findings
+          .map(normalizeFinding)
+          .filter((item): item is RunFinding => Boolean(item))
       : [],
     finalReport: optionalString(raw.finalReport),
     failureReason: optionalString(raw.failureReason),
@@ -646,8 +779,12 @@ function sanitizeRunReport(report: RunReport): RunReport {
     task: report.task.slice(0, 10_000),
     startUrl: report.startUrl.slice(0, 2_000),
     startTitle: report.startTitle?.slice(0, 500),
-    requirements: report.requirements.slice(0, MAX_REQUIREMENTS_PER_RUN).map(sanitizeRequirement),
-    evidence: report.evidence.slice(-MAX_EVIDENCE_PER_RUN).map(sanitizeEvidence),
+    requirements: report.requirements
+      .slice(0, MAX_REQUIREMENTS_PER_RUN)
+      .map(sanitizeRequirement),
+    evidence: report.evidence
+      .slice(-MAX_EVIDENCE_PER_RUN)
+      .map(sanitizeEvidence),
     findings: report.findings.slice(-MAX_FINDINGS_PER_RUN).map(sanitizeFinding),
     finalReport: report.finalReport?.slice(0, MAX_FINAL_REPORT_CHARS),
     failureReason: report.failureReason?.slice(0, 4_000),
@@ -673,7 +810,9 @@ function normalizeRequirement(value: unknown): RunRequirement | undefined {
     blockedReason: optionalString(raw.blockedReason),
     expectedItemCount: optionalFiniteNumber(raw.expectedItemCount),
     items: Array.isArray(raw.items)
-      ? raw.items.map(normalizeRequirementItem).filter((item): item is RunRequirementItem => Boolean(item))
+      ? raw.items
+          .map(normalizeRequirementItem)
+          .filter((item): item is RunRequirementItem => Boolean(item))
       : undefined,
     createdAt: finiteNumber(raw.createdAt, Date.now()),
     updatedAt: finiteNumber(raw.updatedAt, Date.now()),
@@ -685,13 +824,17 @@ function sanitizeRequirement(requirement: RunRequirement): RunRequirement {
     ...requirement,
     id: requirement.id.slice(0, 120),
     text: requirement.text.slice(0, 2_000),
-    evidenceIds: requirement.evidenceIds.slice(0, 200).map((id) => id.slice(0, 120)),
+    evidenceIds: requirement.evidenceIds
+      .slice(0, 200)
+      .map((id) => id.slice(0, 120)),
     blockedReason: requirement.blockedReason?.slice(0, 2_000),
     items: requirement.items?.slice(0, 500).map(sanitizeRequirementItem),
   };
 }
 
-function normalizeRequirementItem(value: unknown): RunRequirementItem | undefined {
+function normalizeRequirementItem(
+  value: unknown,
+): RunRequirementItem | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
   }
@@ -731,7 +874,13 @@ function normalizeEvidence(value: unknown): RunEvidence | undefined {
     return undefined;
   }
   const kind = raw.kind;
-  if (kind !== "observation" && kind !== "action" && kind !== "finding" && kind !== "download" && kind !== "user") {
+  if (
+    kind !== "observation" &&
+    kind !== "action" &&
+    kind !== "finding" &&
+    kind !== "download" &&
+    kind !== "user"
+  ) {
     return undefined;
   }
   return sanitizeEvidence({
@@ -788,7 +937,10 @@ function sanitizeFinding(finding: RunFinding): RunFinding {
 }
 
 function normalizeUsage(value: unknown): AgentUsageSnapshot {
-  const raw = value && typeof value === "object" ? value as Partial<AgentUsageSnapshot> : {};
+  const raw =
+    value && typeof value === "object"
+      ? (value as Partial<AgentUsageSnapshot>)
+      : {};
   return {
     jev: normalizeJevUsage(raw.jev),
     requestCount: finiteNumber(raw.requestCount, 0),
@@ -801,7 +953,10 @@ function normalizeUsage(value: unknown): AgentUsageSnapshot {
     totalLatencyMs: finiteNumber(raw.totalLatencyMs, 0),
     averageLatencyMs: optionalFiniteNumber(raw.averageLatencyMs),
     lastLatencyMs: optionalFiniteNumber(raw.lastLatencyMs),
-    lastStatus: raw.lastStatus === "timeout" || typeof raw.lastStatus === "number" ? raw.lastStatus : undefined,
+    lastStatus:
+      raw.lastStatus === "timeout" || typeof raw.lastStatus === "number"
+        ? raw.lastStatus
+        : undefined,
     estimatedCostUsd: optionalFiniteNumber(raw.estimatedCostUsd),
     costConfigured: Boolean(raw.costConfigured),
     provider: normalizeOptionalProvider(raw.provider),
@@ -817,12 +972,36 @@ function normalizeJevUsage(value: unknown): JevUsageSnapshot | undefined {
   const raw = value as Partial<JevUsageSnapshot>;
   return {
     requests: Math.max(0, finiteNumber(raw.requests, 0)),
-    ...(raw.helperRequests === undefined ? {} : { helperRequests: Math.max(0, finiteNumber(raw.helperRequests, 0)) }),
-    ...(Array.isArray(raw.lastDecision) ? { lastDecision: raw.lastDecision.filter((entry) => entry && typeof entry === "object").slice(0, 12).map((entry) => ({
-      question: String(entry.question || "").slice(0, 80), choice: String(entry.choice || "").slice(0, 120),
-      confidence: Math.min(1, Math.max(0, finiteNumber(entry.confidence, 0))),
-      probabilities: Array.isArray(entry.probabilities) ? entry.probabilities.filter((option) => option && typeof option === "object").slice(0, 3).map((option) => ({ option: String(option.option || "").slice(0, 120), probability: Math.min(1, Math.max(0, finiteNumber(option.probability, 0))) })) : [],
-    })) } : {}),
+    ...(raw.helperRequests === undefined
+      ? {}
+      : { helperRequests: Math.max(0, finiteNumber(raw.helperRequests, 0)) }),
+    ...(Array.isArray(raw.lastDecision)
+      ? {
+          lastDecision: raw.lastDecision
+            .filter((entry) => entry && typeof entry === "object")
+            .slice(0, 12)
+            .map((entry) => ({
+              question: String(entry.question || "").slice(0, 80),
+              choice: String(entry.choice || "").slice(0, 120),
+              confidence: Math.min(
+                1,
+                Math.max(0, finiteNumber(entry.confidence, 0)),
+              ),
+              probabilities: Array.isArray(entry.probabilities)
+                ? entry.probabilities
+                    .filter((option) => option && typeof option === "object")
+                    .slice(0, 3)
+                    .map((option) => ({
+                      option: String(option.option || "").slice(0, 120),
+                      probability: Math.min(
+                        1,
+                        Math.max(0, finiteNumber(option.probability, 0)),
+                      ),
+                    }))
+                : [],
+            })),
+        }
+      : {}),
     fastDecisions: Math.max(0, finiteNumber(raw.fastDecisions, 0)),
     shadowDecisions: Math.max(0, finiteNumber(raw.shadowDecisions, 0)),
     fallbacks: Math.max(0, finiteNumber(raw.fallbacks, 0)),
@@ -834,12 +1013,17 @@ function normalizeJevUsage(value: unknown): JevUsageSnapshot | undefined {
 }
 
 function enforceRunReportLimits(reports: RunReport[]): RunReport[] {
-  const sorted = [...reports].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_RUN_REPORTS);
+  const sorted = [...reports]
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, MAX_RUN_REPORTS);
   const selected: RunReport[] = [];
   let usedChars = 2;
   for (const report of sorted) {
     const reportChars = JSON.stringify(report).length + 1;
-    if (selected.length > 0 && usedChars + reportChars > MAX_RUN_REPORT_STORAGE_CHARS) {
+    if (
+      selected.length > 0 &&
+      usedChars + reportChars > MAX_RUN_REPORT_STORAGE_CHARS
+    ) {
       continue;
     }
     selected.push(report);
@@ -849,8 +1033,17 @@ function enforceRunReportLimits(reports: RunReport[]): RunReport[] {
 }
 
 function normalizeRunStatus(value: unknown): RunStatus {
-  const allowed: RunStatus[] = ["running", "completed", "partial", "blocked", "stopped", "failed", "step_limit", "interrupted"];
-  return allowed.includes(value as RunStatus) ? value as RunStatus : "failed";
+  const allowed: RunStatus[] = [
+    "running",
+    "completed",
+    "partial",
+    "blocked",
+    "stopped",
+    "failed",
+    "step_limit",
+    "interrupted",
+  ];
+  return allowed.includes(value as RunStatus) ? (value as RunStatus) : "failed";
 }
 
 function normalizeRequirementStatus(value: unknown): RequirementStatus {
@@ -858,7 +1051,12 @@ function normalizeRequirementStatus(value: unknown): RequirementStatus {
 }
 
 function normalizeOptionalProvider(value: unknown): Provider | undefined {
-  return value === "openai" || value === "gemini" || value === "groq" || value === "custom" ? value : undefined;
+  return value === "openai" ||
+    value === "gemini" ||
+    value === "groq" ||
+    value === "custom"
+    ? value
+    : undefined;
 }
 
 function finiteNumber(value: unknown, fallback: number): number {
@@ -880,7 +1078,12 @@ function optionalString(value: unknown): string | undefined {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim())
+    ? value
+        .filter(
+          (item): item is string =>
+            typeof item === "string" && Boolean(item.trim()),
+        )
+        .map((item) => item.trim())
     : [];
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Download, LoaderCircle, RefreshCw, Save, Trash2, Upload, Wifi } from "lucide-react";
 import {
+  DEFAULT_SETTINGS,
   JEV_MODEL,
   MAX_REQUEST_TIMEOUT_SECONDS,
   MIN_REQUEST_TIMEOUT_SECONDS,
@@ -453,7 +454,7 @@ export function SettingsPanel({
           <input
             value={settings.maxSteps}
             min={1}
-            max={60}
+            step={1}
             type="number"
             onChange={(event) =>
               onChange({
@@ -461,6 +462,28 @@ export function SettingsPanel({
                 maxSteps: Number(event.target.value),
               })
             }
+          />
+        </label>
+
+        <label>
+          Observation context tokens
+          <input
+            value={settings.observationTokenLimit ?? DEFAULT_SETTINGS.observationTokenLimit}
+            min={1}
+            step={1}
+            type="number"
+            onChange={(event) => onChange({ ...settings, observationTokenLimit: Number(event.target.value) })}
+          />
+        </label>
+
+        <label>
+          Max actions per response
+          <input
+            value={settings.maxActionsPerResponse ?? DEFAULT_SETTINGS.maxActionsPerResponse}
+            min={1}
+            step={1}
+            type="number"
+            onChange={(event) => onChange({ ...settings, maxActionsPerResponse: Number(event.target.value) })}
           />
         </label>
 

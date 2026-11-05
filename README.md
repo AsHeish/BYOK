@@ -74,6 +74,9 @@ The side-panel settings support:
 - `model`: any model name accepted by the configured compatible endpoint.
 - `openAiApi`: with the OpenAI-compatible provider, **OpenAI endpoint** selects Responses (`/responses`) or Chat Completions (`/chat/completions`). Unset, `api.openai.com` uses Responses and other hosts use Chat Completions.
 - `maxSteps`: maximum observe/act loop iterations for the LLM planner, default `60`. Jev Fast phases have no numeric navigation limit.
+- `observationTokenLimit`: **Observation context tokens**, default `4000`. Approximate budget for the normal page observation, estimated at four characters per token, excluding instructions, findings, and separately requested documents or screenshots.
+- `maxActionsPerResponse`: **Max actions per response**, default `10`. Maximum actions accepted and executed from one model JSON response. Batches still stop on failures, stale targets, navigation, or terminal actions.
+- Both limits accept positive integers without an application-defined upper ceiling and are saved with AI profiles. Larger values may increase latency, memory use, and API cost; provider context-window and output-token limits still apply.
 - `requestTimeoutSeconds`: AI request timeout per attempt, default `60` seconds.
 - `promptCacheMode`: `auto` selects cache hints by provider and model, `on` forces cache hints, and `off` disables them.
 - `disableThinking`: **Disable model thinking** below Model requests non-thinking generation. It is off by default, preserving the provider's normal behavior, and is saved with each AI profile.
@@ -94,11 +97,11 @@ Enable **Settings > Disable model thinking**, then use **Test Connection** with 
 
 The request parameter depends on the endpoint:
 
-| Endpoint/model | Disabled-thinking request |
-| --- | --- |
+| Endpoint/model                                                                   | Disabled-thinking request                          |
+| -------------------------------------------------------------------------------- | -------------------------------------------------- |
 | Local or custom Qwen3/Gemma4 models (including `qwen-3.6-27b` and `gemma-4-31b`) | `chat_template_kwargs: { enable_thinking: false }` |
-| OpenRouter (`openrouter.ai`) | `reasoning: { enabled: false }` |
-| Other OpenAI-compatible, Groq, and Gemini endpoints | `reasoning_effort: "none"` |
+| OpenRouter (`openrouter.ai`)                                                     | `reasoning: { enabled: false }`                    |
+| Other OpenAI-compatible, Groq, and Gemini endpoints                              | `reasoning_effort: "none"`                         |
 
 Support depends on the provider, model, and server configuration. Some models require reasoning, some do not recognize the parameter, and some gateways ignore unsupported fields. A successful connection test confirms API acceptance, not that the model used zero reasoning tokens. Gemini 2.5 Pro and Gemini 3 models do not support fully disabling thinking. For local Qwen/Gemma deployments, the server must honor chat-template kwargs. This option does not hide or strip reasoning text; it requests non-thinking inference. Disabling thinking can reduce latency and token use, but can also reduce answer quality.
 

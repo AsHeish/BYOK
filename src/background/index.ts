@@ -4,7 +4,13 @@ import {
   type PromptScreenshotInfo,
   type PromptTabInfo,
 } from "./prompts";
-import { getActiveTab, notifySidePanel, sendTabMessage, sleep, tryInjectContentScript } from "./chromeAsync";
+import {
+  getActiveTab,
+  notifySidePanel,
+  sendTabMessage,
+  sleep,
+  tryInjectContentScript,
+} from "./chromeAsync";
 import {
   formatModelErrorDetails,
   ModelClientError,
@@ -17,10 +23,20 @@ import {
   type ChatMessage,
   type ModelRequestNotice,
 } from "./modelClient";
-import { registerModelTransportBroker, requestModelThroughSidePanel } from "./modelTransport";
+import {
+  registerModelTransportBroker,
+  requestModelThroughSidePanel,
+} from "./modelTransport";
 import { addJevUsage } from "./jevNavigation";
 import { JevDecisionError, testJevConnection } from "./jevClient";
-import { jevFieldContext, progressKey, requestJevAction, semanticPageKey, type JevActionDecision, type JevHistoryEntry } from "./jevActions";
+import {
+  jevFieldContext,
+  progressKey,
+  requestJevAction,
+  semanticPageKey,
+  type JevActionDecision,
+  type JevHistoryEntry,
+} from "./jevActions";
 import { guardObservedAction, validateAgentAction } from "./safety";
 import { extractPdfText } from "./pdfText";
 import { captureAndResizeVisibleTab, isVisibleOwnedTab } from "./screenshot";
@@ -44,7 +60,13 @@ import {
 } from "./chatRouting";
 
 import { dataUrlToUint8Array, formatFileSize } from "../shared/fileData";
-import { MAX_CHAT_MESSAGES, MAX_LOG_ENTRIES, MAX_TRACKED_TABS } from "../shared/defaults";
+import {
+  DEFAULT_SETTINGS,
+  MAX_CHAT_MESSAGES,
+  MAX_LOG_ENTRIES,
+  MAX_TRACKED_TABS,
+  normalizePositiveInteger,
+} from "../shared/defaults";
 import { createId } from "../shared/ids";
 import {
   clearChatMessages,
@@ -77,7 +99,7 @@ import type {
   RunRequirementItem,
   RunStatus,
   SidePanelToBackgroundMessage,
-  StagedUploadFile
+  StagedUploadFile,
 } from "../shared/types";
 
 interface RunningSession {
@@ -119,7 +141,9 @@ interface AgentTabState {
 let runningSession: RunningSession | undefined;
 let directChatTaskId: string | undefined;
 let activeTaskAbortController: AbortController | undefined;
-let pendingChatContinuation: { instruction: string; question: string } | undefined;
+let pendingChatContinuation:
+  | { instruction: string; question: string }
+  | undefined;
 let logs: AgentLogEntry[] = [];
 let chatMessages: AgentChatMessage[] = [];
 let usageSnapshot: AgentUsageSnapshot = createEmptyUsageSnapshot();
@@ -137,7 +161,6 @@ const chatMessagesReady = loadChatMessages()
   });
 
 const SIDE_PANEL_PATH = "sidepanel.html";
-const MAX_ACTIONS_PER_AGENT_STEP = 10;
 const MAX_PROGRESS_LINES_FOR_PROMPT = 30;
 const MAX_ACTION_LOG_PREVIEW = 20;
 const TAB_SETTLE_TIMEOUT_MS = 5000;
@@ -181,14 +204,16 @@ chrome.commands.onCommand.addListener((command) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message: SidePanelToBackgroundMessage, _sender, sendResponse) => {
-  void handleRuntimeMessage(message)
-    .then(sendResponse)
-    .catch((error: unknown) => {
-      sendResponse({ ok: false, error: getErrorMessage(error) });
-    });
-  return true;
-});
+chrome.runtime.onMessage.addListener(
+  (message: SidePanelToBackgroundMessage, _sender, sendResponse) => {
+    void handleRuntimeMessage(message)
+      .then(sendResponse)
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: getErrorMessage(error) });
+      });
+    return true;
+  },
+);
 
 chrome.tabs.onCreated.addListener((tab) => {
   void adoptTabOpenedByAgent(tab);
@@ -200,7 +225,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 
   const closedTab = runningSession.tabs.find((tab) => tab.tabId === tabId);
-  runningSession.tabs = runningSession.tabs.filter((tab) => tab.tabId !== tabId);
+  runningSession.tabs = runningSession.tabs.filter(
+    (tab) => tab.tabId !== tabId,
+  );
   if (runningSession.activeTabId === tabId) {
     const fallbackTab = runningSession.tabs[0];
     if (!fallbackTab) {
@@ -208,7 +235,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       return;
     }
     setActiveTrackedTab(runningSession, fallbackTab);
-    appendLog("warning", `Active tab ${closedTab?.alias || tabId} was closed. Switched tracking to ${fallbackTab.alias}.`);
+    appendLog(
+      "warning",
+      `Active tab ${closedTab?.alias || tabId} was closed. Switched tracking to ${fallbackTab.alias}.`,
+    );
   }
 });
 
@@ -262,26 +292,39 @@ async function openSidePanelInLastFocusedWindow(): Promise<void> {
   }
 }
 
-async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Promise<unknown> {
+async function handleRuntimeMessage(
+  message: SidePanelToBackgroundMessage,
+): Promise<unknown> {
   await chatMessagesReady;
   switch (message.type) {
     case "SIDEPANEL_SEND_CHAT":
       if (!message.settings) {
-        return { ok: false, error: "The request has no selected configuration. Reload the extension and side panel before retrying." };
+        return {
+          ok: false,
+          error:
+            "The request has no selected configuration. Reload the extension and side panel before retrying.",
+        };
       }
       void startTask(message.message, "chat", message.settings);
       return { ok: true };
 
     case "SIDEPANEL_RUN_TASK":
       if (!message.settings) {
-        return { ok: false, error: "The request has no selected configuration. Reload the extension and side panel before retrying." };
+        return {
+          ok: false,
+          error:
+            "The request has no selected configuration. Reload the extension and side panel before retrying.",
+        };
       }
       void startTask(message.task, "run", message.settings);
       return { ok: true };
 
     case "SIDEPANEL_TEST_MODEL_CONNECTION":
       return message.target === "jev"
-        ? testJevConnection(message.settings.jev?.apiKey || "", requestModelThroughSidePanel)
+        ? testJevConnection(
+            message.settings.jev?.apiKey || "",
+            requestModelThroughSidePanel,
+          )
         : testModelConnection(message.settings);
 
     case "SIDEPANEL_STOP_TASK":
@@ -292,17 +335,21 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
       chatMessages = [];
       pendingChatContinuation = undefined;
       await enqueueChatMessagesClear();
-      notifySidePanel({ type: "AGENT_CHAT_CLEARED" } satisfies BackgroundToSidePanelMessage);
+      notifySidePanel({
+        type: "AGENT_CHAT_CLEARED",
+      } satisfies BackgroundToSidePanelMessage);
       return { ok: true };
 
     case "SIDEPANEL_GET_STATE":
       return {
-        running: Boolean((runningSession && !runningSession.stopped) || directChatTaskId),
+        running: Boolean(
+          (runningSession && !runningSession.stopped) || directChatTaskId,
+        ),
         waitingForModel: pendingModelRequestCount > 0,
         modelRetryStatus,
         logs: logs.filter((entry) => !isHiddenActionLog(entry.message)),
         chatMessages,
-        usage: usageSnapshot
+        usage: usageSnapshot,
       };
 
     default:
@@ -310,7 +357,11 @@ async function handleRuntimeMessage(message: SidePanelToBackgroundMessage): Prom
   }
 }
 
-async function startTask(task: string, source: "chat" | "run", settings: AgentSettings): Promise<void> {
+async function startTask(
+  task: string,
+  source: "chat" | "run",
+  settings: AgentSettings,
+): Promise<void> {
   const submittedTask = task.trim();
   if (!submittedTask) {
     appendLog("warning", "Enter a task first.");
@@ -338,11 +389,17 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
   appendChatMessage("user", submittedTask, "message", taskId);
   try {
     if (!settings.apiKey.trim()) {
-      reportTaskError(taskId, "Add an API key in Settings before running a task.");
+      reportTaskError(
+        taskId,
+        "Add an API key in Settings before running a task.",
+      );
       return;
     }
     if (!settings.model.trim()) {
-      reportTaskError(taskId, "Add a model name in Settings before running a task.");
+      reportTaskError(
+        taskId,
+        "Add a model name in Settings before running a task.",
+      );
       return;
     }
     if (settings.saveRunHistory) {
@@ -354,10 +411,19 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
     const tab = await getActiveTab();
     if (!tab?.id || !isSupportedTabUrl(tab.url)) {
       if (source === "chat" && !continuation) {
-        await answerDirectChat(submittedTask, priorChatMessages, taskId, settings, taskAbortController.signal);
+        await answerDirectChat(
+          submittedTask,
+          priorChatMessages,
+          taskId,
+          settings,
+          taskAbortController.signal,
+        );
         return;
       }
-      reportTaskError(taskId, "Open an http(s) webpage before running the agent. Browser internal pages are blocked.");
+      reportTaskError(
+        taskId,
+        "Open an http(s) webpage before running the agent. Browser internal pages are blocked.",
+      );
       return;
     }
 
@@ -383,7 +449,11 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
     let unsuccessfulJevReturns = 0;
     const jevHistory: JevHistoryEntry[] = [];
     if (settings.jev?.mode === "fast" && settings.jev.apiKey.trim()) {
-      const outcome = await runJevActionTask(runningSession, settings, jevHistory);
+      const outcome = await runJevActionTask(
+        runningSession,
+        settings,
+        jevHistory,
+      );
       if (!outcome.fallback || isStopped(taskId)) return;
       previousResult = outcome.fallback;
       jevProgress = outcome.madeProgress;
@@ -407,23 +477,54 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
       }
       assertOwnedTabId(session, session.activeTabId);
       let observation = await observePage(session.activeTabId);
-      updateTrackedTabFromObservation(session, session.activeTabId, observation);
+      updateTrackedTabFromObservation(
+        session,
+        session.activeTabId,
+        observation,
+      );
       recordObservationEvidence(session, observation);
-      appendLog("info", `Observed ${session.activeTabAlias}: ${observation.title || observation.url}`);
+      appendLog(
+        "info",
+        `Observed ${session.activeTabAlias}: ${observation.title || observation.url}`,
+      );
       const stagedFile = await loadStagedUploadFile();
-      const recentDownloads = await getRecentDownloadsForPrompt(MAX_DOWNLOADS_FOR_PROMPT);
+      const recentDownloads = await getRecentDownloadsForPrompt(
+        MAX_DOWNLOADS_FOR_PROMPT,
+      );
       const documentContext = session.pendingDocument;
-      const screenshotContext = session.visionDisabled ? undefined : session.pendingScreenshot;
+      const screenshotContext = session.visionDisabled
+        ? undefined
+        : session.pendingScreenshot;
 
-      if (settings.jev?.mode === "shadow" && settings.jev.apiKey.trim() && !documentContext && !screenshotContext && !stagedFile) {
+      if (
+        settings.jev?.mode === "shadow" &&
+        settings.jev.apiKey.trim() &&
+        !documentContext &&
+        !screenshotContext &&
+        !stagedFile
+      ) {
         pendingModelRequestCount += 1;
         emitModelStatus();
         try {
-          const decision = await requestJevAction({ apiKey: settings.jev.apiKey, goal: agentInstruction, observation, history: [], allowTextHelper: true, signal: session.abortSignal }, requestModelThroughSidePanel);
+          const decision = await requestJevAction(
+            {
+              apiKey: settings.jev.apiKey,
+              goal: agentInstruction,
+              observation,
+              history: [],
+              allowTextHelper: true,
+              signal: session.abortSignal,
+            },
+            requestModelThroughSidePanel,
+          );
           recordJevDecision(session, decision, "shadow");
         } catch (error) {
-          if (session.abortSignal.aborted) throw new ModelRequestCancelledError();
-          appendLog("warning", "Jev shadow decision unavailable; the LLM remains in control.");
+          if (session.abortSignal.aborted)
+            throw new ModelRequestCancelledError();
+          appendLog(
+            "warning",
+            "Jev shadow decision unavailable; the LLM remains in control.",
+          );
         } finally {
           pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
           emitModelStatus();
@@ -439,6 +540,8 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
         observation,
         step,
         maxSteps: settings.maxSteps,
+        observationTokenLimit: settings.observationTokenLimit,
+        maxActionsPerResponse: settings.maxActionsPerResponse,
         previousResult,
         tabs: getPromptTabs(session),
         activeTabAlias: session.activeTabAlias,
@@ -460,7 +563,11 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
         try {
           let modelResult;
           try {
-            modelResult = await requestModelStep(settings, messages, session.abortSignal);
+            modelResult = await requestModelStep(
+              settings,
+              messages,
+              session.abortSignal,
+            );
           } catch (error) {
             if (!screenshotContext || !isVisionUnsupportedError(error)) {
               throw error;
@@ -470,17 +577,34 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
             }
             session.visionDisabled = true;
             session.pendingScreenshot = undefined;
-            appendLog("warning", "The configured model rejected screenshot input. Retrying this step with text-only context; visual inspection is disabled for this run.");
-            messages = buildAgentMessages({ ...promptArgs, screenshot: undefined });
+            appendLog(
+              "warning",
+              "The configured model rejected screenshot input. Retrying this step with text-only context; visual inspection is disabled for this run.",
+            );
+            messages = buildAgentMessages({
+              ...promptArgs,
+              screenshot: undefined,
+            });
             logPromptBeforeModelCall(step, messages);
-            modelResult = await requestModelStep(settings, messages, session.abortSignal);
+            modelResult = await requestModelStep(
+              settings,
+              messages,
+              session.abortSignal,
+            );
           }
           if (session.pendingDocument === documentContext) {
             session.pendingDocument = undefined;
           }
-          if (screenshotContext && session.pendingScreenshot === screenshotContext) {
+          if (
+            screenshotContext &&
+            session.pendingScreenshot === screenshotContext
+          ) {
             session.pendingScreenshot = undefined;
-            recordVisualEvidence(session, screenshotContext, modelResult.response.thought_summary);
+            recordVisualEvidence(
+              session,
+              screenshotContext,
+              modelResult.response.thought_summary,
+            );
           }
           recordUsageEvent(modelResult.usage, settings);
           modelResponse = modelResult.response;
@@ -488,9 +612,19 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
           if (error instanceof ModelClientError && error.usage) {
             recordUsageEvent(error.usage, settings);
           }
-          if (error instanceof ModelClientError && /JSON|schema/i.test(error.message)) {
-            previousResult = buildModelErrorProgress(previousResult, error.message);
-            appendLog("warning", `${error.message} Asking the model to continue with valid action JSON.`, formatModelErrorDetails(error));
+          if (
+            error instanceof ModelClientError &&
+            /JSON|schema/i.test(error.message)
+          ) {
+            previousResult = buildModelErrorProgress(
+              previousResult,
+              error.message,
+            );
+            appendLog(
+              "warning",
+              `${error.message} Asking the model to continue with valid action JSON.`,
+              formatModelErrorDetails(error),
+            );
             await sleep(450);
             continue;
           }
@@ -498,11 +632,20 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
         }
       }
 
-      const plannedActions = getPlannedActions(modelResponse);
-      const directChatAnswer = getDirectChatAnswer(modelResponse, plannedActions, promptArgs.allowChatMode);
+      const plannedActions = getPlannedActions(
+        modelResponse,
+        settings.maxActionsPerResponse,
+      );
+      const directChatAnswer = getDirectChatAnswer(
+        modelResponse,
+        plannedActions,
+        promptArgs.allowChatMode,
+      );
       if (modelResponse.mode === "chat" && promptArgs.allowChatMode) {
         if (!directChatAnswer) {
-          throw new Error("The model selected chat mode without returning one done action containing a direct answer.");
+          throw new Error(
+            "The model selected chat mode without returning one done action containing a direct answer.",
+          );
         }
         finishRun(session, "completed", undefined, directChatAnswer);
         appendChatMessage("assistant", directChatAnswer, "answer", taskId);
@@ -515,36 +658,67 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
         await persistRunReport(session.run);
       }
 
-      initializeRequirements(session, agentInstruction, modelResponse.requirements);
+      initializeRequirements(
+        session,
+        agentInstruction,
+        modelResponse.requirements,
+      );
       applyRequirementUpdates(session, modelResponse.requirementUpdates);
 
-      appendLog("info", `${getConsolePlanSummary(modelResponse, plannedActions)} Next: ${formatActions(plannedActions)}.`);
+      appendLog(
+        "info",
+        `${getConsolePlanSummary(modelResponse, plannedActions)} Next: ${formatActions(plannedActions)}.`,
+      );
 
-      const safety = validateAgentAction({ modelResponse, task: submittedTask, observation });
+      const safety = validateAgentAction({
+        modelResponse,
+        task: submittedTask,
+        observation,
+      });
       if (!safety.allowed) {
         if (safety.recoverable) {
           previousResult = safety.reason;
           appendLog("warning", safety.reason);
-          if (await attachScreenshotWhenStuck(session, true)) previousResult = `${previousResult}\n${STUCK_SCREENSHOT_NOTE}`;
+          if (await attachScreenshotWhenStuck(session, true))
+            previousResult = `${previousResult}\n${STUCK_SCREENSHOT_NOTE}`;
           continue;
         }
         finishRun(session, "blocked", safety.reason, safety.reason);
         appendChatMessage("assistant", safety.reason, "question", taskId);
         break;
       }
-      const loopResult = await handlePlannedActions(modelResponse, plannedActions, completedInputActions, taskId, observation);
+      const loopResult = await handlePlannedActions(
+        modelResponse,
+        plannedActions,
+        completedInputActions,
+        taskId,
+        observation,
+      );
       previousResult = buildPreviousResultForModel(loopResult);
-      appendLog(loopResult.ok ? "success" : loopResult.recoverable ? "warning" : "error", loopResult.message);
+      appendLog(
+        loopResult.ok
+          ? "success"
+          : loopResult.recoverable
+            ? "warning"
+            : "error",
+        loopResult.message,
+      );
       queueRunReportSave(session.run);
 
-      if (loopResult.shouldStop || (!loopResult.ok && !loopResult.recoverable) || isStopped(taskId)) {
+      if (
+        loopResult.shouldStop ||
+        (!loopResult.ok && !loopResult.recoverable) ||
+        isStopped(taskId)
+      ) {
         break;
       }
 
       if (needsAutomaticDomSettlement(plannedActions)) {
         const settlement = await waitForDomSettlement(
           async () => {
-            const check = await checkWaitConditionSafely(session.activeTabId, { condition: "dom_stable" });
+            const check = await checkWaitConditionSafely(session.activeTabId, {
+              condition: "dom_stable",
+            });
             return check
               ? { signature: check.signature, readyState: check.readyState }
               : undefined;
@@ -566,44 +740,84 @@ async function startTask(task: string, source: "chat" | "run", settings: AgentSe
         previousResult = `${previousResult}\n${STUCK_SCREENSHOT_NOTE}`;
       }
 
-      if (resumeJev && loopResult.ok && !loopResult.recoverable && loopResult.completedActions.length > 0
-        && !session.pendingDocument && !session.pendingScreenshot && !stagedFile && !isStopped(taskId)) {
+      if (
+        resumeJev &&
+        loopResult.ok &&
+        !loopResult.recoverable &&
+        loopResult.completedActions.length > 0 &&
+        !session.pendingDocument &&
+        !session.pendingScreenshot &&
+        !stagedFile &&
+        !isStopped(taskId)
+      ) {
         await refreshTrackedTabs(session);
         if (isStopped(taskId)) break;
         assertOwnedTabId(session, session.activeTabId);
         const fresh = await observePage(session.activeTabId);
         if (isStopped(taskId)) break;
         if (semanticPageKey(fresh) !== semanticPageKey(observation)) {
-          jevHistory.push({ action: "LLM recovery batch", url: fresh.url, result: loopResult.completedActions.join(" ").slice(0, 1_200) });
-          appendLog("info", "LLM recovery batch completed and the page changed. Returning control to Jev.");
-          const outcome = await runJevActionTask(session, settings, jevHistory, fresh);
+          jevHistory.push({
+            action: "LLM recovery batch",
+            url: fresh.url,
+            result: loopResult.completedActions.join(" ").slice(0, 1_200),
+          });
+          appendLog(
+            "info",
+            "LLM recovery batch completed and the page changed. Returning control to Jev.",
+          );
+          const outcome = await runJevActionTask(
+            session,
+            settings,
+            jevHistory,
+            fresh,
+          );
           if (!outcome.fallback || isStopped(taskId)) break;
           previousResult = outcome.fallback;
           jevProgress ||= outcome.madeProgress;
-          unsuccessfulJevReturns = outcome.madeProgress ? 0 : unsuccessfulJevReturns + 1;
-          resumeJev = outcome.resumeAllowed !== false && unsuccessfulJevReturns < 2;
-          appendLog("info", "Jev returned control to the configured LLM planner.");
+          unsuccessfulJevReturns = outcome.madeProgress
+            ? 0
+            : unsuccessfulJevReturns + 1;
+          resumeJev =
+            outcome.resumeAllowed !== false && unsuccessfulJevReturns < 2;
+          appendLog(
+            "info",
+            "Jev returned control to the configured LLM planner.",
+          );
           if (!resumeJev) {
-            appendLog("info", outcome.resumeAllowed === false
-              ? "Jev cannot resume for this run. The LLM will continue."
-              : "Jev returned without executing actions twice. The LLM will continue to avoid repeated handoffs.");
+            appendLog(
+              "info",
+              outcome.resumeAllowed === false
+                ? "Jev cannot resume for this run. The LLM will continue."
+                : "Jev returned without executing actions twice. The LLM will continue to avoid repeated handoffs.",
+            );
           }
         }
       }
     }
 
-    if (!isStopped(taskId) && runningSession?.taskId === taskId && runningSession.run.status === "running") {
-      const message = "The task reached the configured maximum number of steps before it could finish.";
+    if (
+      !isStopped(taskId) &&
+      runningSession?.taskId === taskId &&
+      runningSession.run.status === "running"
+    ) {
+      const message =
+        "The task reached the configured maximum number of steps before it could finish.";
       finishRun(runningSession, "step_limit", message);
       appendChatMessage("assistant", message, "error", taskId);
       appendLog("info", "Task loop finished.");
     }
   } catch (error) {
-    if (error instanceof ModelRequestCancelledError && taskAbortController.signal.aborted) {
+    if (
+      error instanceof ModelRequestCancelledError &&
+      taskAbortController.signal.aborted
+    ) {
       return;
     }
     const message = getErrorMessage(error);
-    if (runningSession?.taskId === taskId && runningSession.run.status === "running") {
+    if (
+      runningSession?.taskId === taskId &&
+      runningSession.run.status === "running"
+    ) {
       finishRun(runningSession, "failed", message);
     }
     reportTaskError(taskId, message, formatModelErrorDetails(error));
@@ -625,7 +839,11 @@ async function runJevActionTask(
   settings: AgentSettings,
   history: JevHistoryEntry[] = [],
   initialObservation?: PageObservation,
-): Promise<{ fallback?: string; madeProgress: boolean; resumeAllowed?: boolean }> {
+): Promise<{
+  fallback?: string;
+  madeProgress: boolean;
+  resumeAllowed?: boolean;
+}> {
   const tabId = session.activeTabId;
   const initialHistoryLength = history.length;
   const repetitions = new Map<string, number>();
@@ -634,9 +852,14 @@ async function runJevActionTask(
   let waitingSteps = 0;
   let pendingText: { key: string; text: string } | undefined;
   const stop = (message: string) => {
-    applyRequirementUpdates(session, session.run.requirements.map((requirement) => ({
-      requirementId: requirement.id, status: "blocked", blockedReason: message,
-    })));
+    applyRequirementUpdates(
+      session,
+      session.run.requirements.map((requirement) => ({
+        requirementId: requirement.id,
+        status: "blocked",
+        blockedReason: message,
+      })),
+    );
     finishRun(session, "blocked", message, message);
     appendChatMessage("assistant", message, "answer", session.taskId);
     appendLog("warning", message);
@@ -661,8 +884,22 @@ async function runJevActionTask(
     pendingModelRequestCount += 1;
     emitModelStatus();
     try {
-      const decision = await requestJevAction({ apiKey: settings.jev!.apiKey, goal: session.instruction, observation, history, allowTextHelper: true, signal: session.abortSignal }, requestModelThroughSidePanel);
-      recordJevDecision(session, decision, decision.kind === "fallback" ? "fallback" : "fast");
+      const decision = await requestJevAction(
+        {
+          apiKey: settings.jev!.apiKey,
+          goal: session.instruction,
+          observation,
+          history,
+          allowTextHelper: true,
+          signal: session.abortSignal,
+        },
+        requestModelThroughSidePanel,
+      );
+      recordJevDecision(
+        session,
+        decision,
+        decision.kind === "fallback" ? "fallback" : "fast",
+      );
       return decision;
     } finally {
       pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
@@ -672,14 +909,19 @@ async function runJevActionTask(
 
   if (await loadStagedUploadFile()) {
     if (isStopped(session.taskId)) return { madeProgress: false };
-    return defer("Jev cannot operate on staged uploads. Use the LLM planner for this task.", false);
+    return defer(
+      "Jev cannot operate on staged uploads. Use the LLM planner for this task.",
+      false,
+    );
   }
   while (!isStopped(session.taskId)) {
     await refreshTrackedTabs(session);
-    if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+    if (isStopped(session.taskId))
+      return { madeProgress: history.length > initialHistoryLength };
     assertOwnedTabId(session, tabId);
-    if (session.activeTabId !== tabId) return defer("The active owned tab changed.");
-    const observation = nextObservation || await readOwnedPage();
+    if (session.activeTabId !== tabId)
+      return defer("The active owned tab changed.");
+    const observation = nextObservation || (await readOwnedPage());
     nextObservation = undefined;
     updateTrackedTabFromObservation(session, tabId, observation);
     recordObservationEvidence(session, observation);
@@ -689,26 +931,45 @@ async function runJevActionTask(
     } catch (error) {
       if (session.abortSignal.aborted) throw new ModelRequestCancelledError();
       if (error instanceof JevDecisionError) {
-        recordJevDecision(session, { kind: "fallback", operation: "fallback", reason: error.message }, "fallback", error.elapsedMs);
+        recordJevDecision(
+          session,
+          { kind: "fallback", operation: "fallback", reason: error.message },
+          "fallback",
+          error.elapsedMs,
+        );
       }
-      return defer(error instanceof Error ? error.message : "Jev request failed.", false);
+      return defer(
+        error instanceof Error ? error.message : "Jev request failed.",
+        false,
+      );
     }
-    if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+    if (isStopped(session.taskId))
+      return { madeProgress: history.length > initialHistoryLength };
     if (result.kind === "fallback") return defer(result.reason);
     if (!session.runPersistenceEnabled) session.runPersistenceEnabled = true;
-    initializeRequirements(session, session.instruction, [{ text: session.instruction }]);
+    initializeRequirements(session, session.instruction, [
+      { text: session.instruction },
+    ]);
     if (result.kind === "done") {
       const fresh = await readOwnedPage();
       if (semanticPageKey(fresh) !== semanticPageKey(observation)) {
-        if (++staleRetries > 2) return defer("The page kept changing during completion verification.");
+        if (++staleRetries > 2)
+          return defer(
+            "The page kept changing during completion verification.",
+          );
         nextObservation = fresh;
         continue;
       }
       recordObservationEvidence(session, fresh);
       const evidence = session.run.evidence.at(-1);
-      applyRequirementUpdates(session, session.run.requirements.map((requirement) => ({
-        requirementId: requirement.id, status: "satisfied", evidenceIds: evidence ? [evidence.id] : [],
-      })));
+      applyRequirementUpdates(
+        session,
+        session.run.requirements.map((requirement) => ({
+          requirementId: requirement.id,
+          status: "satisfied",
+          evidenceIds: evidence ? [evidence.id] : [],
+        })),
+      );
       if (getCompletionLedgerIssues(session.run, "completed").length) {
         return defer("The observation ledger did not verify completion.");
       }
@@ -719,11 +980,14 @@ async function runJevActionTask(
       return { madeProgress: history.length > initialHistoryLength };
     }
     if (result.kind === "wait") {
-      if (++waitingSteps > 10) return defer("The page did not become ready after repeated waits.");
+      if (++waitingSteps > 10)
+        return defer("The page did not become ready after repeated waits.");
       await sleep(200);
-      if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+      if (isStopped(session.taskId))
+        return { madeProgress: history.length > initialHistoryLength };
       const fresh = await readOwnedPage();
-      if (semanticPageKey(fresh) !== semanticPageKey(observation)) waitingSteps = 0;
+      if (semanticPageKey(fresh) !== semanticPageKey(observation))
+        waitingSteps = 0;
       nextObservation = fresh;
       continue;
     }
@@ -734,29 +998,57 @@ async function runJevActionTask(
     repetitions.set(repeatKey, attempts);
     if (attempts > 2) {
       let fresh = observation;
-      for (let sample = 0; sample < 4 && semanticPageKey(fresh) === semanticPageKey(observation); sample += 1) {
+      for (
+        let sample = 0;
+        sample < 4 && semanticPageKey(fresh) === semanticPageKey(observation);
+        sample += 1
+      ) {
         await sleep(200);
-        if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+        if (isStopped(session.taskId))
+          return { madeProgress: history.length > initialHistoryLength };
         fresh = await readOwnedPage();
       }
-      if (semanticPageKey(fresh) !== semanticPageKey(observation)) { nextObservation = fresh; continue; }
-      return defer(`No progress after repeated ${action.type} actions. Inspect the page before retrying.`);
+      if (semanticPageKey(fresh) !== semanticPageKey(observation)) {
+        nextObservation = fresh;
+        continue;
+      }
+      return defer(
+        `No progress after repeated ${action.type} actions. Inspect the page before retrying.`,
+      );
     }
     if (result.kind === "text") {
-      const context = jevFieldContext(session.instruction, action, observation, history);
+      const context = jevFieldContext(
+        session.instruction,
+        action,
+        observation,
+        history,
+      );
       const key = JSON.stringify(context);
       if (pendingText?.key !== key) {
         pendingModelRequestCount += 1;
         emitModelStatus();
         try {
-          if (usageSnapshot.jev) usageSnapshot.jev.helperRequests = (usageSnapshot.jev.helperRequests || 0) + 1;
-          const helper = await requestFieldText(settings, context, session.abortSignal);
+          if (usageSnapshot.jev)
+            usageSnapshot.jev.helperRequests =
+              (usageSnapshot.jev.helperRequests || 0) + 1;
+          const helper = await requestFieldText(
+            settings,
+            context,
+            session.abortSignal,
+          );
           recordUsageEvent(helper.usage, settings);
           pendingText = { key, text: helper.text };
         } catch (error) {
-          if (session.abortSignal.aborted) throw new ModelRequestCancelledError();
-          if (error instanceof ModelClientError && error.usage) recordUsageEvent(error.usage, settings);
-          return defer(error instanceof Error ? error.message : "Field text generation failed.", false);
+          if (session.abortSignal.aborted)
+            throw new ModelRequestCancelledError();
+          if (error instanceof ModelClientError && error.usage)
+            recordUsageEvent(error.usage, settings);
+          return defer(
+            error instanceof Error
+              ? error.message
+              : "Field text generation failed.",
+            false,
+          );
         } finally {
           pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
           emitModelStatus();
@@ -764,59 +1056,128 @@ async function runJevActionTask(
       }
       action.text = pendingText.text;
       const fresh = await readOwnedPage();
-      if (JSON.stringify(jevFieldContext(session.instruction, action, fresh, history)) !== key) {
+      if (
+        JSON.stringify(
+          jevFieldContext(session.instruction, action, fresh, history),
+        ) !== key
+      ) {
         pendingText = undefined;
-        if (++staleRetries > 2) return defer("The field context kept changing during text generation. Nothing was typed.");
+        if (++staleRetries > 2)
+          return defer(
+            "The field context kept changing during text generation. Nothing was typed.",
+          );
         nextObservation = fresh;
         continue;
       }
     }
-    if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+    if (isStopped(session.taskId))
+      return { madeProgress: history.length > initialHistoryLength };
     assertOwnedTabId(session, tabId);
     const executed = await executeAction(tabId, action);
-    if (isStopped(session.taskId)) return { madeProgress: history.length > initialHistoryLength };
+    if (isStopped(session.taskId))
+      return { madeProgress: history.length > initialHistoryLength };
     if (!executed.ok || executed.recoverable) {
-      if (executed.notExecuted && ++staleRetries <= 2) { nextObservation = executed.observation; continue; }
+      if (executed.notExecuted && ++staleRetries <= 2) {
+        nextObservation = executed.observation;
+        continue;
+      }
       stop(`Jev stopped after an unverified action: ${executed.message}`);
       return { madeProgress: history.length > initialHistoryLength };
     }
     staleRetries = 0;
     pendingText = undefined;
-    history.push({ action: action.type, target: action.elementId, url: observation.url, result: executed.message.slice(0, 300) });
+    history.push({
+      action: action.type,
+      target: action.elementId,
+      url: observation.url,
+      result: executed.message.slice(0, 300),
+    });
     if (executed.observation) {
       updateTrackedTabFromObservation(session, tabId, executed.observation);
     }
-    recordActionEvidence(session, action, executed.message, observation.elements.find((element) => element.id === action.elementId));
+    recordActionEvidence(
+      session,
+      action,
+      executed.message,
+      observation.elements.find((element) => element.id === action.elementId),
+    );
     queueRunReportSave(session.run);
     nextObservation = executed.observation;
   }
   return { madeProgress: history.length > initialHistoryLength };
 }
 
-function recordJevDecision(session: RunningSession, decision: JevActionDecision, outcome: "fast" | "shadow" | "fallback", elapsedMs?: number): void {
+function recordJevDecision(
+  session: RunningSession,
+  decision: JevActionDecision,
+  outcome: "fast" | "shadow" | "fallback",
+  elapsedMs?: number,
+): void {
   const answer = decision.result?.answers.operation;
   if (answer || elapsedMs !== undefined) {
-    usageSnapshot = { ...usageSnapshot, jev: addJevUsage(usageSnapshot.jev, {
-      outcome, message: decision.reason, elapsedMs,
-      decision: answer && decision.result ? { ...answer, elapsedMs: decision.result.elapsedMs, inputTokens: decision.result.inputTokens, outputTokens: decision.result.outputTokens } : undefined,
-    }), updatedAt: Date.now() };
+    usageSnapshot = {
+      ...usageSnapshot,
+      jev: addJevUsage(usageSnapshot.jev, {
+        outcome,
+        message: decision.reason,
+        elapsedMs,
+        decision:
+          answer && decision.result
+            ? {
+                ...answer,
+                elapsedMs: decision.result.elapsedMs,
+                inputTokens: decision.result.inputTokens,
+                outputTokens: decision.result.outputTokens,
+              }
+            : undefined,
+      }),
+      updatedAt: Date.now(),
+    };
     if (usageSnapshot.jev && decision.result) {
-      usageSnapshot.jev.lastDecision = Object.entries(decision.result.answers).map(([question, choice]) => ({
-        question, choice: choice.choice, confidence: choice.confidence,
-        probabilities: Object.entries(choice.probabilities).sort((first, second) => second[1] - first[1]).slice(0, 3).map(([option, probability]) => ({ option, probability })),
+      usageSnapshot.jev.lastDecision = Object.entries(
+        decision.result.answers,
+      ).map(([question, choice]) => ({
+        question,
+        choice: choice.choice,
+        confidence: choice.confidence,
+        probabilities: Object.entries(choice.probabilities)
+          .sort((first, second) => second[1] - first[1])
+          .slice(0, 3)
+          .map(([option, probability]) => ({ option, probability })),
       }));
     }
     session.run.usage = usageSnapshot;
     queueRunReportSave(session.run);
     emitUsage();
   }
-  const confidence = answer ? ` (${Math.round(answer.confidence * 100)}%, ${decision.result!.elapsedMs} ms)` : "";
-  appendLog(decision.kind === "fallback" ? "warning" : "info", `Jev ${outcome}: ${decision.operation}${decision.action?.elementId ? ` ${decision.action.elementId}` : ""}${confidence}. ${decision.reason}`);
+  const confidence = answer
+    ? ` (${Math.round(answer.confidence * 100)}%, ${decision.result!.elapsedMs} ms)`
+    : "";
+  appendLog(
+    decision.kind === "fallback" ? "warning" : "info",
+    `Jev ${outcome}: ${decision.operation}${decision.action?.elementId ? ` ${decision.action.elementId}` : ""}${confidence}. ${decision.reason}`,
+  );
   if (decision.result) {
     if (decision.result.ignoredAnswers?.length) {
-      appendLog("info", `Jev ignored invalid unused answers: ${decision.result.ignoredAnswers.join(", ")}. The selected operation and required answers were validated.`);
+      appendLog(
+        "info",
+        `Jev ignored invalid unused answers: ${decision.result.ignoredAnswers.join(", ")}. The selected operation and required answers were validated.`,
+      );
     }
-    const distributions = Object.entries(decision.result.answers).map(([name, choice]) => `${name}: ${choice.choice} (${Math.round(choice.confidence * 100)}%); ${Object.entries(choice.probabilities).sort((first, second) => second[1] - first[1]).slice(0, 3).map(([option, probability]) => `${option}=${probability.toFixed(2)}`).join(", ")}`).join(" | ");
+    const distributions = Object.entries(decision.result.answers)
+      .map(
+        ([name, choice]) =>
+          `${name}: ${choice.choice} (${Math.round(choice.confidence * 100)}%); ${Object.entries(
+            choice.probabilities,
+          )
+            .sort((first, second) => second[1] - first[1])
+            .slice(0, 3)
+            .map(
+              ([option, probability]) => `${option}=${probability.toFixed(2)}`,
+            )
+            .join(", ")}`,
+      )
+      .join(" | ");
     appendLog("info", `Jev decision details: ${distributions}`);
   }
 }
@@ -842,11 +1203,15 @@ async function handlePlannedActions(
   const completedActions: string[] = [];
   let lastObservation: PageObservation | undefined;
 
-  if (actions.some((action) => action.type === "done") && actions.length !== 1) {
+  if (
+    actions.some((action) => action.type === "done") &&
+    actions.length !== 1
+  ) {
     return {
       ok: false,
       recoverable: true,
-      message: "Completion was rejected because done must be the only action in its batch. Re-observe and propose done by itself after all work is complete.",
+      message:
+        "Completion was rejected because done must be the only action in its batch. Re-observe and propose done by itself after all work is complete.",
       shouldStop: false,
       completedActions,
       failedAction: "done was batched with another action",
@@ -860,7 +1225,7 @@ async function handlePlannedActions(
         message: messages.join(" ") || "Stopped by user.",
         shouldStop: true,
         completedActions,
-        lastObservation
+        lastObservation,
       };
     }
 
@@ -872,23 +1237,63 @@ async function handlePlannedActions(
         message: messages.join(" ") || "Stopped by user.",
         shouldStop: true,
         completedActions,
-        lastObservation
+        lastObservation,
       };
     }
 
-    if (["click", "multi_click", "drag", "multi_drag", "fill", "type", "select", "press_key", "scroll", "navigate"].includes(action.type)) {
-      const guarded = guardObservedAction(action, lastObservation || observation);
-      if (!guarded) return { ok: false, recoverable: true, message: "The action could not be bound to the observed page. Re-observe before acting.", shouldStop: false, completedActions, lastObservation };
+    if (
+      [
+        "click",
+        "multi_click",
+        "drag",
+        "multi_drag",
+        "fill",
+        "type",
+        "select",
+        "press_key",
+        "scroll",
+        "navigate",
+      ].includes(action.type)
+    ) {
+      const guarded = guardObservedAction(
+        action,
+        lastObservation || observation,
+      );
+      if (!guarded)
+        return {
+          ok: false,
+          recoverable: true,
+          message:
+            "The action could not be bound to the observed page. Re-observe before acting.",
+          shouldStop: false,
+          completedActions,
+          lastObservation,
+        };
       action = guarded;
     }
-    const duplicateInputAction = getDuplicateInputAction(action, completedInputActions, session.activeTabAlias);
+    const duplicateInputAction = getDuplicateInputAction(
+      action,
+      completedInputActions,
+      session.activeTabAlias,
+    );
     if (duplicateInputAction) {
-      messages.push(formatActionResult(index, actions.length, duplicateInputAction.message));
-      completedActions.push(formatCompletedAction(index, action, duplicateInputAction.message, "skipped"));
+      messages.push(
+        formatActionResult(index, actions.length, duplicateInputAction.message),
+      );
+      completedActions.push(
+        formatCompletedAction(
+          index,
+          action,
+          duplicateInputAction.message,
+          "skipped",
+        ),
+      );
       continue;
     }
 
-    const target = (lastObservation || observation).elements.find((element) => element.id === action.elementId);
+    const target = (lastObservation || observation).elements.find(
+      (element) => element.id === action.elementId,
+    );
     const result = await handleSingleAction(taskId, modelResponse, action);
     messages.push(formatActionResult(index, actions.length, result.message));
     if (result.lastObservation) {
@@ -897,9 +1302,19 @@ async function handlePlannedActions(
 
     if (result.ok) {
       const latestSession = runningSession;
-      rememberCompletedInputAction(action, completedInputActions, latestSession?.activeTabAlias || session.activeTabAlias);
-      completedActions.push(formatCompletedAction(index, action, result.message, "done"));
-      if (latestSession?.taskId === taskId && action.type !== "done" && action.type !== "ask_user") {
+      rememberCompletedInputAction(
+        action,
+        completedInputActions,
+        latestSession?.activeTabAlias || session.activeTabAlias,
+      );
+      completedActions.push(
+        formatCompletedAction(index, action, result.message, "done"),
+      );
+      if (
+        latestSession?.taskId === taskId &&
+        action.type !== "done" &&
+        action.type !== "ask_user"
+      ) {
         if (action.type !== "inspect_screenshot") {
           recordActionEvidence(latestSession, action, result.message, target);
         }
@@ -908,20 +1323,26 @@ async function handlePlannedActions(
 
     if (result.shouldStop || !result.ok) {
       if (result.recoverable && index < actions.length - 1) {
-        messages.push("Skipped the remaining batch actions and will re-observe the page.");
+        messages.push(
+          "Skipped the remaining batch actions and will re-observe the page.",
+        );
       }
       return {
         ...result,
         message: messages.join(" "),
         completedActions,
-        failedAction: result.ok ? undefined : formatActionFailure(index, action, result.message),
-        lastObservation
+        failedAction: result.ok
+          ? undefined
+          : formatActionFailure(index, action, result.message),
+        lastObservation,
       };
     }
 
     if (shouldHaltBatchAfterAction(action)) {
       if (index < actions.length - 1) {
-        messages.push("Paused the remaining batch until the next page observation.");
+        messages.push(
+          "Paused the remaining batch until the next page observation.",
+        );
       }
       break;
     }
@@ -934,14 +1355,14 @@ async function handlePlannedActions(
     message: messages.join(" "),
     shouldStop: false,
     completedActions,
-    lastObservation
+    lastObservation,
   };
 }
 
 async function handleSingleAction(
   taskId: string,
   modelResponse: AgentModelResponse,
-  action: AgentAction
+  action: AgentAction,
 ): Promise<ActionLoopResult> {
   const session = runningSession;
   if (!session || session.taskId !== taskId) {
@@ -949,7 +1370,7 @@ async function handleSingleAction(
       ok: true,
       message: "Stopped by user.",
       shouldStop: true,
-      completedActions: []
+      completedActions: [],
     };
   }
 
@@ -969,15 +1390,25 @@ async function handleSingleAction(
     const observation = await observePage(session.activeTabId);
     updateTrackedTabFromObservation(session, session.activeTabId, observation);
     recordObservationEvidence(session, observation);
-    const validation = await validateCompletionWithModel(session, observation, finalReport);
+    const validation = await validateCompletionWithModel(
+      session,
+      observation,
+      finalReport,
+    );
     if (validation.unavailable) {
       const report = `${finalReport}\n\nUnverified: the final completion check returned unusable output twice (${validation.message}). Review the page before relying on this result.`;
-      finishRun(session, "blocked", "The final completion check was unavailable.", report);
+      finishRun(
+        session,
+        "blocked",
+        "The final completion check was unavailable.",
+        report,
+      );
       appendChatMessage("assistant", report, "answer", session.taskId);
       return {
         ok: false,
         recoverable: false,
-        message: "Stopped: the final completion check was unavailable, so the proposed report is shown in Chat as unverified.",
+        message:
+          "Stopped: the final completion check was unavailable, so the proposed report is shown in Chat as unverified.",
         shouldStop: true,
         completedActions: [],
         lastObservation: observation,
@@ -994,7 +1425,12 @@ async function handleSingleAction(
       };
     }
 
-    finishRun(session, action.outcome === "partial" ? "partial" : "completed", undefined, finalReport);
+    finishRun(
+      session,
+      action.outcome === "partial" ? "partial" : "completed",
+      undefined,
+      finalReport,
+    );
     appendChatMessage("assistant", finalReport, "answer", session.taskId);
     return {
       ok: true,
@@ -1006,15 +1442,21 @@ async function handleSingleAction(
   }
 
   if (action.type === "ask_user") {
-    const message = action.text || modelResponse.thought_summary || "The agent needs input from you.";
+    const message =
+      action.text ||
+      modelResponse.thought_summary ||
+      "The agent needs input from you.";
     finishRun(session, "blocked", message, message);
-    pendingChatContinuation = { instruction: session.instruction, question: message };
+    pendingChatContinuation = {
+      instruction: session.instruction,
+      question: message,
+    };
     appendChatMessage("assistant", message, "question", session.taskId);
     return {
       ok: true,
       message: "The agent is waiting for a response in Chat.",
       shouldStop: true,
-      completedActions: []
+      completedActions: [],
     };
   }
 
@@ -1027,7 +1469,7 @@ async function handleSingleAction(
       message: result.message,
       shouldStop: false,
       recoverable: result.recoverable,
-      completedActions: []
+      completedActions: [],
     };
   }
 
@@ -1074,7 +1516,7 @@ async function handleSingleAction(
       shouldStop: false,
       recoverable: result.recoverable,
       completedActions: [],
-      lastObservation: result.observation
+      lastObservation: result.observation,
     };
   }
 
@@ -1086,7 +1528,7 @@ async function handleSingleAction(
       shouldStop: false,
       recoverable: result.recoverable,
       completedActions: [],
-      lastObservation: result.observation
+      lastObservation: result.observation,
     };
   }
 
@@ -1098,7 +1540,7 @@ async function handleSingleAction(
       shouldStop: false,
       recoverable: result.recoverable,
       completedActions: [],
-      lastObservation: result.observation
+      lastObservation: result.observation,
     };
   }
 
@@ -1110,7 +1552,7 @@ async function handleSingleAction(
       shouldStop: false,
       recoverable: result.recoverable,
       completedActions: [],
-      lastObservation: result.observation
+      lastObservation: result.observation,
     };
   }
 
@@ -1121,23 +1563,30 @@ async function handleSingleAction(
     shouldStop: false,
     recoverable: result.recoverable,
     completedActions: [],
-    lastObservation: result.observation
+    lastObservation: result.observation,
   };
 }
 
 async function observePage(tabId: number): Promise<PageObservation> {
+  const message = {
+    type: "CONTENT_OBSERVE" as const,
+    observationTokenLimit: normalizePositiveInteger(
+      runningSession?.settings.observationTokenLimit,
+      DEFAULT_SETTINGS.observationTokenLimit!,
+    ),
+  };
   try {
-    return await sendTabMessage<PageObservation>(tabId, { type: "CONTENT_OBSERVE" });
+    return await sendTabMessage<PageObservation>(tabId, message);
   } catch (firstError) {
     try {
       await tryInjectContentScript(tabId);
       await sleep(250);
-      return await sendTabMessage<PageObservation>(tabId, { type: "CONTENT_OBSERVE" });
+      return await sendTabMessage<PageObservation>(tabId, message);
     } catch {
       throw new Error(
         `Could not read this page. It may be a browser page, protected store page, PDF, or missing host permission. ${getErrorMessage(
-          firstError
-        )}`
+          firstError,
+        )}`,
       );
     }
   }
@@ -1145,27 +1594,41 @@ async function observePage(tabId: number): Promise<PageObservation> {
 
 async function readPageDocument(tabId: number): Promise<FullPageDocument> {
   try {
-    return await sendTabMessage<FullPageDocument>(tabId, { type: "CONTENT_READ_PAGE" });
+    return await sendTabMessage<FullPageDocument>(tabId, {
+      type: "CONTENT_READ_PAGE",
+    });
   } catch (firstError) {
     try {
       await tryInjectContentScript(tabId);
       await sleep(250);
-      return await sendTabMessage<FullPageDocument>(tabId, { type: "CONTENT_READ_PAGE" });
+      return await sendTabMessage<FullPageDocument>(tabId, {
+        type: "CONTENT_READ_PAGE",
+      });
     } catch {
-      throw new Error(`Could not read the full page document. ${getErrorMessage(firstError)}`);
+      throw new Error(
+        `Could not read the full page document. ${getErrorMessage(firstError)}`,
+      );
     }
   }
 }
 
 // Returns true when a screenshot was queued for the next model request.
-async function attachScreenshotWhenStuck(session: RunningSession, failed: boolean): Promise<boolean> {
+async function attachScreenshotWhenStuck(
+  session: RunningSession,
+  failed: boolean,
+): Promise<boolean> {
   if (!failed) {
     session.consecutiveFailedSteps = 0;
     return false;
   }
   session.consecutiveFailedSteps += 1;
-  if (session.consecutiveFailedSteps < STUCK_STEPS_BEFORE_SCREENSHOT || session.stopped || session.visionDisabled
-    || session.pendingScreenshot || session.autoScreenshots >= MAX_AUTO_SCREENSHOTS_PER_RUN) {
+  if (
+    session.consecutiveFailedSteps < STUCK_STEPS_BEFORE_SCREENSHOT ||
+    session.stopped ||
+    session.visionDisabled ||
+    session.pendingScreenshot ||
+    session.autoScreenshots >= MAX_AUTO_SCREENSHOTS_PER_RUN
+  ) {
     return false;
   }
   session.consecutiveFailedSteps = 0;
@@ -1173,10 +1636,18 @@ async function attachScreenshotWhenStuck(session: RunningSession, failed: boolea
   const prefix = `Stuck after ${STUCK_STEPS_BEFORE_SCREENSHOT} failed steps (automatic screenshot ${session.autoScreenshots} of ${MAX_AUTO_SCREENSHOTS_PER_RUN}).`;
   try {
     const result = await captureScreenshotForSession(session);
-    appendLog(result.ok ? "info" : "warning", result.ok ? `${prefix} ${result.message}` : `${prefix} No screenshot was sent: ${result.message}`);
+    appendLog(
+      result.ok ? "info" : "warning",
+      result.ok
+        ? `${prefix} ${result.message}`
+        : `${prefix} No screenshot was sent: ${result.message}`,
+    );
     return result.ok;
   } catch (error) {
-    appendLog("warning", `${prefix} No screenshot was sent: ${getErrorMessage(error)}`);
+    appendLog(
+      "warning",
+      `${prefix} No screenshot was sent: ${getErrorMessage(error)}`,
+    );
     return false;
   }
 }
@@ -1188,20 +1659,35 @@ async function captureScreenshotForSession(
     return {
       ok: false,
       recoverable: true,
-      message: "Visual inspection is disabled because the configured model rejected screenshot input earlier in this run.",
+      message:
+        "Visual inspection is disabled because the configured model rejected screenshot input earlier in this run.",
     };
   }
   if (session.windowId === undefined) {
-    return { ok: false, recoverable: true, message: "The agent window is not available for screenshot capture." };
-  }
-
-  assertOwnedTabId(session, session.activeTabId);
-  const [visibleTab] = await chrome.tabs.query({ active: true, windowId: session.windowId });
-  if (!isVisibleOwnedTab(session.tabs.map((tab) => tab.tabId), session.activeTabId, visibleTab?.id)) {
     return {
       ok: false,
       recoverable: true,
-      message: "Screenshot capture was refused because the visible tab is not the active agent-owned tab. Use switch_tab to activate the tracked tab, then retry.",
+      message: "The agent window is not available for screenshot capture.",
+    };
+  }
+
+  assertOwnedTabId(session, session.activeTabId);
+  const [visibleTab] = await chrome.tabs.query({
+    active: true,
+    windowId: session.windowId,
+  });
+  if (
+    !isVisibleOwnedTab(
+      session.tabs.map((tab) => tab.tabId),
+      session.activeTabId,
+      visibleTab?.id,
+    )
+  ) {
+    return {
+      ok: false,
+      recoverable: true,
+      message:
+        "Screenshot capture was refused because the visible tab is not the active agent-owned tab. Use switch_tab to activate the tracked tab, then retry.",
     };
   }
 
@@ -1234,16 +1720,37 @@ async function waitForCondition(
 ): Promise<ContentActionResult> {
   const condition = action.waitCondition;
   if (!condition) {
-    return { ok: false, recoverable: true, message: "wait_for requires waitCondition." };
+    return {
+      ok: false,
+      recoverable: true,
+      message: "wait_for requires waitCondition.",
+    };
   }
-  if ((condition === "text_present" || condition === "text_absent") && !action.text?.trim()) {
-    return { ok: false, recoverable: true, message: `${condition} requires text.` };
+  if (
+    (condition === "text_present" || condition === "text_absent") &&
+    !action.text?.trim()
+  ) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: `${condition} requires text.`,
+    };
   }
-  if ((condition === "element_hidden" || condition === "element_enabled") && !action.elementId) {
-    return { ok: false, recoverable: true, message: `${condition} requires elementId.` };
+  if (
+    (condition === "element_hidden" || condition === "element_enabled") &&
+    !action.elementId
+  ) {
+    return {
+      ok: false,
+      recoverable: true,
+      message: `${condition} requires elementId.`,
+    };
   }
 
-  const timeoutMs = Math.min(Math.max(action.timeoutMs || DEFAULT_WAIT_TIMEOUT_MS, 250), MAX_WAIT_TIMEOUT_MS);
+  const timeoutMs = Math.min(
+    Math.max(action.timeoutMs || DEFAULT_WAIT_TIMEOUT_MS, 250),
+    MAX_WAIT_TIMEOUT_MS,
+  );
   const tabBefore = await getTabSafely(session.activeTabId);
   const baselineUrl = action.url || tabBefore?.url;
   const startedAt = Date.now();
@@ -1322,7 +1829,10 @@ function sendWaitCheck(
     baselineUrl?: string;
   },
 ): Promise<ContentWaitCheckResult> {
-  return sendTabMessage<ContentWaitCheckResult>(tabId, { type: "CONTENT_CHECK_WAIT", request });
+  return sendTabMessage<ContentWaitCheckResult>(tabId, {
+    type: "CONTENT_CHECK_WAIT",
+    request,
+  });
 }
 
 function createRunningSession(
@@ -1348,7 +1858,7 @@ function createRunningSession(
     title: tab.title,
     url: tab.url,
     active: true,
-    createdAt: now
+    createdAt: now,
   };
 
   return {
@@ -1389,7 +1899,9 @@ async function adoptTabOpenedByAgent(tab: chrome.tabs.Tab): Promise<void> {
     return;
   }
 
-  const opener = session.tabs.find((trackedTab) => trackedTab.tabId === tab.openerTabId);
+  const opener = session.tabs.find(
+    (trackedTab) => trackedTab.tabId === tab.openerTabId,
+  );
   if (!opener) {
     return;
   }
@@ -1397,28 +1909,40 @@ async function adoptTabOpenedByAgent(tab: chrome.tabs.Tab): Promise<void> {
   if (session.tabs.length >= MAX_TRACKED_TABS) {
     appendLog(
       "warning",
-      `${opener.alias} opened a tab, but the agent already owns ${MAX_TRACKED_TABS} tabs. The new tab stays outside the agent tab group.`
+      `${opener.alias} opened a tab, but the agent already owns ${MAX_TRACKED_TABS} tabs. The new tab stays outside the agent tab group.`,
     );
     return;
   }
 
   const movedTab = await moveTabIntoSessionWindow(session, tab);
   if (!movedTab) {
-    appendLog("warning", `${opener.alias} opened a tab that could not join the agent tab group. The agent cannot use it.`);
+    appendLog(
+      "warning",
+      `${opener.alias} opened a tab that could not join the agent tab group. The agent cannot use it.`,
+    );
     return;
   }
 
   const trackedTab = addTrackedTab(session, movedTab, "popup");
   if (!(await ensureSessionTabGroup(session, [trackedTab.tabId]))) {
-    session.tabs = session.tabs.filter((existingTab) => existingTab.tabId !== trackedTab.tabId);
-    appendLog("warning", `${opener.alias} opened a tab that could not join the agent tab group. The agent cannot use it.`);
+    session.tabs = session.tabs.filter(
+      (existingTab) => existingTab.tabId !== trackedTab.tabId,
+    );
+    appendLog(
+      "warning",
+      `${opener.alias} opened a tab that could not join the agent tab group. The agent cannot use it.`,
+    );
     return;
   }
 
   appendLog("info", `Adopted ${trackedTab.alias} opened by ${opener.alias}.`);
 }
 
-function addTrackedTab(session: RunningSession, tab: chrome.tabs.Tab, origin: AgentTabOrigin): AgentTabState {
+function addTrackedTab(
+  session: RunningSession,
+  tab: chrome.tabs.Tab,
+  origin: AgentTabOrigin,
+): AgentTabState {
   const trackedTab: AgentTabState = {
     alias: `tab-${session.nextTabNumber}`,
     tabId: tab.id as number,
@@ -1427,7 +1951,7 @@ function addTrackedTab(session: RunningSession, tab: chrome.tabs.Tab, origin: Ag
     title: tab.title,
     url: tab.url,
     active: false,
-    createdAt: Date.now()
+    createdAt: Date.now(),
   };
 
   session.nextTabNumber += 1;
@@ -1435,8 +1959,13 @@ function addTrackedTab(session: RunningSession, tab: chrome.tabs.Tab, origin: Ag
   return trackedTab;
 }
 
-function ensureSessionTabGroup(session: RunningSession, requestedTabIds: number[]): Promise<boolean> {
-  const operation = session.tabGroupQueue.then(() => addTabsToSessionGroup(session, requestedTabIds));
+function ensureSessionTabGroup(
+  session: RunningSession,
+  requestedTabIds: number[],
+): Promise<boolean> {
+  const operation = session.tabGroupQueue.then(() =>
+    addTabsToSessionGroup(session, requestedTabIds),
+  );
   session.tabGroupQueue = operation.then(
     () => undefined,
     () => undefined,
@@ -1444,7 +1973,10 @@ function ensureSessionTabGroup(session: RunningSession, requestedTabIds: number[
   return operation;
 }
 
-async function addTabsToSessionGroup(session: RunningSession, requestedTabIds: number[]): Promise<boolean> {
+async function addTabsToSessionGroup(
+  session: RunningSession,
+  requestedTabIds: number[],
+): Promise<boolean> {
   const tabIds = getTabIdsForGrouping(
     session.tabs.map((tab) => tab.tabId),
     requestedTabIds,
@@ -1457,28 +1989,40 @@ async function addTabsToSessionGroup(session: RunningSession, requestedTabIds: n
   try {
     const groupId =
       session.tabGroupId === undefined
-        ? await chrome.tabs.group({ tabIds, createProperties: { windowId: session.windowId } })
+        ? await chrome.tabs.group({
+            tabIds,
+            createProperties: { windowId: session.windowId },
+          })
         : await chrome.tabs.group({ tabIds, groupId: session.tabGroupId });
 
     if (session.tabGroupId === undefined) {
       session.tabGroupId = groupId;
       try {
-        await chrome.tabGroups?.update(groupId, { title: AGENT_TAB_GROUP_TITLE, color: AGENT_TAB_GROUP_COLOR });
+        await chrome.tabGroups?.update(groupId, {
+          title: AGENT_TAB_GROUP_TITLE,
+          color: AGENT_TAB_GROUP_COLOR,
+        });
       } catch (error) {
-        console.warn("[BYOK Agent] Could not label the agent tab group.", error);
+        console.warn(
+          "[BYOK Agent] Could not label the agent tab group.",
+          error,
+        );
       }
     }
 
     return true;
   } catch (error) {
-    console.warn("[BYOK Agent] Could not add a tab to the agent tab group.", error);
+    console.warn(
+      "[BYOK Agent] Could not add a tab to the agent tab group.",
+      error,
+    );
     return false;
   }
 }
 
 async function moveTabIntoSessionWindow(
   session: RunningSession,
-  tab: chrome.tabs.Tab
+  tab: chrome.tabs.Tab,
 ): Promise<chrome.tabs.Tab | undefined> {
   if (typeof tab.id !== "number") {
     return undefined;
@@ -1489,17 +2033,25 @@ async function moveTabIntoSessionWindow(
   }
 
   try {
-    const moved = await chrome.tabs.move(tab.id, { windowId: session.windowId, index: -1 });
+    const moved = await chrome.tabs.move(tab.id, {
+      windowId: session.windowId,
+      index: -1,
+    });
     return Array.isArray(moved) ? moved[0] : moved;
   } catch (error) {
-    console.warn("[BYOK Agent] Could not move an agent-opened tab into the session window.", error);
+    console.warn(
+      "[BYOK Agent] Could not move an agent-opened tab into the session window.",
+      error,
+    );
     return undefined;
   }
 }
 
 function assertOwnedTabId(session: RunningSession, tabId: number): void {
   if (!session.tabs.some((tab) => tab.tabId === tabId)) {
-    throw new Error(`Tab ${tabId} is not owned by the current agent run. The agent may only use tabs it opened.`);
+    throw new Error(
+      `Tab ${tabId} is not owned by the current agent run. The agent may only use tabs it opened.`,
+    );
   }
 }
 
@@ -1523,17 +2075,22 @@ async function refreshTrackedTabs(session: RunningSession): Promise<void> {
       windowId: tab.windowId,
       title: tab.title,
       url: tab.url,
-      active: tab.id === session.activeTabId
+      active: tab.id === session.activeTabId,
     });
   }
 
   session.tabs = refreshedTabs;
   for (const releasedTab of releasedTabs) {
-    appendLog("warning", `${releasedTab.alias} left the agent tab group and is no longer accessible to the agent.`);
+    appendLog(
+      "warning",
+      `${releasedTab.alias} left the agent tab group and is no longer accessible to the agent.`,
+    );
   }
 
   if (session.tabs.length === 0) {
-    stopCurrentTask("Every agent-owned tab was closed or removed from the agent tab group.");
+    stopCurrentTask(
+      "Every agent-owned tab was closed or removed from the agent tab group.",
+    );
     return;
   }
 
@@ -1542,7 +2099,10 @@ async function refreshTrackedTabs(session: RunningSession): Promise<void> {
   }
 }
 
-function hasLeftAgentTabGroup(session: RunningSession, tab: chrome.tabs.Tab): boolean {
+function hasLeftAgentTabGroup(
+  session: RunningSession,
+  tab: chrome.tabs.Tab,
+): boolean {
   if (session.tabGroupId === undefined || typeof tab.groupId !== "number") {
     return false;
   }
@@ -1550,7 +2110,11 @@ function hasLeftAgentTabGroup(session: RunningSession, tab: chrome.tabs.Tab): bo
   return tab.groupId !== session.tabGroupId;
 }
 
-function updateTrackedTabFromObservation(session: RunningSession, tabId: number, observation: PageObservation): void {
+function updateTrackedTabFromObservation(
+  session: RunningSession,
+  tabId: number,
+  observation: PageObservation,
+): void {
   session.tabs = session.tabs.map((tab) =>
     tab.tabId === tabId
       ? {
@@ -1558,9 +2122,9 @@ function updateTrackedTabFromObservation(session: RunningSession, tabId: number,
           title: observation.title || tab.title,
           url: observation.url || tab.url,
           active: true,
-          lastObservedAt: Date.now()
+          lastObservedAt: Date.now(),
         }
-      : { ...tab, active: false }
+      : { ...tab, active: false },
   );
 }
 
@@ -1569,33 +2133,51 @@ function getPromptTabs(session: RunningSession): PromptTabInfo[] {
     alias: tab.alias,
     title: tab.title,
     url: tab.url,
-    active: tab.tabId === session.activeTabId || tab.alias === session.activeTabAlias
+    active:
+      tab.tabId === session.activeTabId || tab.alias === session.activeTabAlias,
   }));
 }
 
-function setActiveTrackedTab(session: RunningSession, tab: AgentTabState): void {
+function setActiveTrackedTab(
+  session: RunningSession,
+  tab: AgentTabState,
+): void {
   session.activeTabId = tab.tabId;
   session.activeTabAlias = tab.alias;
   session.tabs = session.tabs.map((trackedTab) => ({
     ...trackedTab,
-    active: trackedTab.tabId === tab.tabId
+    active: trackedTab.tabId === tab.tabId,
   }));
 }
 
-function findTrackedTab(session: RunningSession, tabAlias?: string): AgentTabState | undefined {
+function findTrackedTab(
+  session: RunningSession,
+  tabAlias?: string,
+): AgentTabState | undefined {
   if (!tabAlias?.trim()) {
     return session.tabs.find((tab) => tab.tabId === session.activeTabId);
   }
 
   const normalizedAlias = tabAlias.trim().toLowerCase();
-  return session.tabs.find((tab) => tab.alias.toLowerCase() === normalizedAlias);
+  return session.tabs.find(
+    (tab) => tab.alias.toLowerCase() === normalizedAlias,
+  );
 }
 
 function isTabManagementAction(action: AgentAction): boolean {
-  return action.type === "open_tab" || action.type === "switch_tab" || action.type === "close_tab" || action.type === "reload" || action.type === "go_forward";
+  return (
+    action.type === "open_tab" ||
+    action.type === "switch_tab" ||
+    action.type === "close_tab" ||
+    action.type === "reload" ||
+    action.type === "go_forward"
+  );
 }
 
-async function handleTabManagementAction(session: RunningSession, action: AgentAction): Promise<ContentActionResult> {
+async function handleTabManagementAction(
+  session: RunningSession,
+  action: AgentAction,
+): Promise<ContentActionResult> {
   if (action.type === "open_tab") {
     return openTrackedTab(session, action.url);
   }
@@ -1618,16 +2200,19 @@ async function handleTabManagementAction(session: RunningSession, action: AgentA
 
   return {
     ok: false,
-    message: `Unsupported tab action: ${action.type}`
+    message: `Unsupported tab action: ${action.type}`,
   };
 }
 
-async function openTrackedTab(session: RunningSession, url?: string): Promise<ContentActionResult> {
+async function openTrackedTab(
+  session: RunningSession,
+  url?: string,
+): Promise<ContentActionResult> {
   if (!url) {
     return {
       ok: false,
       recoverable: true,
-      message: "open_tab requires a url."
+      message: "open_tab requires a url.",
     };
   }
 
@@ -1638,7 +2223,7 @@ async function openTrackedTab(session: RunningSession, url?: string): Promise<Co
     return {
       ok: false,
       recoverable: true,
-      message: "open_tab URL is invalid."
+      message: "open_tab URL is invalid.",
     };
   }
 
@@ -1646,7 +2231,7 @@ async function openTrackedTab(session: RunningSession, url?: string): Promise<Co
     return {
       ok: false,
       recoverable: true,
-      message: "open_tab only supports http(s) URLs."
+      message: "open_tab only supports http(s) URLs.",
     };
   }
 
@@ -1655,27 +2240,33 @@ async function openTrackedTab(session: RunningSession, url?: string): Promise<Co
     return {
       ok: false,
       recoverable: true,
-      message: `The agent already owns ${session.tabs.length} tabs (limit ${MAX_TRACKED_TABS}). Close one with close_tab before opening another.`
+      message: `The agent already owns ${session.tabs.length} tabs (limit ${MAX_TRACKED_TABS}). Close one with close_tab before opening another.`,
     };
   }
 
   const tab = await chrome.tabs.create({
     url: parsed.toString(),
     active: true,
-    windowId: session.windowId ?? activeTab?.windowId
+    windowId: session.windowId ?? activeTab?.windowId,
   });
 
   if (typeof tab.id !== "number") {
     return {
       ok: false,
       recoverable: true,
-      message: "Opened a tab, but Chrome did not return a tab id."
+      message: "Opened a tab, but Chrome did not return a tab id.",
     };
   }
 
-  const trackedTab = addTrackedTab(session, { ...tab, url: tab.url || parsed.toString() }, "agent");
+  const trackedTab = addTrackedTab(
+    session,
+    { ...tab, url: tab.url || parsed.toString() },
+    "agent",
+  );
   if (!(await ensureSessionTabGroup(session, [trackedTab.tabId]))) {
-    session.tabs = session.tabs.filter((existingTab) => existingTab.tabId !== trackedTab.tabId);
+    session.tabs = session.tabs.filter(
+      (existingTab) => existingTab.tabId !== trackedTab.tabId,
+    );
     try {
       await chrome.tabs.remove(trackedTab.tabId);
     } catch {
@@ -1684,7 +2275,8 @@ async function openTrackedTab(session: RunningSession, url?: string): Promise<Co
     return {
       ok: false,
       recoverable: true,
-      message: "Could not create the agent tab group, so the new tab was closed.",
+      message:
+        "Could not create the agent tab group, so the new tab was closed.",
     };
   }
   setActiveTrackedTab(session, trackedTab);
@@ -1693,17 +2285,20 @@ async function openTrackedTab(session: RunningSession, url?: string): Promise<Co
   return {
     ok: true,
     message: `Opened ${trackedTab.alias} in the agent tab group: ${parsed.toString()}.`,
-    observation: await observePageSafely(trackedTab.tabId)
+    observation: await observePageSafely(trackedTab.tabId),
   };
 }
 
-async function switchTrackedTab(session: RunningSession, tabAlias?: string): Promise<ContentActionResult> {
+async function switchTrackedTab(
+  session: RunningSession,
+  tabAlias?: string,
+): Promise<ContentActionResult> {
   const trackedTab = findTrackedTab(session, tabAlias);
   if (!trackedTab) {
     return {
       ok: false,
       recoverable: true,
-      message: `Could not find tracked tab alias "${tabAlias || ""}". Use one of: ${session.tabs.map((tab) => tab.alias).join(", ")}.`
+      message: `Could not find tracked tab alias "${tabAlias || ""}". Use one of: ${session.tabs.map((tab) => tab.alias).join(", ")}.`,
     };
   }
 
@@ -1717,30 +2312,38 @@ async function switchTrackedTab(session: RunningSession, tabAlias?: string): Pro
   return {
     ok: true,
     message: `Switched to ${trackedTab.alias}.`,
-    observation: await observePageSafely(trackedTab.tabId)
+    observation: await observePageSafely(trackedTab.tabId),
   };
 }
 
-async function closeTrackedTab(session: RunningSession, tabAlias?: string): Promise<ContentActionResult> {
+async function closeTrackedTab(
+  session: RunningSession,
+  tabAlias?: string,
+): Promise<ContentActionResult> {
   const trackedTab = findTrackedTab(session, tabAlias);
   if (!trackedTab) {
     return {
       ok: false,
       recoverable: true,
-      message: `Could not find tracked tab alias "${tabAlias || ""}". Use one of: ${session.tabs.map((tab) => tab.alias).join(", ")}.`
+      message: `Could not find tracked tab alias "${tabAlias || ""}". Use one of: ${session.tabs.map((tab) => tab.alias).join(", ")}.`,
     };
   }
 
-  const remainingTabs = session.tabs.filter((tab) => tab.tabId !== trackedTab.tabId);
+  const remainingTabs = session.tabs.filter(
+    (tab) => tab.tabId !== trackedTab.tabId,
+  );
   if (remainingTabs.length === 0) {
     return {
       ok: false,
       recoverable: true,
-      message: "Refusing to close the only tracked tab. Open or switch to another tracked tab first."
+      message:
+        "Refusing to close the only tracked tab. Open or switch to another tracked tab first.",
     };
   }
 
-  const fallbackTab = remainingTabs.find((tab) => tab.tabId === session.activeTabId) || remainingTabs[0];
+  const fallbackTab =
+    remainingTabs.find((tab) => tab.tabId === session.activeTabId) ||
+    remainingTabs[0];
   session.tabs = remainingTabs;
   setActiveTrackedTab(session, fallbackTab);
   await chrome.tabs.remove(trackedTab.tabId);
@@ -1752,17 +2355,20 @@ async function closeTrackedTab(session: RunningSession, tabAlias?: string): Prom
   return {
     ok: true,
     message: `Closed ${trackedTab.alias}. Active tab is now ${fallbackTab.alias}.`,
-    observation: await observePageSafely(fallbackTab.tabId)
+    observation: await observePageSafely(fallbackTab.tabId),
   };
 }
 
-async function reloadTrackedTab(session: RunningSession, tabAlias?: string): Promise<ContentActionResult> {
+async function reloadTrackedTab(
+  session: RunningSession,
+  tabAlias?: string,
+): Promise<ContentActionResult> {
   const trackedTab = findTrackedTab(session, tabAlias);
   if (!trackedTab) {
     return {
       ok: false,
       recoverable: true,
-      message: `Could not find tracked tab alias "${tabAlias || ""}". Use one of: ${session.tabs.map((tab) => tab.alias).join(", ")}.`
+      message: `Could not find tracked tab alias "${tabAlias || ""}". Use one of: ${session.tabs.map((tab) => tab.alias).join(", ")}.`,
     };
   }
 
@@ -1775,17 +2381,19 @@ async function reloadTrackedTab(session: RunningSession, tabAlias?: string): Pro
   return {
     ok: true,
     message: `Reloaded ${trackedTab.alias}.`,
-    observation: await observePageSafely(trackedTab.tabId)
+    observation: await observePageSafely(trackedTab.tabId),
   };
 }
 
-async function goForwardInTrackedTab(session: RunningSession): Promise<ContentActionResult> {
+async function goForwardInTrackedTab(
+  session: RunningSession,
+): Promise<ContentActionResult> {
   const trackedTab = findTrackedTab(session);
   if (!trackedTab) {
     return {
       ok: false,
       recoverable: true,
-      message: "No active tracked tab is available for go_forward."
+      message: "No active tracked tab is available for go_forward.",
     };
   }
 
@@ -1796,7 +2404,7 @@ async function goForwardInTrackedTab(session: RunningSession): Promise<ContentAc
     return {
       ok: false,
       recoverable: true,
-      message: `Could not go forward. This tab may not have a forward history entry. ${getErrorMessage(error)}`
+      message: `Could not go forward. This tab may not have a forward history entry. ${getErrorMessage(error)}`,
     };
   }
 
@@ -1804,14 +2412,21 @@ async function goForwardInTrackedTab(session: RunningSession): Promise<ContentAc
   return {
     ok: true,
     message: `Went forward in ${trackedTab.alias}.`,
-    observation: await observePageSafely(trackedTab.tabId)
+    observation: await observePageSafely(trackedTab.tabId),
   };
 }
 
-async function executeAction(tabId: number, action: AgentAction): Promise<ContentActionResult> {
-  const tabBeforeNavigation = action.type === "navigate" ? await getTabSafely(tabId) : undefined;
+async function executeAction(
+  tabId: number,
+  action: AgentAction,
+): Promise<ContentActionResult> {
+  const tabBeforeNavigation =
+    action.type === "navigate" ? await getTabSafely(tabId) : undefined;
   try {
-    const result = await sendTabMessage<ContentActionResult>(tabId, { type: "CONTENT_EXECUTE", action });
+    const result = await sendTabMessage<ContentActionResult>(tabId, {
+      type: "CONTENT_EXECUTE",
+      action,
+    });
     if (result.ok && action.type === "navigate") {
       await waitForTabToSettle(tabId, tabBeforeNavigation?.url);
       return {
@@ -1828,11 +2443,13 @@ async function executeAction(tabId: number, action: AgentAction): Promise<Conten
         ok: false,
         recoverable: true,
         observation,
-        message: `${formatAction(action)} likely changed the page before the content script could reply. The tab was re-observed; continue from the current page and do not repeat that action unless it is still visibly needed.`
+        message: `${formatAction(action)} likely changed the page before the content script could reply. The tab was re-observed; continue from the current page and do not repeat that action unless it is still visibly needed.`,
       };
     }
 
-    throw new Error(`Could not execute ${action.type}: ${getErrorMessage(error)}`);
+    throw new Error(
+      `Could not execute ${action.type}: ${getErrorMessage(error)}`,
+    );
   }
 }
 
@@ -1845,7 +2462,7 @@ async function goBackInTab(tabId: number): Promise<ContentActionResult> {
     return {
       ok: false,
       recoverable: true,
-      message: `Could not go back. This tab may not have a previous history entry. ${getErrorMessage(error)}`
+      message: `Could not go back. This tab may not have a previous history entry. ${getErrorMessage(error)}`,
     };
   }
 
@@ -1853,11 +2470,14 @@ async function goBackInTab(tabId: number): Promise<ContentActionResult> {
   return {
     ok: true,
     message: "Went back to the previous page.",
-    observation: await observePageSafely(tabId)
+    observation: await observePageSafely(tabId),
   };
 }
 
-async function summarizeCurrentPage(session: RunningSession, instruction?: string): Promise<ContentActionResult> {
+async function summarizeCurrentPage(
+  session: RunningSession,
+  instruction?: string,
+): Promise<ContentActionResult> {
   const observation = await observePage(session.activeTabId);
   const document = await readPageDocument(session.activeTabId);
   const pageText = truncateForSummary(document.markdown || observation.text);
@@ -1866,7 +2486,7 @@ async function summarizeCurrentPage(session: RunningSession, instruction?: strin
       ok: false,
       recoverable: true,
       observation,
-      message: "No readable page text was available to summarize."
+      message: "No readable page text was available to summarize.",
     };
   }
 
@@ -1875,7 +2495,8 @@ async function summarizeCurrentPage(session: RunningSession, instruction?: strin
     title: document.title || observation.title || observation.url,
     sourceLabel: document.url,
     text: pageText,
-    instruction: instruction || "Summarize this web page clearly and concisely.",
+    instruction:
+      instruction || "Summarize this web page clearly and concisely.",
     signal: session.abortSignal,
   });
 
@@ -1885,23 +2506,26 @@ async function summarizeCurrentPage(session: RunningSession, instruction?: strin
     label: observation.title || observation.url,
     url: observation.url,
     text: summary,
-    createdAt: Date.now()
+    createdAt: Date.now(),
   });
 
   return {
     ok: true,
     observation,
-    message: `Prepared a summary of ${document.title || observation.title || observation.url} for the final response.`
+    message: `Prepared a summary of ${document.title || observation.title || observation.url} for the final response.`,
   };
 }
 
-async function summarizePdf(session: RunningSession, action: AgentAction): Promise<ContentActionResult> {
+async function summarizePdf(
+  session: RunningSession,
+  action: AgentAction,
+): Promise<ContentActionResult> {
   const source = await resolvePdfSource(session, action);
   if (!source.ok) {
     return {
       ok: false,
       recoverable: true,
-      message: source.message
+      message: source.message,
     };
   }
 
@@ -1910,7 +2534,7 @@ async function summarizePdf(session: RunningSession, action: AgentAction): Promi
     return {
       ok: false,
       recoverable: true,
-      message: `Could not extract readable text from ${source.label}.`
+      message: `Could not extract readable text from ${source.label}.`,
     };
   }
 
@@ -1918,15 +2542,19 @@ async function summarizePdf(session: RunningSession, action: AgentAction): Promi
     source.label,
     extraction.pageCount ? `${extraction.pageCount} pages` : "",
     extraction.extractedPages ? `${extraction.extractedPages} pages read` : "",
-    extraction.engine === "fallback" ? "fallback extractor" : ""
-  ].filter(Boolean).join(", ");
+    extraction.engine === "fallback" ? "fallback extractor" : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   const summary = await summarizeTextWithModel({
     settings: session.settings,
     title: source.label,
     sourceLabel: sourceDetails,
     text: truncateForSummary(extraction.text),
-    instruction: action.text || "Summarize this PDF. Include key points, important facts, and any action items.",
+    instruction:
+      action.text ||
+      "Summarize this PDF. Include key points, important facts, and any action items.",
     signal: session.abortSignal,
   });
 
@@ -1935,12 +2563,12 @@ async function summarizePdf(session: RunningSession, action: AgentAction): Promi
     tabAlias: session.activeTabAlias,
     label: source.label,
     text: summary,
-    createdAt: Date.now()
+    createdAt: Date.now(),
   });
 
   return {
     ok: true,
-    message: `Prepared a PDF summary (${sourceDetails}) for the final response.`
+    message: `Prepared a PDF summary (${sourceDetails}) for the final response.`,
   };
 }
 
@@ -1962,12 +2590,14 @@ function recordFinding(session: RunningSession, finding: RunFinding): void {
 }
 
 function getPromptFindings(session: RunningSession): PromptFindingInfo[] {
-  return session.run.findings.slice(-MAX_FINDINGS_FOR_PROMPT).map((finding) => ({
-    tabAlias: finding.tabAlias,
-    label: finding.label,
-    url: finding.url,
-    text: truncateFindingText(finding.text)
-  }));
+  return session.run.findings
+    .slice(-MAX_FINDINGS_FOR_PROMPT)
+    .map((finding) => ({
+      tabAlias: finding.tabAlias,
+      label: finding.label,
+      url: finding.url,
+      text: truncateFindingText(finding.text),
+    }));
 }
 
 function truncateFindingText(text: string): string {
@@ -1990,7 +2620,10 @@ function initializeRequirements(
   queueRunReportSave(session.run);
 }
 
-function applyRequirementUpdates(session: RunningSession, updates?: AgentRequirementUpdate[]): void {
+function applyRequirementUpdates(
+  session: RunningSession,
+  updates?: AgentRequirementUpdate[],
+): void {
   if (!updates?.length || session.run.requirements.length === 0) {
     return;
   }
@@ -2050,20 +2683,42 @@ async function validateCompletionWithModel(
 
   for (let attempt = 1; ; attempt += 1) {
     try {
-      const result = await requestModelStep(settings, messages, session.abortSignal);
+      const result = await requestModelStep(
+        settings,
+        messages,
+        session.abortSignal,
+      );
       recordUsageEvent(result.usage, settings);
       const action = getPlannedActions(result.response)[0];
       return action.type === "done"
-        ? { accepted: true, message: action.text || result.response.thought_summary }
-        : { accepted: false, message: action.text || result.response.thought_summary || "The evidence did not prove completion." };
+        ? {
+            accepted: true,
+            message: action.text || result.response.thought_summary,
+          }
+        : {
+            accepted: false,
+            message:
+              action.text ||
+              result.response.thought_summary ||
+              "The evidence did not prove completion.",
+          };
     } catch (error) {
-      if (!(error instanceof ModelClientError) || error instanceof ModelRequestCancelledError || !/JSON|schema/i.test(error.message)) {
+      if (
+        !(error instanceof ModelClientError) ||
+        error instanceof ModelRequestCancelledError ||
+        !/JSON|schema/i.test(error.message)
+      ) {
         throw error;
       }
       if (error.usage) recordUsageEvent(error.usage, settings);
       const retry = attempt < MAX_COMPLETION_CHECK_ATTEMPTS;
-      appendLog("warning", `The final completion check returned unusable output: ${error.message}${retry ? " Retrying the check once." : ""}`, formatModelErrorDetails(error));
-      if (!retry) return { accepted: false, unavailable: true, message: error.message };
+      appendLog(
+        "warning",
+        `The final completion check returned unusable output: ${error.message}${retry ? " Retrying the check once." : ""}`,
+        formatModelErrorDetails(error),
+      );
+      if (!retry)
+        return { accepted: false, unavailable: true, message: error.message };
     }
   }
 }
@@ -2083,9 +2738,9 @@ async function summarizeTextWithModel(args: {
       content: [
         "You summarize web pages and PDFs for a browser extension.",
         "Return strict JSON only.",
-        "Use this schema: {\"thought_summary\":\"summary ready\",\"risk_level\":\"low\",\"action\":{\"type\":\"done\",\"text\":\"the user-facing summary\"}}.",
-        "Keep the summary useful, structured, and faithful to the supplied text. If the text is sparse, say what is missing."
-      ].join("\n")
+        'Use this schema: {"thought_summary":"summary ready","risk_level":"low","action":{"type":"done","text":"the user-facing summary"}}.',
+        "Keep the summary useful, structured, and faithful to the supplied text. If the text is sparse, say what is missing.",
+      ].join("\n"),
     },
     {
       role: "user",
@@ -2095,19 +2750,28 @@ async function summarizeTextWithModel(args: {
         `Source: ${args.sourceLabel}`,
         "",
         "Text to summarize:",
-        args.text
-      ].join("\n")
-    }
+        args.text,
+      ].join("\n"),
+    },
   ];
 
   const result = await requestModelStep(settings, messages, args.signal);
   recordUsageEvent(result.usage, settings);
-  const doneAction = result.response.actions?.find((action) => action.type === "done");
-  return doneAction?.text || result.response.thought_summary || "The model did not return a summary.";
+  const doneAction = result.response.actions?.find(
+    (action) => action.type === "done",
+  );
+  return (
+    doneAction?.text ||
+    result.response.thought_summary ||
+    "The model did not return a summary."
+  );
 }
 
 function reportModelNotice(notice: ModelRequestNotice): void {
-  appendLog(notice.kind === "timeout-retry" ? "warning" : "info", notice.message);
+  appendLog(
+    notice.kind === "timeout-retry" ? "warning" : "info",
+    notice.message,
+  );
   if (notice.kind === "timeout-retry") {
     setModelRetryStatus({
       message: notice.message,
@@ -2126,7 +2790,12 @@ async function requestModelStep(
   setModelRetryStatus(undefined);
   emitModelStatus();
   try {
-    return await requestAgentStep(settings, messages, reportModelNotice, signal);
+    return await requestAgentStep(
+      settings,
+      messages,
+      reportModelNotice,
+      signal,
+    );
   } finally {
     pendingModelRequestCount = Math.max(0, pendingModelRequestCount - 1);
     if (pendingModelRequestCount === 0) {
@@ -2149,17 +2818,23 @@ function setModelRetryStatus(status: ModelRetryStatus | undefined): void {
 
 async function resolvePdfSource(
   session: RunningSession,
-  action: AgentAction
-): Promise<{ ok: true; bytes: Uint8Array; label: string } | { ok: false; message: string }> {
+  action: AgentAction,
+): Promise<
+  | { ok: true; bytes: Uint8Array; label: string }
+  | { ok: false; message: string }
+> {
   if (action.fileId) {
     const stagedFile = await loadStagedUploadFile();
     if (!stagedFile || stagedFile.id !== action.fileId) {
-      return { ok: false, message: `Staged PDF file ${action.fileId} is not available.` };
+      return {
+        ok: false,
+        message: `Staged PDF file ${action.fileId} is not available.`,
+      };
     }
     return {
       ok: true,
       bytes: dataUrlToUint8Array(stagedFile.dataUrl),
-      label: `${stagedFile.name} (${formatFileSize(stagedFile.size)})`
+      label: `${stagedFile.name} (${formatFileSize(stagedFile.size)})`,
     };
   }
 
@@ -2167,7 +2842,10 @@ async function resolvePdfSource(
     const download = await getDownloadById(action.downloadId);
     const url = download?.finalUrl || download?.url;
     if (!url) {
-      return { ok: false, message: `Download ${action.downloadId} does not have a source URL that can be fetched.` };
+      return {
+        ok: false,
+        message: `Download ${action.downloadId} does not have a source URL that can be fetched.`,
+      };
     }
     return fetchPdfBytes(url, download.filename || url);
   }
@@ -2186,23 +2864,35 @@ async function resolvePdfSource(
     return {
       ok: true,
       bytes: dataUrlToUint8Array(stagedFile.dataUrl),
-      label: `${stagedFile.name} (${formatFileSize(stagedFile.size)})`
+      label: `${stagedFile.name} (${formatFileSize(stagedFile.size)})`,
     };
   }
 
-  const latestPdfDownload = (await getRecentDownloads(10)).find((download) => isDownloadLikelyPdf(download));
+  const latestPdfDownload = (await getRecentDownloads(10)).find((download) =>
+    isDownloadLikelyPdf(download),
+  );
   const downloadUrl = latestPdfDownload?.finalUrl || latestPdfDownload?.url;
   if (downloadUrl) {
-    return fetchPdfBytes(downloadUrl, latestPdfDownload.filename || downloadUrl);
+    return fetchPdfBytes(
+      downloadUrl,
+      latestPdfDownload.filename || downloadUrl,
+    );
   }
 
   return {
     ok: false,
-    message: "No PDF source was found. Provide a PDF url, downloadId, or stage a PDF file in the side panel."
+    message:
+      "No PDF source was found. Provide a PDF url, downloadId, or stage a PDF file in the side panel.",
   };
 }
 
-async function fetchPdfBytes(url: string, label: string): Promise<{ ok: true; bytes: Uint8Array; label: string } | { ok: false; message: string }> {
+async function fetchPdfBytes(
+  url: string,
+  label: string,
+): Promise<
+  | { ok: true; bytes: Uint8Array; label: string }
+  | { ok: false; message: string }
+> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -2211,33 +2901,47 @@ async function fetchPdfBytes(url: string, label: string): Promise<{ ok: true; by
   }
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return { ok: false, message: "PDF summarization can fetch http(s) URLs or use a staged local PDF." };
+    return {
+      ok: false,
+      message:
+        "PDF summarization can fetch http(s) URLs or use a staged local PDF.",
+    };
   }
 
   try {
     const response = await fetch(parsed.toString(), { credentials: "include" });
     if (!response.ok) {
-      return { ok: false, message: `Could not fetch PDF (${response.status}) from ${parsed.toString()}.` };
+      return {
+        ok: false,
+        message: `Could not fetch PDF (${response.status}) from ${parsed.toString()}.`,
+      };
     }
     const bytes = new Uint8Array(await response.arrayBuffer());
     return { ok: true, bytes, label };
   } catch (error) {
-    return { ok: false, message: `Could not fetch PDF from ${parsed.toString()}. ${getErrorMessage(error)}` };
+    return {
+      ok: false,
+      message: `Could not fetch PDF from ${parsed.toString()}. ${getErrorMessage(error)}`,
+    };
   }
 }
 
-async function listDownloads(maxItems?: number): Promise<{ ok: boolean; message: string; recoverable?: boolean }> {
-  const downloads = await getRecentDownloads(Math.min(Math.max(Number(maxItems || 8), 1), 20));
+async function listDownloads(
+  maxItems?: number,
+): Promise<{ ok: boolean; message: string; recoverable?: boolean }> {
+  const downloads = await getRecentDownloads(
+    Math.min(Math.max(Number(maxItems || 8), 1), 20),
+  );
   if (downloads.length === 0) {
     return {
       ok: true,
-      message: "No recent downloads were found."
+      message: "No recent downloads were found.",
     };
   }
 
   return {
     ok: true,
-    message: `Recent downloads:\n${downloads.map(formatDownloadForLog).join("\n")}`
+    message: `Recent downloads:\n${downloads.map(formatDownloadForLog).join("\n")}`,
   };
 }
 
@@ -2250,31 +2954,37 @@ async function logCompletedDownload(downloadId: number): Promise<void> {
   appendLog("success", `Download complete: ${formatDownloadForLog(download)}`);
 }
 
-async function getDownloadById(downloadId: number): Promise<chrome.downloads.DownloadItem | undefined> {
+async function getDownloadById(
+  downloadId: number,
+): Promise<chrome.downloads.DownloadItem | undefined> {
   const downloads = await chrome.downloads.search({ id: downloadId });
   return downloads[0];
 }
 
-async function getRecentDownloads(limit: number): Promise<chrome.downloads.DownloadItem[]> {
+async function getRecentDownloads(
+  limit: number,
+): Promise<chrome.downloads.DownloadItem[]> {
   if (!chrome.downloads?.search) {
     return [];
   }
 
   return chrome.downloads.search({
     limit,
-    orderBy: ["-startTime"]
+    orderBy: ["-startTime"],
   });
 }
 
-async function getRecentDownloadsForPrompt(limit: number): Promise<Array<{
-  id: number;
-  filename?: string;
-  url?: string;
-  mime?: string;
-  state?: string;
-  totalBytes?: number;
-  exists?: boolean;
-}> > {
+async function getRecentDownloadsForPrompt(limit: number): Promise<
+  Array<{
+    id: number;
+    filename?: string;
+    url?: string;
+    mime?: string;
+    state?: string;
+    totalBytes?: number;
+    exists?: boolean;
+  }>
+> {
   return (await getRecentDownloads(limit)).map((download) => ({
     id: download.id,
     filename: download.filename,
@@ -2282,13 +2992,18 @@ async function getRecentDownloadsForPrompt(limit: number): Promise<Array<{
     mime: download.mime,
     state: download.state,
     totalBytes: download.totalBytes,
-    exists: download.exists
+    exists: download.exists,
   }));
 }
 
 function formatDownloadForLog(download: chrome.downloads.DownloadItem): string {
-  const filename = download.filename ? download.filename.split(/[\\/]/).pop() || download.filename : "download";
-  const size = download.totalBytes && download.totalBytes > 0 ? ` ${formatFileSize(download.totalBytes)}` : "";
+  const filename = download.filename
+    ? download.filename.split(/[\\/]/).pop() || download.filename
+    : "download";
+  const size =
+    download.totalBytes && download.totalBytes > 0
+      ? ` ${formatFileSize(download.totalBytes)}`
+      : "";
   const mime = download.mime ? ` ${download.mime}` : "";
   const url = download.finalUrl || download.url || "";
   return `#${download.id} ${filename}${size}${mime}${url ? ` <${url}>` : ""}`;
@@ -2304,7 +3019,7 @@ function toPromptStagedFile(file: StagedUploadFile): {
     id: file.id,
     name: file.name,
     type: file.type,
-    size: file.size
+    size: file.size,
   };
 }
 
@@ -2313,27 +3028,42 @@ function isLikelyPdfFile(file: StagedUploadFile): boolean {
 }
 
 function isDownloadLikelyPdf(download: chrome.downloads.DownloadItem): boolean {
-  return download.mime === "application/pdf" || isLikelyPdfUrl(download.filename) || isLikelyPdfUrl(download.finalUrl || download.url);
+  return (
+    download.mime === "application/pdf" ||
+    isLikelyPdfUrl(download.filename) ||
+    isLikelyPdfUrl(download.finalUrl || download.url)
+  );
 }
 
 function isLikelyPdfUrl(url?: string): boolean {
-  return Boolean(url && (/\.pdf(?:[?#].*)?$/i.test(url) || /application\/pdf/i.test(url)));
+  return Boolean(
+    url && (/\.pdf(?:[?#].*)?$/i.test(url) || /application\/pdf/i.test(url)),
+  );
 }
 
 function truncateForSummary(text: string): string {
-  return text.length <= MAX_SUMMARY_INPUT_CHARS ? text : `${text.slice(0, MAX_SUMMARY_INPUT_CHARS - 32)}\n[truncated for summary]`;
+  return text.length <= MAX_SUMMARY_INPUT_CHARS
+    ? text
+    : `${text.slice(0, MAX_SUMMARY_INPUT_CHARS - 32)}\n[truncated for summary]`;
 }
 
-async function observePageSafely(tabId: number): Promise<PageObservation | undefined> {
+async function observePageSafely(
+  tabId: number,
+): Promise<PageObservation | undefined> {
   try {
     return await observePage(tabId);
   } catch (error) {
-    console.warn("[BYOK Agent] Could not observe page after browser navigation.", error);
+    console.warn(
+      "[BYOK Agent] Could not observe page after browser navigation.",
+      error,
+    );
     return undefined;
   }
 }
 
-async function getTabSafely(tabId: number): Promise<chrome.tabs.Tab | undefined> {
+async function getTabSafely(
+  tabId: number,
+): Promise<chrome.tabs.Tab | undefined> {
   try {
     return await chrome.tabs.get(tabId);
   } catch {
@@ -2341,7 +3071,10 @@ async function getTabSafely(tabId: number): Promise<chrome.tabs.Tab | undefined>
   }
 }
 
-async function waitForTabToSettle(tabId: number, previousUrl?: string): Promise<void> {
+async function waitForTabToSettle(
+  tabId: number,
+  previousUrl?: string,
+): Promise<void> {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < TAB_SETTLE_TIMEOUT_MS) {
@@ -2351,7 +3084,10 @@ async function waitForTabToSettle(tabId: number, previousUrl?: string): Promise<
     }
 
     const urlChanged = previousUrl && tab.url && tab.url !== previousUrl;
-    if (tab.status === "complete" && (!previousUrl || urlChanged || Date.now() - startedAt > 700)) {
+    if (
+      tab.status === "complete" &&
+      (!previousUrl || urlChanged || Date.now() - startedAt > 700)
+    ) {
       await sleep(250);
       return;
     }
@@ -2360,25 +3096,40 @@ async function waitForTabToSettle(tabId: number, previousUrl?: string): Promise<
   }
 }
 
-function shouldRecoverFromClosedMessageChannel(action: AgentAction, error: unknown): boolean {
+function shouldRecoverFromClosedMessageChannel(
+  action: AgentAction,
+  error: unknown,
+): boolean {
   if (!canActionUnloadContentScript(action)) {
     return false;
   }
 
   const message = getErrorMessage(error);
   return /message channel closed|asynchronous response|receiving end does not exist|extension context invalidated|context invalidated/i.test(
-    message
+    message,
   );
 }
 
 function canActionUnloadContentScript(action: AgentAction): boolean {
-  return action.type === "click" || action.type === "multi_click" || action.type === "navigate" || action.type === "go_back";
+  return (
+    action.type === "click" ||
+    action.type === "multi_click" ||
+    action.type === "navigate" ||
+    action.type === "go_back"
+  );
 }
 
-function recordObservationEvidence(session: RunningSession, observation: PageObservation): void {
+function recordObservationEvidence(
+  session: RunningSession,
+  observation: PageObservation,
+): void {
   const latest = session.run.evidence[session.run.evidence.length - 1];
   const summary = `Observed ${observation.title || observation.url}`;
-  if (latest?.kind === "observation" && latest.url === observation.url && latest.summary === summary) {
+  if (
+    latest?.kind === "observation" &&
+    latest.url === observation.url &&
+    latest.summary === summary
+  ) {
     return;
   }
 
@@ -2396,7 +3147,10 @@ function recordObservationEvidence(session: RunningSession, observation: PageObs
   touchRun(session.run);
 }
 
-function recordDocumentEvidence(session: RunningSession, document: FullPageDocument): void {
+function recordDocumentEvidence(
+  session: RunningSession,
+  document: FullPageDocument,
+): void {
   session.run.evidence = [
     ...session.run.evidence,
     {
@@ -2434,7 +3188,12 @@ function recordVisualEvidence(
   queueRunReportSave(session.run);
 }
 
-function recordActionEvidence(session: RunningSession, action: AgentAction, message: string, target?: DomElementInfo): void {
+function recordActionEvidence(
+  session: RunningSession,
+  action: AgentAction,
+  message: string,
+  target?: DomElementInfo,
+): void {
   const trackedTab = findTrackedTab(session);
   const detail = formatEvidenceTarget(action, target);
   session.run.evidence = [
@@ -2452,14 +3211,23 @@ function recordActionEvidence(session: RunningSession, action: AgentAction, mess
 }
 
 // Lets the completion check verify what was entered where, without persisting sensitive values.
-function formatEvidenceTarget(action: AgentAction, target: DomElementInfo | undefined): string {
+function formatEvidenceTarget(
+  action: AgentAction,
+  target: DomElementInfo | undefined,
+): string {
   if (!target) return "";
   const parts = [
     target.label ? `label ${JSON.stringify(target.label.slice(0, 80))}` : "",
     target.questionNumber ? `problem ${target.questionNumber}` : "",
   ];
-  if ((action.type === "fill" || action.type === "type" || action.type === "select") && action.text
-    && !target.isSensitive && target.type !== "password") {
+  if (
+    (action.type === "fill" ||
+      action.type === "type" ||
+      action.type === "select") &&
+    action.text &&
+    !target.isSensitive &&
+    target.type !== "password"
+  ) {
     parts.push(`value ${JSON.stringify(action.text.slice(0, 120))}`);
   }
   return parts.filter(Boolean).join(", ");
@@ -2502,7 +3270,10 @@ async function persistRunReport(report: RunReport): Promise<void> {
 }
 
 function isRunPersistencePending(report: RunReport): boolean {
-  return runningSession?.run.id === report.id && !runningSession.runPersistenceEnabled;
+  return (
+    runningSession?.run.id === report.id &&
+    !runningSession.runPersistenceEnabled
+  );
 }
 
 function enqueueRunReportSave(report: RunReport): Promise<void> {
@@ -2515,7 +3286,10 @@ function enqueueRunReportSave(report: RunReport): Promise<void> {
   return runReportWriteQueue;
 }
 
-function stopCurrentTask(reason: string, status: Exclude<RunStatus, "running"> = "stopped"): void {
+function stopCurrentTask(
+  reason: string,
+  status: Exclude<RunStatus, "running"> = "stopped",
+): void {
   activeTaskAbortController?.abort();
 
   if (runningSession && !runningSession.stopped) {
@@ -2534,7 +3308,11 @@ function stopCurrentTask(reason: string, status: Exclude<RunStatus, "running"> =
   emitStatus();
 }
 
-function appendLog(level: AgentLogEntry["level"], message: string, details?: string): void {
+function appendLog(
+  level: AgentLogEntry["level"],
+  message: string,
+  details?: string,
+): void {
   if (isHiddenActionLog(message)) {
     return;
   }
@@ -2544,11 +3322,14 @@ function appendLog(level: AgentLogEntry["level"], message: string, details?: str
     level,
     message,
     ...(details ? { details } : {}),
-    timestamp: Date.now()
+    timestamp: Date.now(),
   };
 
   logs = [...logs, entry].slice(-MAX_LOG_ENTRIES);
-  notifySidePanel({ type: "AGENT_LOG", entry } satisfies BackgroundToSidePanelMessage);
+  notifySidePanel({
+    type: "AGENT_LOG",
+    entry,
+  } satisfies BackgroundToSidePanelMessage);
 }
 
 function appendChatMessage(
@@ -2565,16 +3346,20 @@ function appendChatMessage(
     kind,
     timestamp,
     runId,
-    responseTimeMs: role === "assistant"
-      ? getChatResponseTimeMs(chatMessages, runId, timestamp)
-      : undefined,
+    responseTimeMs:
+      role === "assistant"
+        ? getChatResponseTimeMs(chatMessages, runId, timestamp)
+        : undefined,
   };
 
   chatMessages = [...chatMessages, message].slice(-MAX_CHAT_MESSAGES);
   void enqueueChatMessagesSave(chatMessages).catch((error: unknown) => {
     console.warn("Could not persist chat messages.", error);
   });
-  notifySidePanel({ type: "AGENT_CHAT_MESSAGE", message } satisfies BackgroundToSidePanelMessage);
+  notifySidePanel({
+    type: "AGENT_CHAT_MESSAGE",
+    message,
+  } satisfies BackgroundToSidePanelMessage);
 }
 
 function enqueueChatMessagesSave(messages: AgentChatMessage[]): Promise<void> {
@@ -2592,7 +3377,11 @@ function enqueueChatMessagesClear(): Promise<void> {
   return chatMessageWriteQueue;
 }
 
-function reportTaskError(taskId: string, message: string, details?: string): void {
+function reportTaskError(
+  taskId: string,
+  message: string,
+  details?: string,
+): void {
   appendLog("error", message, details);
   appendChatMessage("assistant", message, "error", taskId);
 }
@@ -2608,7 +3397,10 @@ async function answerDirectChat(
   usageSnapshot = createEmptyUsageSnapshot(settings);
   emitUsage();
   emitStatus();
-  appendLog("info", "Answering a conversational request without browser access.");
+  appendLog(
+    "info",
+    "Answering a conversational request without browser access.",
+  );
 
   const messages: ChatMessage[] = [
     {
@@ -2621,10 +3413,12 @@ async function answerDirectChat(
         "The action text may contain Markdown.",
       ].join("\n"),
     },
-    ...priorMessages.map((message): ChatMessage => ({
-      role: message.role,
-      content: message.content,
-    })),
+    ...priorMessages.map(
+      (message): ChatMessage => ({
+        role: message.role,
+        content: message.content,
+      }),
+    ),
     { role: "user", content: instruction },
   ];
 
@@ -2634,16 +3428,27 @@ async function answerDirectChat(
     if (directChatTaskId !== taskId) {
       return;
     }
-    const doneAction = getPlannedActions(result.response).find((action) => action.type === "done");
+    const doneAction = getPlannedActions(result.response).find(
+      (action) => action.type === "done",
+    );
     const answer = doneAction?.text || result.response.thought_summary;
-    appendChatMessage("assistant", answer || "I could not produce an answer.", "answer", taskId);
+    appendChatMessage(
+      "assistant",
+      answer || "I could not produce an answer.",
+      "answer",
+      taskId,
+    );
     appendLog("success", "Conversational response sent to Chat.");
   } catch (error) {
     if (error instanceof ModelClientError && error.usage) {
       recordUsageEvent(error.usage, settings);
     }
     if (directChatTaskId === taskId) {
-      reportTaskError(taskId, getErrorMessage(error), formatModelErrorDetails(error));
+      reportTaskError(
+        taskId,
+        getErrorMessage(error),
+        formatModelErrorDetails(error),
+      );
     }
   } finally {
     if (directChatTaskId === taskId) {
@@ -2653,7 +3458,10 @@ async function answerDirectChat(
   }
 }
 
-function logPromptBeforeModelCall(step: number, messages: ReturnType<typeof buildAgentMessages>): void {
+function logPromptBeforeModelCall(
+  step: number,
+  messages: ReturnType<typeof buildAgentMessages>,
+): void {
   const safeMessages = sanitizeMessagesForLogging(messages);
   console.groupCollapsed(`[BYOK Agent] Prompt messages for step ${step}`);
   console.info({ messages: safeMessages });
@@ -2662,14 +3470,19 @@ function logPromptBeforeModelCall(step: number, messages: ReturnType<typeof buil
 }
 
 function isVisionUnsupportedError(error: unknown): boolean {
-  return error instanceof ModelClientError && /image|vision|multimodal|image_url|content.*array|unsupported.*content/i.test(error.message);
+  return (
+    error instanceof ModelClientError &&
+    /image|vision|multimodal|image_url|content.*array|unsupported.*content/i.test(
+      error.message,
+    )
+  );
 }
 
 function isHiddenActionLog(message: string): boolean {
   return (
     message.startsWith("Prompt sent to AI") ||
     /This page appears to be an assessment|Waiting for|model marked this action as high risk|This looks like a quiz|This looks like a payment/i.test(
-      message
+      message,
     )
   );
 }
@@ -2677,8 +3490,10 @@ function isHiddenActionLog(message: string): boolean {
 function emitStatus(): void {
   notifySidePanel({
     type: "AGENT_STATUS",
-    running: Boolean((runningSession && !runningSession.stopped) || directChatTaskId),
-    taskId: runningSession?.taskId || directChatTaskId
+    running: Boolean(
+      (runningSession && !runningSession.stopped) || directChatTaskId,
+    ),
+    taskId: runningSession?.taskId || directChatTaskId,
   } satisfies BackgroundToSidePanelMessage);
 }
 
@@ -2692,11 +3507,14 @@ function emitModelStatus(): void {
 function emitUsage(): void {
   notifySidePanel({
     type: "USAGE_UPDATE",
-    usage: usageSnapshot
+    usage: usageSnapshot,
   } satisfies BackgroundToSidePanelMessage);
 }
 
-function createEmptyUsageSnapshot(settings?: { provider: AgentUsageSnapshot["provider"]; model: string }): AgentUsageSnapshot {
+function createEmptyUsageSnapshot(settings?: {
+  provider: AgentUsageSnapshot["provider"];
+  model: string;
+}): AgentUsageSnapshot {
   return {
     requestCount: 0,
     successfulRequestCount: 0,
@@ -2708,15 +3526,18 @@ function createEmptyUsageSnapshot(settings?: { provider: AgentUsageSnapshot["pro
     totalLatencyMs: 0,
     costConfigured: false,
     provider: settings?.provider,
-    model: settings?.model
+    model: settings?.model,
   };
 }
 
-function recordUsageEvent(event: ModelUsageEvent, settings: {
-  inputTokenCostPerMillion?: number;
-  cachedInputTokenCostPerMillion?: number;
-  outputTokenCostPerMillion?: number;
-}): void {
+function recordUsageEvent(
+  event: ModelUsageEvent,
+  settings: {
+    inputTokenCostPerMillion?: number;
+    cachedInputTokenCostPerMillion?: number;
+    outputTokenCostPerMillion?: number;
+  },
+): void {
   const promptTokens = event.promptTokens || 0;
   const cachedPromptTokens = event.cachedPromptTokens || 0;
   const completionTokens = event.completionTokens || 0;
@@ -2724,13 +3545,16 @@ function recordUsageEvent(event: ModelUsageEvent, settings: {
   const requestCount = usageSnapshot.requestCount + 1;
   const totalLatencyMs = usageSnapshot.totalLatencyMs + event.elapsedMs;
   const estimatedEventCost = estimateUsageCost(event, settings);
-  const costConfigured = usageSnapshot.costConfigured || typeof estimatedEventCost === "number";
+  const costConfigured =
+    usageSnapshot.costConfigured || typeof estimatedEventCost === "number";
 
   usageSnapshot = {
     jev: usageSnapshot.jev,
     requestCount,
-    successfulRequestCount: usageSnapshot.successfulRequestCount + (event.ok ? 1 : 0),
-    cacheHitRequestCount: usageSnapshot.cacheHitRequestCount + (cachedPromptTokens > 0 ? 1 : 0),
+    successfulRequestCount:
+      usageSnapshot.successfulRequestCount + (event.ok ? 1 : 0),
+    cacheHitRequestCount:
+      usageSnapshot.cacheHitRequestCount + (cachedPromptTokens > 0 ? 1 : 0),
     promptTokens: usageSnapshot.promptTokens + promptTokens,
     cachedPromptTokens: usageSnapshot.cachedPromptTokens + cachedPromptTokens,
     completionTokens: usageSnapshot.completionTokens + completionTokens,
@@ -2746,7 +3570,7 @@ function recordUsageEvent(event: ModelUsageEvent, settings: {
     costConfigured,
     provider: event.provider,
     model: event.model,
-    updatedAt: event.timestamp
+    updatedAt: event.timestamp,
   };
 
   console.info("[BYOK Agent] Usage dashboard update:", usageSnapshot);
@@ -2764,31 +3588,42 @@ function estimateUsageCost(
     inputTokenCostPerMillion?: number;
     cachedInputTokenCostPerMillion?: number;
     outputTokenCostPerMillion?: number;
-  }
+  },
 ): number | undefined {
   const hasInputRate = typeof settings.inputTokenCostPerMillion === "number";
-  const hasCachedRate = typeof settings.cachedInputTokenCostPerMillion === "number";
+  const hasCachedRate =
+    typeof settings.cachedInputTokenCostPerMillion === "number";
   const hasOutputRate = typeof settings.outputTokenCostPerMillion === "number";
   if (!hasInputRate && !hasCachedRate && !hasOutputRate) {
     return undefined;
   }
 
   const promptTokens = event.promptTokens || 0;
-  const cachedPromptTokens = Math.min(event.cachedPromptTokens || 0, promptTokens);
+  const cachedPromptTokens = Math.min(
+    event.cachedPromptTokens || 0,
+    promptTokens,
+  );
   const uncachedPromptTokens = Math.max(0, promptTokens - cachedPromptTokens);
   const inputRate = settings.inputTokenCostPerMillion || 0;
-  const cachedInputRate = hasCachedRate ? settings.cachedInputTokenCostPerMillion || 0 : inputRate;
+  const cachedInputRate = hasCachedRate
+    ? settings.cachedInputTokenCostPerMillion || 0
+    : inputRate;
   const outputRate = settings.outputTokenCostPerMillion || 0;
 
   return (
-    uncachedPromptTokens * inputRate +
-    cachedPromptTokens * cachedInputRate +
-    (event.completionTokens || 0) * outputRate
-  ) / 1_000_000;
+    (uncachedPromptTokens * inputRate +
+      cachedPromptTokens * cachedInputRate +
+      (event.completionTokens || 0) * outputRate) /
+    1_000_000
+  );
 }
 
 function isStopped(taskId: string): boolean {
-  return !runningSession || runningSession.taskId !== taskId || runningSession.stopped;
+  return (
+    !runningSession ||
+    runningSession.taskId !== taskId ||
+    runningSession.stopped
+  );
 }
 
 function isSupportedTabUrl(url?: string): url is string {
@@ -2804,15 +3639,27 @@ function isSupportedTabUrl(url?: string): url is string {
   }
 }
 
-function getPlannedActions(modelResponse: AgentModelResponse): AgentAction[] {
-  const fallbackAction: AgentAction = { type: "done", text: "No action returned by the model." };
+function getPlannedActions(
+  modelResponse: AgentModelResponse,
+  maxActionsPerResponse?: number,
+): AgentAction[] {
+  const fallbackAction: AgentAction = {
+    type: "done",
+    text: "No action returned by the model.",
+  };
   const actions = modelResponse.actions?.length
     ? modelResponse.actions
     : modelResponse.action
       ? [modelResponse.action]
       : [fallbackAction];
 
-  return actions.slice(0, MAX_ACTIONS_PER_AGENT_STEP);
+  return actions.slice(
+    0,
+    normalizePositiveInteger(
+      maxActionsPerResponse,
+      DEFAULT_SETTINGS.maxActionsPerResponse!,
+    ),
+  );
 }
 
 function formatActions(actions: AgentAction[]): string {
@@ -2820,8 +3667,14 @@ function formatActions(actions: AgentAction[]): string {
     return formatAction(actions[0]);
   }
 
-  const visibleActions = actions.slice(0, MAX_ACTION_LOG_PREVIEW).map(formatAction).join(" -> ");
-  const suffix = actions.length > MAX_ACTION_LOG_PREVIEW ? ` -> ... (${actions.length - MAX_ACTION_LOG_PREVIEW} more)` : "";
+  const visibleActions = actions
+    .slice(0, MAX_ACTION_LOG_PREVIEW)
+    .map(formatAction)
+    .join(" -> ");
+  const suffix =
+    actions.length > MAX_ACTION_LOG_PREVIEW
+      ? ` -> ... (${actions.length - MAX_ACTION_LOG_PREVIEW} more)`
+      : "";
   return `${actions.length} actions: ${visibleActions}${suffix}`;
 }
 
@@ -2845,7 +3698,9 @@ function formatAction(action: AgentAction): string {
     return "inspect screenshot";
   }
   if (action.type === "summarize_pdf") {
-    return action.downloadId ? `summarize PDF download #${action.downloadId}` : `summarize PDF ${action.url || action.fileId || ""}`.trim();
+    return action.downloadId
+      ? `summarize PDF download #${action.downloadId}`
+      : `summarize PDF ${action.url || action.fileId || ""}`.trim();
   }
   if (action.type === "list_downloads") {
     return "list downloads";
@@ -2898,15 +3753,28 @@ function formatAction(action: AgentAction): string {
   return action.type;
 }
 
-function formatActionResult(index: number, total: number, message: string): string {
+function formatActionResult(
+  index: number,
+  total: number,
+  message: string,
+): string {
   return total > 1 ? `[${index + 1}/${total}] ${message}` : message;
 }
 
-function formatCompletedAction(index: number, action: AgentAction, message: string, status: "done" | "skipped"): string {
+function formatCompletedAction(
+  index: number,
+  action: AgentAction,
+  message: string,
+  status: "done" | "skipped",
+): string {
   return `${index + 1}. ${status}: ${formatAction(action)} -> ${message}`;
 }
 
-function formatActionFailure(index: number, action: AgentAction, message: string): string {
+function formatActionFailure(
+  index: number,
+  action: AgentAction,
+  message: string,
+): string {
   return `${index + 1}. failed: ${formatAction(action)} -> ${message}`;
 }
 
@@ -2914,21 +3782,30 @@ function buildPreviousResultForModel(result: ActionLoopResult): string {
   const parts = [
     `Last browser execution result: ${result.message}`,
     formatCompletedActionsForModel(result.completedActions),
-    result.failedAction ? `Action needing correction: ${result.failedAction}` : "",
+    result.failedAction
+      ? `Action needing correction: ${result.failedAction}`
+      : "",
     result.recoverable
       ? "Recovery note: the page was re-observed after the issue. Continue from the current observation, do not retry stale or non-editable element IDs, use the focused or empty fillable control when available, and do not repeat completed actions."
       : "",
-    result.lastObservation ? formatObservationProgress(result.lastObservation) : ""
+    result.lastObservation
+      ? formatObservationProgress(result.lastObservation)
+      : "",
   ].filter(Boolean);
 
   return parts.join("\n");
 }
 
-function buildModelErrorProgress(previousResult: string | undefined, errorMessage: string): string {
+function buildModelErrorProgress(
+  previousResult: string | undefined,
+  errorMessage: string,
+): string {
   return [
-    previousResult ? `Progress before invalid model JSON:\n${previousResult}` : "",
+    previousResult
+      ? `Progress before invalid model JSON:\n${previousResult}`
+      : "",
     `The last AI response could not be used: ${errorMessage}`,
-    "Return valid strict JSON using action or actions, and continue from the current page observation without repeating completed actions."
+    "Return valid strict JSON using action or actions, and continue from the current page observation without repeating completed actions.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -2939,22 +3816,31 @@ function formatCompletedActionsForModel(completedActions: string[]): string {
     return "";
   }
 
-  const hiddenCount = Math.max(0, completedActions.length - MAX_PROGRESS_LINES_FOR_PROMPT);
+  const hiddenCount = Math.max(
+    0,
+    completedActions.length - MAX_PROGRESS_LINES_FOR_PROMPT,
+  );
   const visibleActions = completedActions.slice(-MAX_PROGRESS_LINES_FOR_PROMPT);
-  const prefix = hiddenCount ? `Completed actions before this AI call (${hiddenCount} earlier omitted, latest shown):` : "Completed actions before this AI call:";
+  const prefix = hiddenCount
+    ? `Completed actions before this AI call (${hiddenCount} earlier omitted, latest shown):`
+    : "Completed actions before this AI call:";
   return [prefix, ...visibleActions.map((action) => `- ${action}`)].join("\n");
 }
 
 function formatObservationProgress(observation: PageObservation): string {
-  const focusedElement = observation.elements.find((element) => element.isFocused);
+  const focusedElement = observation.elements.find(
+    (element) => element.isFocused,
+  );
   const filledElements = observation.elements
     .filter(hasCompletedControlValue)
     .slice(0, 8)
     .map(
       (element) =>
         `${element.id}${element.questionNumber ? ` problem=${element.questionNumber}` : ""} ${
-          element.value ? `value=${element.value}` : `checkedState=${element.checkedState}`
-        }`
+          element.value
+            ? `value=${element.value}`
+            : `checkedState=${element.checkedState}`
+        }`,
     );
 
   return [
@@ -2962,19 +3848,29 @@ function formatObservationProgress(observation: PageObservation): string {
     observation.viewport
       ? `Viewport after execution: scrollY=${observation.viewport.scrollY}, pageProgress=${observation.viewport.progressPercent}%`
       : "",
-    focusedElement ? `Focused element after execution: ${focusedElement.id} ${focusedElement.label || focusedElement.text || focusedElement.tag}` : "",
-    filledElements.length ? `Visible filled fields after execution: ${filledElements.join(" | ")}` : ""
+    focusedElement
+      ? `Focused element after execution: ${focusedElement.id} ${focusedElement.label || focusedElement.text || focusedElement.tag}`
+      : "",
+    filledElements.length
+      ? `Visible filled fields after execution: ${filledElements.join(" | ")}`
+      : "",
   ]
     .filter(Boolean)
     .join("\n");
 }
 
-function hasCompletedControlValue(element: PageObservation["elements"][number]): boolean {
+function hasCompletedControlValue(
+  element: PageObservation["elements"][number],
+): boolean {
   if (element.checkedState) {
-    return element.checkedState === "checked" || element.checkedState === "mixed";
+    return (
+      element.checkedState === "checked" || element.checkedState === "mixed"
+    );
   }
 
-  return Boolean(element.value && !/\bunchecked\)?$/i.test(element.value.trim()));
+  return Boolean(
+    element.value && !/\bunchecked\)?$/i.test(element.value.trim()),
+  );
 }
 
 function getPostBatchDelay(actions: AgentAction[]): number {
@@ -3016,7 +3912,11 @@ interface DuplicateInputAction {
   message: string;
 }
 
-function getDuplicateInputAction(action: AgentAction, completedInputActions: Set<string>, tabAlias: string): DuplicateInputAction | undefined {
+function getDuplicateInputAction(
+  action: AgentAction,
+  completedInputActions: Set<string>,
+  tabAlias: string,
+): DuplicateInputAction | undefined {
   const key = getInputActionKey(action, tabAlias);
   if (!key || !completedInputActions.has(key)) {
     return undefined;
@@ -3051,17 +3951,26 @@ function getDuplicateInputAction(action: AgentAction, completedInputActions: Set
   };
 }
 
-function rememberCompletedInputAction(action: AgentAction, completedInputActions: Set<string>, tabAlias: string): void {
+function rememberCompletedInputAction(
+  action: AgentAction,
+  completedInputActions: Set<string>,
+  tabAlias: string,
+): void {
   const key = getInputActionKey(action, tabAlias);
   if (key) {
     completedInputActions.add(key);
   }
 }
 
-function getInputActionKey(action: AgentAction, tabAlias: string): string | undefined {
+function getInputActionKey(
+  action: AgentAction,
+  tabAlias: string,
+): string | undefined {
   const prefix = `${tabAlias}:${action.guard?.documentId || "unguarded"}:`;
   if (action.type === "multi_click") {
-    return action.elementIds?.length ? `${prefix}multi_click:${[...action.elementIds].sort().join(",")}` : undefined;
+    return action.elementIds?.length
+      ? `${prefix}multi_click:${[...action.elementIds].sort().join(",")}`
+      : undefined;
   }
 
   if (action.type === "multi_drag") {
@@ -3071,14 +3980,23 @@ function getInputActionKey(action: AgentAction, tabAlias: string): string | unde
   }
 
   if (action.type === "drag") {
-    return action.elementId && action.targetElementId ? `${prefix}drag:${action.elementId}->${action.targetElementId}` : undefined;
+    return action.elementId && action.targetElementId
+      ? `${prefix}drag:${action.elementId}->${action.targetElementId}`
+      : undefined;
   }
 
   if (action.type === "upload_file") {
-    return action.elementId ? `${prefix}upload_file:${action.elementId}:${action.fileId || "staged"}` : undefined;
+    return action.elementId
+      ? `${prefix}upload_file:${action.elementId}:${action.fileId || "staged"}`
+      : undefined;
   }
 
-  if ((action.type !== "fill" && action.type !== "type" && action.type !== "select") || !action.elementId) {
+  if (
+    (action.type !== "fill" &&
+      action.type !== "type" &&
+      action.type !== "select") ||
+    !action.elementId
+  ) {
     return undefined;
   }
 

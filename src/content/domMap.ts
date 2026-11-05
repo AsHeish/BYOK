@@ -7,8 +7,7 @@ import type {
   PageObservation,
 } from "../shared/types";
 
-const MAX_DOM_ELEMENTS = 80;
-const MAX_PAGE_TEXT_CHARS = 10000;
+let observationTextChars = 4000 * 4;
 const MAX_ELEMENT_CONTEXT_CHARS = 900;
 const MAX_DOM_ROOTS = 30;
 const MAX_FRAME_DEPTH = 2;
@@ -33,13 +32,13 @@ const READABLE_TEXT_SELECTOR = [
   "summary",
   "td",
   "th",
-  "div"
+  "div",
 ].join(",");
 
 const textEditableSelector = [
   "input:not([type='hidden']):not([type='button']):not([type='submit']):not([type='reset']):not([type='checkbox']):not([type='radio']):not([type='file'])",
   "textarea",
-  "[contenteditable='true']"
+  "[contenteditable='true']",
 ].join(",");
 
 const dragDropSelector = [
@@ -60,7 +59,7 @@ const dragDropSelector = [
   "[class*='drop']",
   "[class*='Drop']",
   "[class*='sortable']",
-  "[class*='Sortable']"
+  "[class*='Sortable']",
 ].join(",");
 
 const interactiveSelector = [
@@ -88,12 +87,15 @@ const interactiveSelector = [
   ".MuiFormControl-root",
   ".MuiAutocomplete-root",
   ".MuiSelect-root",
-  dragDropSelector
+  dragDropSelector,
 ].join(",");
 
 const weakIds = new WeakMap<Element, string>();
 const frameIds = new WeakMap<Element, string>();
-const elementContexts = new WeakMap<Element, Pick<DomElementInfo, "frameContext" | "rootContext">>();
+const elementContexts = new WeakMap<
+  Element,
+  Pick<DomElementInfo, "frameContext" | "rootContext">
+>();
 const currentElements = new Map<string, HTMLElement>();
 const currentElementInfo = new Map<string, DomElementInfo>();
 const historicalElementInfo = new Map<string, DomElementInfo>();
@@ -126,7 +128,14 @@ type HtmlConstructorName =
   | "HTMLAnchorElement"
   | "HTMLLabelElement";
 
-export function observePage(): PageObservation {
+export function observePage(observationTokenLimit?: number): PageObservation {
+  if (observationTokenLimit !== undefined) {
+    const numericLimit = Number(observationTokenLimit);
+    observationTextChars =
+      (Number.isFinite(numericLimit) && numericLimit >= 1
+        ? Math.floor(numericLimit)
+        : 4000) * 4;
+  }
   currentElements.clear();
   currentElementInfo.clear();
 
@@ -134,43 +143,78 @@ export function observePage(): PageObservation {
   const interactiveElements = getCandidateInteractiveElements(contexts)
     .filter(isVisibleElement)
     .sort(compareElementsForCurrentViewport);
-  const elements = interactiveElements
-    .slice(0, MAX_DOM_ELEMENTS)
-    .map(toElementInfo);
-  const privateValues = queryAllInContexts(contexts, "input,textarea,[contenteditable='true']")
+  const elements = interactiveElements.map(toElementInfo);
+  const privateValues = queryAllInContexts(
+    contexts,
+    "input,textarea,[contenteditable='true']",
+  )
     .filter(isSensitiveElement)
-    .map((element) => "value" in element ? String(element.value || "") : element.textContent || "")
+    .map((element) =>
+      "value" in element
+        ? String(element.value || "")
+        : element.textContent || "",
+    )
     .filter((value) => value.length > 0);
-  const redact = (text: string) => privateValues.reduce((value, secret) => value.split(secret).join("[redacted]"), text);
+  const redact = (text: string) =>
+    privateValues.reduce(
+      (value, secret) => value.split(secret).join("[redacted]"),
+      text,
+    );
 
   return {
     documentId,
     formState: getFormStateFingerprint(),
-    isLoading: document.readyState !== "complete" || queryAllInContexts(contexts, '[aria-busy="true"],[role="progressbar"]').some(isVisibleElement),
+    isLoading:
+      document.readyState !== "complete" ||
+      queryAllInContexts(
+        contexts,
+        '[aria-busy="true"],[role="progressbar"]',
+      ).some(isVisibleElement),
     url: location.href,
     title: redact(document.title),
     text: redact(getReadableText(contexts)),
-    elements: elements.map((element) => Object.fromEntries(Object.entries(element).map(([key, value]) => [key,
-      key === "id" || key === "fingerprint" ? value : typeof value === "string" ? redact(value) : Array.isArray(value) ? value.map(redact) : value,
-    ])) as unknown as DomElementInfo),
+    elements: elements.map(
+      (element) =>
+        Object.fromEntries(
+          Object.entries(element).map(([key, value]) => [
+            key,
+            key === "id" || key === "fingerprint"
+              ? value
+              : typeof value === "string"
+                ? redact(value)
+                : Array.isArray(value)
+                  ? value.map(redact)
+                  : value,
+          ]),
+        ) as unknown as DomElementInfo,
+    ),
     interactiveElementCount: interactiveElements.length,
     viewport: getViewportInfo(contexts),
-    frames: contexts.frames
+    frames: contexts.frames,
   };
 }
 
-export function checkWaitCondition(request: ContentWaitCheckRequest): ContentWaitCheckResult {
-  const bodyText = request.condition === "text_present" || request.condition === "text_absent"
-    ? normalizeText(document.body?.innerText || document.body?.textContent || "").toLowerCase()
-    : "";
+export function checkWaitCondition(
+  request: ContentWaitCheckRequest,
+): ContentWaitCheckResult {
+  const bodyText =
+    request.condition === "text_present" || request.condition === "text_absent"
+      ? normalizeText(
+          document.body?.innerText || document.body?.textContent || "",
+        ).toLowerCase()
+      : "";
   const expectedText = normalizeText(request.text || "").toLowerCase();
-  const element = request.elementId ? getMappedElement(request.elementId) : undefined;
+  const element = request.elementId
+    ? getMappedElement(request.elementId)
+    : undefined;
   const matched = (() => {
     switch (request.condition) {
       case "document_ready":
         return document.readyState === "complete";
       case "url_changed":
-        return Boolean(request.baselineUrl && location.href !== request.baselineUrl);
+        return Boolean(
+          request.baselineUrl && location.href !== request.baselineUrl,
+        );
       case "text_present":
         return Boolean(expectedText && bodyText.includes(expectedText));
       case "text_absent":
@@ -178,7 +222,9 @@ export function checkWaitCondition(request: ContentWaitCheckRequest): ContentWai
       case "element_hidden":
         return !element || !isVisibleElement(element);
       case "element_enabled":
-        return Boolean(element && isVisibleElement(element) && !isDisabled(element));
+        return Boolean(
+          element && isVisibleElement(element) && !isDisabled(element),
+        );
       case "dom_stable":
         return false;
     }
@@ -195,14 +241,19 @@ export function checkWaitCondition(request: ContentWaitCheckRequest): ContentWai
 function buildDomStabilitySignature(): string {
   const contexts = collectDomContexts();
   const text = contexts.roots
-    .map((context) => normalizeText(
-      isDocumentRoot(context.root)
-        ? context.root.body?.innerText || context.root.body?.textContent || ""
-        : context.root.textContent || "",
-    ))
+    .map((context) =>
+      normalizeText(
+        isDocumentRoot(context.root)
+          ? context.root.body?.innerText || context.root.body?.textContent || ""
+          : context.root.textContent || "",
+      ),
+    )
     .join("|")
     .slice(0, 8_000);
-  const controls = queryAllInContexts(contexts, "input,textarea,select,button").slice(0, 200);
+  const controls = queryAllInContexts(
+    contexts,
+    "input,textarea,select,button",
+  ).slice(0, 200);
   const controlState = controls
     .slice(0, 200)
     .map((element) => {
@@ -224,10 +275,16 @@ function buildDomStabilitySignature(): string {
     location.href,
     document.readyState,
     contexts.roots.length,
-    contexts.roots.reduce((count, context) => count + queryRoot(context.root, "*").length, 0),
+    contexts.roots.reduce(
+      (count, context) => count + queryRoot(context.root, "*").length,
+      0,
+    ),
     text.length,
     hashText(text),
-    queryAllInContexts(contexts, "input,textarea,select,button,a[href],[role='button'],[role='textbox']").length,
+    queryAllInContexts(
+      contexts,
+      "input,textarea,select,button,a[href],[role='button'],[role='textbox']",
+    ).length,
     hashText(controlState),
     hashText(JSON.stringify(contexts.frames)),
   ].join(":");
@@ -242,37 +299,69 @@ function hashText(value: string): string {
   return (hash >>> 0).toString(36);
 }
 
-function getViewportInfo(contexts: DomContextCollection): PageObservation["viewport"] {
+function getViewportInfo(
+  contexts: DomContextCollection,
+): PageObservation["viewport"] {
   const container = findScrollContainer(lastScrollDirection, contexts);
   const owner = container.ownerDocument;
   const view = owner.defaultView || window;
   const root = container === (owner.scrollingElement || owner.documentElement);
-  const viewportWidth = root ? view.innerWidth || container.clientWidth : container.clientWidth;
-  const viewportHeight = root ? view.innerHeight || container.clientHeight : container.clientHeight;
-  const pageWidth = Math.max(container.scrollWidth, root ? owner.body?.scrollWidth || 0 : 0, viewportWidth);
-  const pageHeight = Math.max(container.scrollHeight, root ? owner.body?.scrollHeight || 0 : 0, viewportHeight);
-  const scrollX = Math.max(0, Math.round(container.scrollLeft || (root ? view.scrollX : 0) || 0));
-  const scrollY = Math.max(0, Math.round(container.scrollTop || (root ? view.scrollY : 0) || 0));
+  const viewportWidth = root
+    ? view.innerWidth || container.clientWidth
+    : container.clientWidth;
+  const viewportHeight = root
+    ? view.innerHeight || container.clientHeight
+    : container.clientHeight;
+  const pageWidth = Math.max(
+    container.scrollWidth,
+    root ? owner.body?.scrollWidth || 0 : 0,
+    viewportWidth,
+  );
+  const pageHeight = Math.max(
+    container.scrollHeight,
+    root ? owner.body?.scrollHeight || 0 : 0,
+    viewportHeight,
+  );
+  const scrollX = Math.max(
+    0,
+    Math.round(container.scrollLeft || (root ? view.scrollX : 0) || 0),
+  );
+  const scrollY = Math.max(
+    0,
+    Math.round(container.scrollTop || (root ? view.scrollY : 0) || 0),
+  );
   const maxScrollableY = Math.max(0, pageHeight - viewportHeight);
   return {
     scrollContainerId: getOrCreateElementId(container),
-    scrollContainerLabel: root ? "document" : container.getAttribute("aria-label") || container.id || container.getAttribute("role") || container.tagName.toLowerCase(),
+    scrollContainerLabel: root
+      ? "document"
+      : container.getAttribute("aria-label") ||
+        container.id ||
+        container.getAttribute("role") ||
+        container.tagName.toLowerCase(),
     scrollX,
     scrollY,
     viewportWidth: Math.round(viewportWidth),
     viewportHeight: Math.round(viewportHeight),
     pageWidth: Math.round(pageWidth),
     pageHeight: Math.round(pageHeight),
-    progressPercent: maxScrollableY ? Math.min(100, Math.max(0, Math.round(scrollY / maxScrollableY * 100))) : 100,
+    progressPercent: maxScrollableY
+      ? Math.min(100, Math.max(0, Math.round((scrollY / maxScrollableY) * 100)))
+      : 100,
   };
 }
 
-export function getScrollContainer(direction: "up" | "down" | "left" | "right"): HTMLElement {
+export function getScrollContainer(
+  direction: "up" | "down" | "left" | "right",
+): HTMLElement {
   lastScrollDirection = direction;
   return findScrollContainer(direction, collectDomContexts());
 }
 
-function findScrollContainer(direction: "up" | "down" | "left" | "right", contexts: DomContextCollection): HTMLElement {
+function findScrollContainer(
+  direction: "up" | "down" | "left" | "right",
+  contexts: DomContextCollection,
+): HTMLElement {
   const horizontal = direction === "left" || direction === "right";
   const candidates = queryAllInContexts(contexts, "*");
   let best: { element: HTMLElement; score: number } | undefined;
@@ -280,27 +369,58 @@ function findScrollContainer(direction: "up" | "down" | "left" | "right", contex
     const owner = element.ownerDocument;
     const view = owner.defaultView || window;
     const root = element === (owner.scrollingElement || owner.documentElement);
-    const size = root ? horizontal ? view.innerWidth : view.innerHeight : horizontal ? element.clientWidth : element.clientHeight;
-    const extent = horizontal ? Math.max(element.scrollWidth, root ? owner.body?.scrollWidth || 0 : 0)
-      : Math.max(element.scrollHeight, root ? owner.body?.scrollHeight || 0 : 0);
+    const size = root
+      ? horizontal
+        ? view.innerWidth
+        : view.innerHeight
+      : horizontal
+        ? element.clientWidth
+        : element.clientHeight;
+    const extent = horizontal
+      ? Math.max(element.scrollWidth, root ? owner.body?.scrollWidth || 0 : 0)
+      : Math.max(
+          element.scrollHeight,
+          root ? owner.body?.scrollHeight || 0 : 0,
+        );
     if (size <= 0 || extent <= size + 1) continue;
     const style = view.getComputedStyle(element);
-    const overflow = horizontal ? style.overflowX || style.overflow : style.overflowY || style.overflow;
+    const overflow = horizontal
+      ? style.overflowX || style.overflow
+      : style.overflowY || style.overflow;
     if (!root && !/^(auto|scroll|overlay)$/.test(overflow)) continue;
     if (root && /^(hidden|clip)$/.test(overflow)) continue;
     const area = visibleScrollArea(element);
     if (!area) continue;
-    const focused = !root && owner.activeElement && owner.activeElement !== owner.body && element.contains(owner.activeElement);
-    const dialog = element.closest('dialog[open],[role="dialog"],[aria-modal="true"]');
-    const score = area + (focused ? view.innerWidth * view.innerHeight : 0) + (dialog ? view.innerWidth * view.innerHeight * 2 : 0);
+    const focused =
+      !root &&
+      owner.activeElement &&
+      owner.activeElement !== owner.body &&
+      element.contains(owner.activeElement);
+    const dialog = element.closest(
+      'dialog[open],[role="dialog"],[aria-modal="true"]',
+    );
+    const score =
+      area +
+      (focused ? view.innerWidth * view.innerHeight : 0) +
+      (dialog ? view.innerWidth * view.innerHeight * 2 : 0);
     if (!best || score > best.score) best = { element, score };
   }
-  return best?.element || (document.scrollingElement as HTMLElement | null) || document.documentElement;
+  return (
+    best?.element ||
+    (document.scrollingElement as HTMLElement | null) ||
+    document.documentElement
+  );
 }
 
 function visibleScrollArea(element: HTMLElement): number {
   const view = element.ownerDocument.defaultView;
-  if (!view || !element.isConnected || !isVisibleElement(element) || element.closest('[hidden],[inert],[aria-hidden="true"]')) return 0;
+  if (
+    !view ||
+    !element.isConnected ||
+    !isVisibleElement(element) ||
+    element.closest('[hidden],[inert],[aria-hidden="true"]')
+  )
+    return 0;
   const rect = element.getBoundingClientRect();
   let left = Math.max(rect.left, 0);
   let top = Math.max(rect.top, 0);
@@ -357,7 +477,7 @@ function collectDomContexts(): DomContextCollection {
           frameContext: context.frameContext,
           rootContext: `${context.rootContext} > shadow:${describeRootHost(element)}`,
           frameDepth: context.frameDepth,
-          shadowDepth: context.shadowDepth + 1
+          shadowDepth: context.shadowDepth + 1,
         });
       }
 
@@ -376,7 +496,7 @@ function collectDomContexts(): DomContextCollection {
             id: frameId,
             title: frameDocument.title || undefined,
             url: frameUrl || undefined,
-            accessible: true
+            accessible: true,
           });
 
           addRoot({
@@ -384,14 +504,14 @@ function collectDomContexts(): DomContextCollection {
             frameContext: frameLabel,
             rootContext: `iframe:${frameId}`,
             frameDepth: context.frameDepth + 1,
-            shadowDepth: 0
+            shadowDepth: 0,
           });
         } catch {
           frames.push({
             id: frameId,
             url: frameSrc || undefined,
             accessible: false,
-            reason: "cross-origin or inaccessible iframe"
+            reason: "cross-origin or inaccessible iframe",
           });
         }
       }
@@ -402,13 +522,16 @@ function collectDomContexts(): DomContextCollection {
     root: document,
     rootContext: "document",
     frameDepth: 0,
-    shadowDepth: 0
+    shadowDepth: 0,
   });
 
   return { roots: contexts, frames };
 }
 
-function queryAllInContexts(contexts: DomContextCollection, selector: string): HTMLElement[] {
+function queryAllInContexts(
+  contexts: DomContextCollection,
+  selector: string,
+): HTMLElement[] {
   const elements: HTMLElement[] = [];
   for (const context of contexts.roots) {
     for (const element of queryRoot(context.root, selector)) {
@@ -427,18 +550,25 @@ function queryRoot(root: QueryRoot, selector: string): HTMLElement[] {
   }
 }
 
-function rememberElementContext(element: HTMLElement, context: DomRootContext): void {
+function rememberElementContext(
+  element: HTMLElement,
+  context: DomRootContext,
+): void {
   elementContexts.set(element, {
     frameContext: context.frameContext,
-    rootContext: context.rootContext
+    rootContext: context.rootContext,
   });
 }
 
-function getElementContext(element: HTMLElement): Pick<DomElementInfo, "frameContext" | "rootContext"> {
-  return elementContexts.get(element) || {
-    frameContext: getFrameContextFromOwnerDocument(element),
-    rootContext: getRootContextFromElement(element)
-  };
+function getElementContext(
+  element: HTMLElement,
+): Pick<DomElementInfo, "frameContext" | "rootContext"> {
+  return (
+    elementContexts.get(element) || {
+      frameContext: getFrameContextFromOwnerDocument(element),
+      rootContext: getRootContextFromElement(element),
+    }
+  );
 }
 
 function describeRootHost(element: HTMLElement): string {
@@ -449,7 +579,9 @@ function describeRootHost(element: HTMLElement): string {
   return `${tag}${id}${roleLabel}`;
 }
 
-function getFrameContextFromOwnerDocument(element: HTMLElement): string | undefined {
+function getFrameContextFromOwnerDocument(
+  element: HTMLElement,
+): string | undefined {
   const ownerWindow = element.ownerDocument.defaultView;
   if (!ownerWindow || ownerWindow === window) {
     return undefined;
@@ -467,7 +599,9 @@ function getRootContextFromElement(element: HTMLElement): string {
   if (isShadowRoot(root)) {
     return `shadow:${describeRootHost(root.host as HTMLElement)}`;
   }
-  return getFrameContextFromOwnerDocument(element) ? "iframe document" : "document";
+  return getFrameContextFromOwnerDocument(element)
+    ? "iframe document"
+    : "document";
 }
 
 function getOrCreateFrameId(element: Element): string {
@@ -494,7 +628,9 @@ function getFrameDocumentUrl(frameDocument: Document): string {
   }
 }
 
-function getCandidateInteractiveElements(contexts = collectDomContexts()): HTMLElement[] {
+function getCandidateInteractiveElements(
+  contexts = collectDomContexts(),
+): HTMLElement[] {
   const candidates = new Set<HTMLElement>();
 
   for (const element of queryAllInContexts(contexts, interactiveSelector)) {
@@ -514,7 +650,10 @@ function getCandidateInteractiveElements(contexts = collectDomContexts()): HTMLE
     }
   }
 
-  for (const dragOrDropElement of queryAllInContexts(contexts, dragDropSelector)) {
+  for (const dragOrDropElement of queryAllInContexts(
+    contexts,
+    dragDropSelector,
+  )) {
     if (isVisibleElement(dragOrDropElement)) {
       candidates.add(dragOrDropElement);
     }
@@ -532,26 +671,64 @@ export function getDocumentId(): string {
 }
 
 export function getFormStateFingerprint(): string {
-  const controls = queryAllInContexts(collectDomContexts(), "input,textarea,select,[contenteditable='true']")
-    .filter((element) => !isSensitiveElement(element));
-  return hashText(JSON.stringify(controls.map((element) => [getOrCreateElementId(element), getSafeValue(element), getCheckedState(element),
-    isDisabled(element), element.getAttribute("readonly"), element.getAttribute("aria-readonly")])));
+  const controls = queryAllInContexts(
+    collectDomContexts(),
+    "input,textarea,select,[contenteditable='true']",
+  ).filter((element) => !isSensitiveElement(element));
+  return hashText(
+    JSON.stringify(
+      controls.map((element) => [
+        getOrCreateElementId(element),
+        getSafeValue(element),
+        getCheckedState(element),
+        isDisabled(element),
+        element.getAttribute("readonly"),
+        element.getAttribute("aria-readonly"),
+      ]),
+    ),
+  );
 }
 
 export function getElementFingerprint(element: HTMLElement): string {
-  const scope = element.closest("form,dialog,[role='dialog'],li,tr,[role='row']") || element.parentElement;
-  return String(hashText(JSON.stringify([
-    getOrCreateElementId(element), element.tagName, element.getAttribute("role"), getElementLabel(element),
-    getElementText(element), isSensitiveElement(element) ? undefined : getSafeValue(element), getCheckedState(element),
-    element.getAttribute("href"), element.getAttribute("type"), element.getAttribute("aria-expanded"),
-    element.getAttribute("aria-selected"), element.getAttribute("readonly"), element.getAttribute("aria-readonly"),
-    isDisabled(element), scope?.textContent?.slice(0, 1_000),
-    isSelectElement(element) ? Array.from(element.options).map((option) => [option.value, option.text, option.disabled, option.selected]) : undefined,
-  ])));
+  const scope =
+    element.closest("form,dialog,[role='dialog'],li,tr,[role='row']") ||
+    element.parentElement;
+  return String(
+    hashText(
+      JSON.stringify([
+        getOrCreateElementId(element),
+        element.tagName,
+        element.getAttribute("role"),
+        getElementLabel(element),
+        getElementText(element),
+        isSensitiveElement(element) ? undefined : getSafeValue(element),
+        getCheckedState(element),
+        element.getAttribute("href"),
+        element.getAttribute("type"),
+        element.getAttribute("aria-expanded"),
+        element.getAttribute("aria-selected"),
+        element.getAttribute("readonly"),
+        element.getAttribute("aria-readonly"),
+        isDisabled(element),
+        scope?.textContent?.slice(0, 1_000),
+        isSelectElement(element)
+          ? Array.from(element.options).map((option) => [
+              option.value,
+              option.text,
+              option.disabled,
+              option.selected,
+            ])
+          : undefined,
+      ]),
+    ),
+  );
 }
 
-export function findMappedElementReplacement(elementId: string): HTMLElement | undefined {
-  const snapshot = currentElementInfo.get(elementId) || historicalElementInfo.get(elementId);
+export function findMappedElementReplacement(
+  elementId: string,
+): HTMLElement | undefined {
+  const snapshot =
+    currentElementInfo.get(elementId) || historicalElementInfo.get(elementId);
   if (!snapshot) {
     return undefined;
   }
@@ -564,8 +741,12 @@ export function findMappedElementReplacement(elementId: string): HTMLElement | u
   }
 
   const contexts = collectDomContexts();
-  let bestMatch: { element: HTMLElement; score: number; tiedMatches: number } | undefined;
-  for (const candidate of getCandidateInteractiveElements(contexts).filter(isVisibleElement)) {
+  let bestMatch:
+    | { element: HTMLElement; score: number; tiedMatches: number }
+    | undefined;
+  for (const candidate of getCandidateInteractiveElements(contexts).filter(
+    isVisibleElement,
+  )) {
     if (isDisabled(candidate)) {
       continue;
     }
@@ -579,7 +760,11 @@ export function findMappedElementReplacement(elementId: string): HTMLElement | u
   }
 
   const minimumScore = snapshot.context || snapshot.questionNumber ? 12 : 8;
-  return bestMatch && bestMatch.score >= minimumScore && bestMatch.tiedMatches === 1 ? bestMatch.element : undefined;
+  return bestMatch &&
+    bestMatch.score >= minimumScore &&
+    bestMatch.tiedMatches === 1
+    ? bestMatch.element
+    : undefined;
 }
 
 export function extractPageData(): ExtractedPageData {
@@ -594,14 +779,16 @@ export function extractPageData(): ExtractedPageData {
     links: queryAllInContexts(contexts, "a[href]")
       .filter(isVisibleElement)
       .map((link) => ({
-        text: normalizeText(link.innerText || link.textContent || getElementHref(link) || ""),
-        href: getElementHref(link) || ""
+        text: normalizeText(
+          link.innerText || link.textContent || getElementHref(link) || "",
+        ),
+        href: getElementHref(link) || "",
       }))
       .filter((link) => link.text || link.href)
       .slice(0, 80),
     tables: extractTables(contexts),
     forms: extractForms(contexts),
-    text: getReadableText(contexts)
+    text: getReadableText(contexts),
   };
 }
 
@@ -625,7 +812,10 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
     fingerprint: getElementFingerprint(element),
     tag,
     frameContext: elementContext.frameContext,
-    rootContext: elementContext.rootContext === "document" ? undefined : elementContext.rootContext,
+    rootContext:
+      elementContext.rootContext === "document"
+        ? undefined
+        : elementContext.rootContext,
     role: element.getAttribute("role") || implicitRole(element),
     type: input?.type || (isButtonElement(element) ? element.type : undefined),
     text: sensitive ? undefined : getElementText(element),
@@ -638,15 +828,31 @@ function toElementInfo(element: HTMLElement): DomElementInfo {
     value: sensitive ? undefined : getSafeValue(element),
     checkedState: getCheckedState(element),
     href: isAnchorElement(element) ? element.href : undefined,
-    options: nestedSelect ? Array.from(nestedSelect.options).filter((option) => !option.disabled && !option.closest("optgroup[disabled]")).map((option) => option.text || option.value).slice(0, 30) : undefined,
+    options: nestedSelect
+      ? Array.from(nestedSelect.options)
+          .filter(
+            (option) =>
+              !option.disabled && !option.closest("optgroup[disabled]"),
+          )
+          .map((option) => option.text || option.value)
+          .slice(0, 30)
+      : undefined,
     isDraggable: isDraggable || undefined,
     isDropTarget: isDropTarget || undefined,
     isFocused: isElementFocused(element),
-    isExpanded: element.hasAttribute("aria-expanded") ? element.getAttribute("aria-expanded") === "true" : undefined,
-    isSelected: element.hasAttribute("aria-selected") ? element.getAttribute("aria-selected") === "true" : undefined,
-    isReadOnly: element.hasAttribute("readonly") || element.getAttribute("aria-readonly") === "true" || nestedInput?.hasAttribute("readonly") || undefined,
+    isExpanded: element.hasAttribute("aria-expanded")
+      ? element.getAttribute("aria-expanded") === "true"
+      : undefined,
+    isSelected: element.hasAttribute("aria-selected")
+      ? element.getAttribute("aria-selected") === "true"
+      : undefined,
+    isReadOnly:
+      element.hasAttribute("readonly") ||
+      element.getAttribute("aria-readonly") === "true" ||
+      nestedInput?.hasAttribute("readonly") ||
+      undefined,
     isDisabled: isDisabled(element),
-    isSensitive: sensitive
+    isSensitive: sensitive,
   };
 
   rememberElementInfo(info);
@@ -666,7 +872,10 @@ function rememberElementInfo(info: DomElementInfo): void {
   }
 }
 
-function scoreElementMatch(snapshot: DomElementInfo, candidate: DomElementInfo): number {
+function scoreElementMatch(
+  snapshot: DomElementInfo,
+  candidate: DomElementInfo,
+): number {
   let score = 0;
 
   if (snapshot.tag === candidate.tag) {
@@ -684,10 +893,16 @@ function scoreElementMatch(snapshot: DomElementInfo, candidate: DomElementInfo):
   if (snapshot.placeholder && snapshot.placeholder === candidate.placeholder) {
     score += 4;
   }
-  if (snapshot.questionNumber && snapshot.questionNumber === candidate.questionNumber) {
+  if (
+    snapshot.questionNumber &&
+    snapshot.questionNumber === candidate.questionNumber
+  ) {
     score += 8;
   }
-  if (snapshot.frameContext && snapshot.frameContext === candidate.frameContext) {
+  if (
+    snapshot.frameContext &&
+    snapshot.frameContext === candidate.frameContext
+  ) {
     score += 4;
   }
   if (snapshot.rootContext && snapshot.rootContext === candidate.rootContext) {
@@ -715,7 +930,7 @@ function scoreTextField(
   snapshotValue: string | undefined,
   candidateValue: string | undefined,
   exactScore: number,
-  partialScore: number
+  partialScore: number,
 ): number {
   const snapshotText = normalizeText(snapshotValue || "").toLowerCase();
   const candidateText = normalizeText(candidateValue || "").toLowerCase();
@@ -727,7 +942,10 @@ function scoreTextField(
     return exactScore;
   }
 
-  return snapshotText.includes(candidateText) || candidateText.includes(snapshotText) ? partialScore : 0;
+  return snapshotText.includes(candidateText) ||
+    candidateText.includes(snapshotText)
+    ? partialScore
+    : 0;
 }
 
 function getOrCreateElementId(element: Element): string {
@@ -752,30 +970,38 @@ function getReadableText(contexts = collectDomContexts()): string {
     contexts.roots
       .map((context) => getRootReadableText(context.root))
       .filter(Boolean)
-      .join("\n")
+      .join("\n"),
   );
-  return text.slice(0, MAX_PAGE_TEXT_CHARS);
+  return text.slice(0, observationTextChars);
 }
 
 function getScrollAwareReadableText(contexts: DomContextCollection): string {
   const textBlocks = queryAllInContexts(contexts, READABLE_TEXT_SELECTOR)
     .filter(isVisibleElement)
-    .map((element) => ({ element, rect: element.getBoundingClientRect(), text: getDirectReadableBlockText(element) }))
+    .map((element) => ({
+      element,
+      rect: element.getBoundingClientRect(),
+      text: getDirectReadableBlockText(element),
+    }))
     .filter((block) => block.text.length > 0)
-    .sort((a, b) => scoreBlockForCurrentViewport(a.rect) - scoreBlockForCurrentViewport(b.rect));
+    .sort(
+      (a, b) =>
+        scoreBlockForCurrentViewport(a.rect) -
+        scoreBlockForCurrentViewport(b.rect),
+    );
 
   const selectedBlocks: Array<{ top: number; text: string }> = [];
   let usedChars = 0;
   const seen = new Set<string>();
 
   for (const block of textBlocks) {
-    const text = block.text.slice(0, 900);
+    const text = block.text.slice(0, observationTextChars);
     if (seen.has(text)) {
       continue;
     }
 
     const nextCost = text.length + 1;
-    if (usedChars + nextCost > MAX_PAGE_TEXT_CHARS) {
+    if (usedChars + nextCost > observationTextChars) {
       continue;
     }
 
@@ -788,8 +1014,8 @@ function getScrollAwareReadableText(contexts: DomContextCollection): string {
     selectedBlocks
       .sort((a, b) => a.top - b.top)
       .map((block) => block.text)
-      .join("\n")
-  ).slice(0, MAX_PAGE_TEXT_CHARS);
+      .join("\n"),
+  ).slice(0, observationTextChars);
 }
 
 function getRootReadableText(root: QueryRoot): string {
@@ -808,9 +1034,13 @@ function getDirectReadableBlockText(element: HTMLElement): string {
   }
 
   const className = String(element.getAttribute("class") || "");
-  const isQuestionLike = /question|problem|prompt|answer|quiz|module|task/i.test(className);
+  const isQuestionLike =
+    /question|problem|prompt|answer|quiz|module|task/i.test(className);
 
-  if (["main", "article", "section", "form"].includes(tag) || element.getAttribute("role") === "main") {
+  if (
+    ["main", "article", "section", "form"].includes(tag) ||
+    element.getAttribute("role") === "main"
+  ) {
     return text.length <= 1400 ? text : "";
   }
 
@@ -837,7 +1067,10 @@ function scoreBlockForCurrentViewport(rect: DOMRect): number {
   return viewportHeight * 4 + Math.abs(rect.bottom);
 }
 
-function compareElementsForCurrentViewport(a: HTMLElement, b: HTMLElement): number {
+function compareElementsForCurrentViewport(
+  a: HTMLElement,
+  b: HTMLElement,
+): number {
   return scoreElementForCurrentViewport(a) - scoreElementForCurrentViewport(b);
 }
 
@@ -857,7 +1090,11 @@ function scoreElementForCurrentViewport(element: HTMLElement): number {
 }
 
 function getElementText(element: HTMLElement): string | undefined {
-  if (isInputElement(element) || isTextAreaElement(element) || isSelectElement(element)) {
+  if (
+    isInputElement(element) ||
+    isTextAreaElement(element) ||
+    isSelectElement(element)
+  ) {
     return undefined;
   }
 
@@ -950,7 +1187,10 @@ function getPlaceholder(element: HTMLElement): string | undefined {
   }
 
   const nestedEditable = getPrimaryTextEditableDescendant(element);
-  if (nestedEditable && (isInputElement(nestedEditable) || isTextAreaElement(nestedEditable))) {
+  if (
+    nestedEditable &&
+    (isInputElement(nestedEditable) || isTextAreaElement(nestedEditable))
+  ) {
     return nestedEditable.placeholder || undefined;
   }
 
@@ -958,25 +1198,37 @@ function getPlaceholder(element: HTMLElement): string | undefined {
 }
 
 function getFileAccept(element: HTMLElement): string | undefined {
-  const fileInput = isInputElement(element) && element.type === "file" ? element : queryDescendants(element, "input[type='file']").find(isInputElement);
+  const fileInput =
+    isInputElement(element) && element.type === "file"
+      ? element
+      : queryDescendants(element, "input[type='file']").find(isInputElement);
   const accept = fileInput?.accept || fileInput?.getAttribute("accept") || "";
   return accept ? accept.slice(0, 160) : undefined;
 }
 
 function getSafeValue(element: HTMLElement): string | undefined {
   if (isSensitiveElement(element)) return undefined;
-  if (isTextAreaElement(element)) return element.value.slice(0, 160) || undefined;
-  if (element.isContentEditable) return element.textContent?.slice(0, 160) || undefined;
+  if (isTextAreaElement(element))
+    return element.value.slice(0, 160) || undefined;
+  if (element.isContentEditable)
+    return element.textContent?.slice(0, 160) || undefined;
   if (isSelectElement(element)) {
     return element.selectedOptions[0]?.text || element.value || undefined;
   }
 
-  if (isInputElement(element) && (element.type === "checkbox" || element.type === "radio")) {
+  if (
+    isInputElement(element) &&
+    (element.type === "checkbox" || element.type === "radio")
+  ) {
     const state = element.checked ? "checked" : "unchecked";
     return element.value ? `${element.value} (${state})` : state;
   }
 
-  if (isInputElement(element) && element.value && !["password", "file"].includes(element.type)) {
+  if (
+    isInputElement(element) &&
+    element.value &&
+    !["password", "file"].includes(element.type)
+  ) {
     return element.value.slice(0, 160);
   }
 
@@ -988,19 +1240,35 @@ function getSafeValue(element: HTMLElement): string | undefined {
   return undefined;
 }
 
-function getCheckedState(element: HTMLElement): "checked" | "unchecked" | "mixed" | undefined {
-  if (isInputElement(element) && (element.type === "checkbox" || element.type === "radio")) {
+function getCheckedState(
+  element: HTMLElement,
+): "checked" | "unchecked" | "mixed" | undefined {
+  if (
+    isInputElement(element) &&
+    (element.type === "checkbox" || element.type === "radio")
+  ) {
     return element.checked ? "checked" : "unchecked";
   }
 
-  const nestedChoice = queryDescendants(element, "input[type='checkbox'],input[type='radio']").find(isInputElement);
+  const nestedChoice = queryDescendants(
+    element,
+    "input[type='checkbox'],input[type='radio']",
+  ).find(isInputElement);
   if (nestedChoice) {
     return nestedChoice.checked ? "checked" : "unchecked";
   }
 
   const ariaChecked = element.getAttribute("aria-checked");
-  if (ariaChecked === "true" || ariaChecked === "false" || ariaChecked === "mixed") {
-    return ariaChecked === "true" ? "checked" : ariaChecked === "mixed" ? "mixed" : "unchecked";
+  if (
+    ariaChecked === "true" ||
+    ariaChecked === "false" ||
+    ariaChecked === "mixed"
+  ) {
+    return ariaChecked === "true"
+      ? "checked"
+      : ariaChecked === "mixed"
+        ? "mixed"
+        : "unchecked";
   }
 
   const ariaSelected = element.getAttribute("aria-selected");
@@ -1011,12 +1279,15 @@ function getCheckedState(element: HTMLElement): "checked" | "unchecked" | "mixed
   return undefined;
 }
 
-function getElementQuestionContext(element: HTMLElement): { text: string; questionNumber?: string } | undefined {
+function getElementQuestionContext(
+  element: HTMLElement,
+): { text: string; questionNumber?: string } | undefined {
   if (!shouldIncludeElementContext(element)) {
     return undefined;
   }
 
-  const boundary = findQuestionContextBoundary(element) || getRootTextBoundary(element);
+  const boundary =
+    findQuestionContextBoundary(element) || getRootTextBoundary(element);
   const beforeText = getTextBeforeElement(boundary, element);
   const questionText = extractNearestQuestionText(beforeText);
 
@@ -1024,13 +1295,20 @@ function getElementQuestionContext(element: HTMLElement): { text: string; questi
     return undefined;
   }
 
-  const fieldLabel = getElementLabel(element) || getPlaceholder(element) || getFormName(element) || "field";
-  const text = normalizeText(`${questionText} Field: ${fieldLabel}`).slice(0, MAX_ELEMENT_CONTEXT_CHARS);
+  const fieldLabel =
+    getElementLabel(element) ||
+    getPlaceholder(element) ||
+    getFormName(element) ||
+    "field";
+  const text = normalizeText(`${questionText} Field: ${fieldLabel}`).slice(
+    0,
+    MAX_ELEMENT_CONTEXT_CHARS,
+  );
   const questionNumber = questionText.match(/Problem Statement\s+(\d+)/i)?.[1];
 
   return {
     text,
-    questionNumber
+    questionNumber,
   };
 }
 
@@ -1077,7 +1355,9 @@ function isDropTargetElement(element: HTMLElement): boolean {
   );
 }
 
-function findQuestionContextBoundary(element: HTMLElement): HTMLElement | undefined {
+function findQuestionContextBoundary(
+  element: HTMLElement,
+): HTMLElement | undefined {
   let current = element.parentElement;
   let depth = 0;
   const rootBoundary = getRootBoundaryElement(element);
@@ -1095,7 +1375,10 @@ function findQuestionContextBoundary(element: HTMLElement): HTMLElement | undefi
   return undefined;
 }
 
-function getTextBeforeElement(boundary: HTMLElement | ShadowRoot, element: HTMLElement): string {
+function getTextBeforeElement(
+  boundary: HTMLElement | ShadowRoot,
+  element: HTMLElement,
+): string {
   try {
     const range = element.ownerDocument.createRange();
     range.selectNodeContents(boundary);
@@ -1104,7 +1387,11 @@ function getTextBeforeElement(boundary: HTMLElement | ShadowRoot, element: HTMLE
     range.detach();
     return text;
   } catch {
-    return normalizeText("innerText" in boundary ? boundary.innerText || "" : boundary.textContent || "");
+    return normalizeText(
+      "innerText" in boundary
+        ? boundary.innerText || ""
+        : boundary.textContent || "",
+    );
   }
 }
 
@@ -1176,28 +1463,54 @@ function isDisabled(element: HTMLElement): boolean {
 }
 
 export function isSensitiveElement(element: HTMLElement): boolean {
-  const controls = [element, ...element.querySelectorAll("input,textarea,[contenteditable='true']")];
+  const controls = [
+    element,
+    ...element.querySelectorAll("input,textarea,[contenteditable='true']"),
+  ];
   return controls.some((control) => {
     if (control.getAttribute("type")?.toLowerCase() === "password") return true;
-    const autocomplete = (control.getAttribute("autocomplete") || "").toLowerCase();
-    if (/(?:^|\s)(?:current-password|new-password|one-time-code|cc-[\w-]+)(?:\s|$)/.test(autocomplete)) return true;
-    const identity = [control.id, control.getAttribute("name"), control.getAttribute("aria-label"), control.getAttribute("placeholder")]
-      .filter(Boolean).join(" ").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
-    return /password|passphrase|one.?time.?code|\botp\b|\b(?:cvv|cvc|ssn)\b|credit.?card|card.?number|social.?security|api.?key|private.?key|secret|auth.?token/.test(identity);
+    const autocomplete = (
+      control.getAttribute("autocomplete") || ""
+    ).toLowerCase();
+    if (
+      /(?:^|\s)(?:current-password|new-password|one-time-code|cc-[\w-]+)(?:\s|$)/.test(
+        autocomplete,
+      )
+    )
+      return true;
+    const identity = [
+      control.id,
+      control.getAttribute("name"),
+      control.getAttribute("aria-label"),
+      control.getAttribute("placeholder"),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .toLowerCase();
+    return /password|passphrase|one.?time.?code|\botp\b|\b(?:cvv|cvc|ssn)\b|credit.?card|card.?number|social.?security|api.?key|private.?key|secret|auth.?token/.test(
+      identity,
+    );
   });
 }
 
-function getPrimaryTextEditableDescendant(element: HTMLElement): HTMLElement | undefined {
+function getPrimaryTextEditableDescendant(
+  element: HTMLElement,
+): HTMLElement | undefined {
   const editable = queryDescendants(element, textEditableSelector)[0];
   return editable && isVisibleElement(editable) ? editable : undefined;
 }
 
-function getPrimarySelectDescendant(element: HTMLElement): HTMLSelectElement | undefined {
+function getPrimarySelectDescendant(
+  element: HTMLElement,
+): HTMLSelectElement | undefined {
   const select = queryDescendants(element, "select").find(isSelectElement);
   return select && isVisibleElement(select) ? select : undefined;
 }
 
-function findLikelyEditableWrapper(editable: HTMLElement): HTMLElement | undefined {
+function findLikelyEditableWrapper(
+  editable: HTMLElement,
+): HTMLElement | undefined {
   let current = editable.parentElement;
   let depth = 0;
 
@@ -1222,13 +1535,18 @@ function isLikelyEditableWrapper(element: HTMLElement): boolean {
     role === "combobox" ||
     element.tabIndex >= 0 ||
     element.hasAttribute("onclick") ||
-    /InputBase|OutlinedInput|FilledInput|FormControl|Autocomplete|Select|TextField|field|input|control/i.test(className)
+    /InputBase|OutlinedInput|FilledInput|FormControl|Autocomplete|Select|TextField|field|input|control/i.test(
+      className,
+    )
   );
 }
 
 function isElementFocused(element: HTMLElement): boolean {
   const activeElement = element.ownerDocument.activeElement;
-  return activeElement === element || Boolean(activeElement && element.contains(activeElement));
+  return (
+    activeElement === element ||
+    Boolean(activeElement && element.contains(activeElement))
+  );
 }
 
 function isVisibleElement(element: Element): element is HTMLElement {
@@ -1236,8 +1554,14 @@ function isVisibleElement(element: Element): element is HTMLElement {
     return false;
   }
 
-  const style = (element.ownerDocument.defaultView || window).getComputedStyle(element);
-  if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
+  const style = (element.ownerDocument.defaultView || window).getComputedStyle(
+    element,
+  );
+  if (
+    style.display === "none" ||
+    style.visibility === "hidden" ||
+    Number(style.opacity) === 0
+  ) {
     return false;
   }
 
@@ -1245,13 +1569,19 @@ function isVisibleElement(element: Element): element is HTMLElement {
   return rect.width > 0 && rect.height > 0;
 }
 
-function extractTables(contexts = collectDomContexts()): ExtractedPageData["tables"] {
+function extractTables(
+  contexts = collectDomContexts(),
+): ExtractedPageData["tables"] {
   return queryAllInContexts(contexts, "table")
     .filter(isVisibleElement)
     .slice(0, 10)
     .map((table) => {
-      const caption = normalizeText(table.querySelector("caption")?.textContent || "");
-      const headerCells = Array.from(table.querySelectorAll("thead th, tr:first-child th"))
+      const caption = normalizeText(
+        table.querySelector("caption")?.textContent || "",
+      );
+      const headerCells = Array.from(
+        table.querySelectorAll("thead th, tr:first-child th"),
+      )
         .map((cell) => normalizeText(cell.textContent || ""))
         .filter(Boolean);
       const rows = Array.from(table.querySelectorAll("tbody tr, tr"))
@@ -1259,19 +1589,21 @@ function extractTables(contexts = collectDomContexts()): ExtractedPageData["tabl
         .map((row) =>
           Array.from(row.querySelectorAll("th,td"))
             .map((cell) => normalizeText(cell.textContent || ""))
-            .filter(Boolean)
+            .filter(Boolean),
         )
         .filter((row) => row.length > 0);
 
       return {
         caption: caption || undefined,
         headers: headerCells.slice(0, 20),
-        rows
+        rows,
       };
     });
 }
 
-function extractForms(contexts = collectDomContexts()): ExtractedPageData["forms"] {
+function extractForms(
+  contexts = collectDomContexts(),
+): ExtractedPageData["forms"] {
   return queryAllInContexts(contexts, "form")
     .filter(isVisibleElement)
     .slice(0, 10)
@@ -1280,16 +1612,26 @@ function extractForms(contexts = collectDomContexts()): ExtractedPageData["forms
         .filter(isVisibleElement)
         .slice(0, 40)
         .map(toElementInfo);
-      const labels = controls.map((control) => control.label || control.text || control.placeholder || "").filter(Boolean);
+      const labels = controls
+        .map(
+          (control) =>
+            control.label || control.text || control.placeholder || "",
+        )
+        .filter(Boolean);
       return { labels, controls };
     });
 }
 
-function queryDescendants(element: HTMLElement, selector: string): HTMLElement[] {
+function queryDescendants(
+  element: HTMLElement,
+  selector: string,
+): HTMLElement[] {
   const results: HTMLElement[] = [];
 
   try {
-    results.push(...Array.from(element.querySelectorAll(selector)).filter(isHtmlElement));
+    results.push(
+      ...Array.from(element.querySelectorAll(selector)).filter(isHtmlElement),
+    );
   } catch {
     return results;
   }
@@ -1302,7 +1644,7 @@ function collectShadowDescendants(
   rootElement: HTMLElement,
   selector: string,
   results: HTMLElement[],
-  depth: number
+  depth: number,
 ): void {
   if (depth >= MAX_SHADOW_DEPTH) {
     return;
@@ -1313,7 +1655,9 @@ function collectShadowDescendants(
     shadowRoots.push(rootElement.shadowRoot);
   }
 
-  for (const descendant of Array.from(rootElement.querySelectorAll("*")).filter(isHtmlElement)) {
+  for (const descendant of Array.from(rootElement.querySelectorAll("*")).filter(
+    isHtmlElement,
+  )) {
     if (descendant.shadowRoot) {
       shadowRoots.push(descendant.shadowRoot);
     }
@@ -1327,15 +1671,23 @@ function collectShadowDescendants(
   }
 }
 
-function getElementByIdNear(element: HTMLElement, id: string): HTMLElement | undefined {
+function getElementByIdNear(
+  element: HTMLElement,
+  id: string,
+): HTMLElement | undefined {
   const root = element.getRootNode();
-  const found =
-    isDocumentRoot(root) ? root.getElementById(id) : isShadowRoot(root) ? root.getElementById(id) : element.ownerDocument.getElementById(id);
+  const found = isDocumentRoot(root)
+    ? root.getElementById(id)
+    : isShadowRoot(root)
+      ? root.getElementById(id)
+      : element.ownerDocument.getElementById(id);
   return found && isHtmlElement(found) ? found : undefined;
 }
 
 function getElementHref(element: HTMLElement): string | undefined {
-  return isAnchorElement(element) ? element.href : element.getAttribute("href") || undefined;
+  return isAnchorElement(element)
+    ? element.href
+    : element.getAttribute("href") || undefined;
 }
 
 function getRootTextBoundary(element: HTMLElement): HTMLElement | ShadowRoot {
@@ -1372,16 +1724,23 @@ function isIframeElement(element: HTMLElement): element is HTMLIFrameElement {
   return element.tagName.toLowerCase() === "iframe";
 }
 
-function isHtmlElement(element: Element | null | undefined): element is HTMLElement {
+function isHtmlElement(
+  element: Element | null | undefined,
+): element is HTMLElement {
   if (!element) {
     return false;
   }
 
   const ctor = element.ownerDocument.defaultView?.HTMLElement;
-  return typeof ctor === "function" ? element instanceof ctor : element.nodeType === 1;
+  return typeof ctor === "function"
+    ? element instanceof ctor
+    : element.nodeType === 1;
 }
 
-function isElementInstance<T extends HTMLElement>(element: Element, constructorName: HtmlConstructorName): element is T {
+function isElementInstance<T extends HTMLElement>(
+  element: Element,
+  constructorName: HtmlConstructorName,
+): element is T {
   const ctor = element.ownerDocument.defaultView?.[constructorName];
   return typeof ctor === "function" && element instanceof ctor;
 }

@@ -1,7 +1,10 @@
 import { executeAction } from "./actions";
 import { checkWaitCondition, observePage } from "./domMap";
 import { readFullPageDocument } from "./pageReader";
-import type { BackgroundToContentMessage, ContentActionResult } from "../shared/types";
+import type {
+  BackgroundToContentMessage,
+  ContentActionResult,
+} from "../shared/types";
 
 declare global {
   interface Window {
@@ -12,23 +15,25 @@ declare global {
 if (!window.__BYOK_AGENT_CONTENT_LOADED__) {
   window.__BYOK_AGENT_CONTENT_LOADED__ = true;
 
-  chrome.runtime.onMessage.addListener((message: BackgroundToContentMessage, _sender, sendResponse) => {
-    void handleMessage(message)
-      .then(sendResponse)
-      .catch((error: unknown) => {
-        sendResponse({
-          ok: false,
-          message: error instanceof Error ? error.message : String(error)
-        } satisfies ContentActionResult);
-      });
+  chrome.runtime.onMessage.addListener(
+    (message: BackgroundToContentMessage, _sender, sendResponse) => {
+      void handleMessage(message)
+        .then(sendResponse)
+        .catch((error: unknown) => {
+          sendResponse({
+            ok: false,
+            message: error instanceof Error ? error.message : String(error),
+          } satisfies ContentActionResult);
+        });
 
-    return true;
-  });
+      return true;
+    },
+  );
 }
 
 async function handleMessage(message: BackgroundToContentMessage) {
   if (message.type === "CONTENT_OBSERVE") {
-    return observePage();
+    return observePage(message.observationTokenLimit);
   }
 
   if (message.type === "CONTENT_EXECUTE") {
@@ -45,6 +50,6 @@ async function handleMessage(message: BackgroundToContentMessage) {
 
   return {
     ok: false,
-    message: "Unsupported content script message."
+    message: "Unsupported content script message.",
   } satisfies ContentActionResult;
 }

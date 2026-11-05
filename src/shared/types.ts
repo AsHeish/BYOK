@@ -32,6 +32,8 @@ export interface AgentSettings {
   model: string;
   openAiApi?: OpenAiApi;
   maxSteps: number;
+  observationTokenLimit?: number;
+  maxActionsPerResponse?: number;
   requestTimeoutSeconds: number;
   promptCacheMode: PromptCacheMode;
   disableThinking?: boolean;
@@ -52,6 +54,8 @@ export interface AiConfigurationProfile {
   model: string;
   openAiApi?: OpenAiApi;
   maxSteps: number;
+  observationTokenLimit?: number;
+  maxActionsPerResponse?: number;
   requestTimeoutSeconds: number;
   promptCacheMode: PromptCacheMode;
   disableThinking?: boolean;
@@ -422,7 +426,11 @@ export interface SafetyDecision {
 export type SidePanelToBackgroundMessage =
   | { type: "SIDEPANEL_SEND_CHAT"; message: string; settings: AgentSettings }
   | { type: "SIDEPANEL_RUN_TASK"; task: string; settings: AgentSettings }
-  | { type: "SIDEPANEL_TEST_MODEL_CONNECTION"; settings: AgentSettings; target?: "jev" }
+  | {
+      type: "SIDEPANEL_TEST_MODEL_CONNECTION";
+      settings: AgentSettings;
+      target?: "jev";
+    }
   | { type: "SIDEPANEL_STOP_TASK" }
   | { type: "SIDEPANEL_CLEAR_CHAT" }
   | { type: "SIDEPANEL_GET_STATE" };
@@ -437,7 +445,7 @@ export type BackgroundToSidePanelMessage =
   | { type: "USAGE_UPDATE"; usage: AgentUsageSnapshot };
 
 export type BackgroundToContentMessage =
-  | { type: "CONTENT_OBSERVE" }
+  | { type: "CONTENT_OBSERVE"; observationTokenLimit?: number }
   | { type: "CONTENT_EXECUTE"; action: AgentAction }
   | { type: "CONTENT_READ_PAGE" }
   | { type: "CONTENT_CHECK_WAIT"; request: ContentWaitCheckRequest };

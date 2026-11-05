@@ -65,6 +65,79 @@ afterEach(() => {
 });
 
 describe("settings persistence", () => {
+  it("defaults context and action limits for old settings and profiles", async () => {
+    expect(await loadSettings()).toMatchObject({
+      observationTokenLimit: 4000,
+      maxActionsPerResponse: 10,
+    });
+    stored.byokAgentConfigProfiles = [
+      { ...PROFILE_SETTINGS, id: "old", name: "Old" },
+    ];
+    const [profile] = await loadConfigurationProfiles();
+    expect(profile).toMatchObject({
+      observationTokenLimit: 4000,
+      maxActionsPerResponse: 10,
+    });
+    expect(applyConfigurationProfile(PROFILE_SETTINGS, profile)).toMatchObject({
+      observationTokenLimit: 4000,
+      maxActionsPerResponse: 10,
+    });
+  });
+
+  it("preserves higher context and action limits through settings and profile export/import", async () => {
+    const settings = {
+      ...PROFILE_SETTINGS,
+      apiBaseUrl: "https://api.example.test/v1",
+      observationTokenLimit: 32000,
+      maxActionsPerResponse: 100,
+    };
+    await saveSettings(settings);
+    expect(await loadSettings()).toMatchObject(settings);
+    const profiles = await saveConfigurationProfile("Large batches", settings);
+    const exported = serializeConfigurationProfiles(profiles);
+    const imported = await importConfigurationProfiles(JSON.parse(exported));
+    const profile = imported.profiles.find((entry) =>
+      imported.importedIds.includes(entry.id),
+    )!;
+    expect(profile).toMatchObject({
+      observationTokenLimit: 32000,
+      maxActionsPerResponse: 100,
+    });
+    expect(applyConfigurationProfile(PROFILE_SETTINGS, profile)).toMatchObject(
+      settings,
+    );
+  });
+
+  it("defaults to 60 steps", async () => {
+    expect((await loadSettings()).maxSteps).toBe(60);
+  });
+
+  it.each([61, 120, 1000])(
+    "preserves a user-selected limit of %i steps",
+    async (maxSteps) => {
+      const settings = { ...PROFILE_SETTINGS, maxSteps };
+      await saveSettings(settings);
+      expect((await loadSettings()).maxSteps).toBe(maxSteps);
+
+      await saveConfigurationProfile("Long run", settings);
+      const profile = (await loadConfigurationProfiles()).find(
+        (entry) => entry.name === "Long run",
+      )!;
+      expect(profile.maxSteps).toBe(maxSteps);
+      expect(
+        applyConfigurationProfile(PROFILE_SETTINGS, profile).maxSteps,
+      ).toBe(maxSteps);
+    },
+  );
+
+  it.each([NaN, Infinity, -Infinity])(
+    "uses the default for non-finite step limits (%s)",
+    async (maxSteps) => {
+      await saveSettings({ ...PROFILE_SETTINGS, maxSteps });
+      expect((await loadSettings()).maxSteps).toBe(60);
+    },
+  );
+
   it("preserves provider defaults until thinking is explicitly disabled", async () => {
     expect((await loadSettings()).disableThinking).toBe(false);
     await saveSettings({ ...PROFILE_SETTINGS, disableThinking: true });
@@ -75,22 +148,40 @@ describe("settings persistence", () => {
     expect((await loadSettings()).disableThinking).toBe(false);
   });
 
-  it.each([["", "off"], ["jev-key", "fast"]] as const)("migrates retired Jev Only settings with key %j to %s", async (apiKey, mode) => {
-    stored.byokAgentSettings = { ...PROFILE_SETTINGS, jev: { mode: "only", apiKey } };
-    expect((await loadSettings()).jev).toEqual({ mode, apiKey });
-  });
+  it.each([
+    ["", "off"],
+    ["jev-key", "fast"],
+  ] as const)(
+    "migrates retired Jev Only settings with key %j to %s",
+    async (apiKey, mode) => {
+      stored.byokAgentSettings = {
+        ...PROFILE_SETTINGS,
+        jev: { mode: "only", apiKey },
+      };
+      expect((await loadSettings()).jev).toEqual({ mode, apiKey });
+    },
+  );
 
   it("defaults Jev off and round-trips its separate key and mode", async () => {
     expect((await loadSettings()).jev).toEqual({ mode: "off", apiKey: "" });
-    await saveSettings({ ...PROFILE_SETTINGS, jev: { mode: "shadow", apiKey: " jev-key " } });
-    expect((await loadSettings()).jev).toEqual({ mode: "shadow", apiKey: "jev-key" });
+    await saveSettings({
+      ...PROFILE_SETTINGS,
+      jev: { mode: "shadow", apiKey: " jev-key " },
+    });
+    expect((await loadSettings()).jev).toEqual({
+      mode: "shadow",
+      apiKey: "jev-key",
+    });
     expect((await loadSettings()).apiKey).toBe(PROFILE_SETTINGS.apiKey);
   });
 
   it("does not enable Jev for invalid settings or an absent key", async () => {
     stored.byokAgentSettings = { jev: { mode: "unknown", apiKey: "jev-key" } };
     expect((await loadSettings()).jev?.mode).toBe("off");
-    await saveSettings({ ...PROFILE_SETTINGS, jev: { mode: "fast", apiKey: "" } });
+    await saveSettings({
+      ...PROFILE_SETTINGS,
+      jev: { mode: "fast", apiKey: "" },
+    });
     expect((await loadSettings()).jev?.mode).toBe("off");
   });
 
@@ -104,12 +195,23 @@ describe("settings persistence", () => {
     expect((await loadSettings()).openAiApi).toBeUndefined();
     await saveSettings({ ...PROFILE_SETTINGS, openAiApi: "chat" });
     expect((await loadSettings()).openAiApi).toBe("chat");
-    stored.byokAgentSettings = { ...PROFILE_SETTINGS, openAiApi: "completions" };
+    stored.byokAgentSettings = {
+      ...PROFILE_SETTINGS,
+      openAiApi: "completions",
+    };
     expect((await loadSettings()).openAiApi).toBeUndefined();
-    const saved = await saveConfigurationProfile("Chat API", { ...PROFILE_SETTINGS, openAiApi: "chat" });
+    const saved = await saveConfigurationProfile("Chat API", {
+      ...PROFILE_SETTINGS,
+      openAiApi: "chat",
+    });
     const profile = saved.find((entry) => entry.name === "Chat API")!;
     expect(profile.openAiApi).toBe("chat");
-    expect(applyConfigurationProfile({ ...PROFILE_SETTINGS, openAiApi: "responses" }, profile).openAiApi).toBe("chat");
+    expect(
+      applyConfigurationProfile(
+        { ...PROFILE_SETTINGS, openAiApi: "responses" },
+        profile,
+      ).openAiApi,
+    ).toBe("chat");
   });
 });
 
@@ -124,7 +226,25 @@ describe("run report persistence", () => {
       evidence: [],
       findings: [],
       usage: {
-        jev: { requests: 2, helperRequests: 1, lastDecision: [{ question: "operation", choice: "click", confidence: 0.99, probabilities: [{ option: "click", probability: 0.99 }] }], fastDecisions: 1, shadowDecisions: 0, fallbacks: 1, inputTokens: 200, outputTokens: 20, totalLatencyMs: 400, estimatedCostUsd: 0.0000084 },
+        jev: {
+          requests: 2,
+          helperRequests: 1,
+          lastDecision: [
+            {
+              question: "operation",
+              choice: "click",
+              confidence: 0.99,
+              probabilities: [{ option: "click", probability: 0.99 }],
+            },
+          ],
+          fastDecisions: 1,
+          shadowDecisions: 0,
+          fallbacks: 1,
+          inputTokens: 200,
+          outputTokens: 20,
+          totalLatencyMs: 400,
+          estimatedCostUsd: 0.0000084,
+        },
         requestCount: 0,
         successfulRequestCount: 0,
         cacheHitRequestCount: 0,
@@ -156,14 +276,17 @@ describe("run report persistence", () => {
 
 describe("chat persistence", () => {
   it("persists a bounded, validated transcript and clears it", async () => {
-    const messages: AgentChatMessage[] = Array.from({ length: 102 }, (_, index) => ({
-      id: `chat-${index}`,
-      role: index % 2 ? "assistant" : "user",
-      content: `Message ${index}`,
-      kind: index % 2 ? "answer" : "message",
-      timestamp: index,
-      responseTimeMs: index % 2 ? index * 100 : undefined,
-    }));
+    const messages: AgentChatMessage[] = Array.from(
+      { length: 102 },
+      (_, index) => ({
+        id: `chat-${index}`,
+        role: index % 2 ? "assistant" : "user",
+        content: `Message ${index}`,
+        kind: index % 2 ? "answer" : "message",
+        timestamp: index,
+        responseTimeMs: index % 2 ? index * 100 : undefined,
+      }),
+    );
 
     await saveChatMessages(messages);
     const reloaded = await loadChatMessages();
@@ -205,37 +328,72 @@ describe("chat suggestion persistence", () => {
   it("restores defaults", async () => {
     await saveChatSuggestions(["Custom suggestion"]);
     expect(await resetChatSuggestions()).toHaveLength(3);
-    expect(await loadChatSuggestions()).toContain("Summarize the current page.");
+    expect(await loadChatSuggestions()).toContain(
+      "Summarize the current page.",
+    );
   });
 });
 
 describe("configuration profile persistence", () => {
   it("round-trips disabled thinking through save, update, import, and apply", async () => {
-    const settings: AgentSettings = { ...PROFILE_SETTINGS, disableThinking: true };
+    const settings: AgentSettings = {
+      ...PROFILE_SETTINGS,
+      disableThinking: true,
+    };
     const saved = await saveConfigurationProfile("No thinking", settings);
     const profile = saved.find((entry) => entry.name === "No thinking")!;
     expect(profile.disableThinking).toBe(true);
-    const imported = await importConfigurationProfiles(JSON.parse(serializeConfigurationProfiles([profile])));
-    const copy = imported.profiles.find((entry) => imported.importedIds.includes(entry.id))!;
+    const imported = await importConfigurationProfiles(
+      JSON.parse(serializeConfigurationProfiles([profile])),
+    );
+    const copy = imported.profiles.find((entry) =>
+      imported.importedIds.includes(entry.id),
+    )!;
     expect(copy.disableThinking).toBe(true);
-    expect(applyConfigurationProfile(PROFILE_SETTINGS, copy).disableThinking).toBe(true);
-    expect(applyConfigurationProfile(settings, { ...copy, disableThinking: undefined }).disableThinking).toBe(false);
-    const updated = await updateConfigurationProfile(profile.id, { ...settings, disableThinking: false });
-    expect(updated.find((entry) => entry.id === profile.id)?.disableThinking).toBe(false);
+    expect(
+      applyConfigurationProfile(PROFILE_SETTINGS, copy).disableThinking,
+    ).toBe(true);
+    expect(
+      applyConfigurationProfile(settings, {
+        ...copy,
+        disableThinking: undefined,
+      }).disableThinking,
+    ).toBe(false);
+    const updated = await updateConfigurationProfile(profile.id, {
+      ...settings,
+      disableThinking: false,
+    });
+    expect(
+      updated.find((entry) => entry.id === profile.id)?.disableThinking,
+    ).toBe(false);
   });
 
   it("keeps Jev settings global: profiles never store, export, or apply them", async () => {
-    const current: AgentSettings = { ...PROFILE_SETTINGS, jev: { mode: "shadow", apiKey: "current-jev-key" } };
-    const saved = await saveConfigurationProfile("Work", { ...PROFILE_SETTINGS, model: "work-model", jev: { mode: "fast", apiKey: "profile-jev-key" } });
+    const current: AgentSettings = {
+      ...PROFILE_SETTINGS,
+      jev: { mode: "shadow", apiKey: "current-jev-key" },
+    };
+    const saved = await saveConfigurationProfile("Work", {
+      ...PROFILE_SETTINGS,
+      model: "work-model",
+      jev: { mode: "fast", apiKey: "profile-jev-key" },
+    });
     expect(saved).toHaveLength(1);
     expect(saved[0]).not.toHaveProperty("jev");
-    expect(serializeConfigurationProfiles(saved)).not.toContain("profile-jev-key");
+    expect(serializeConfigurationProfiles(saved)).not.toContain(
+      "profile-jev-key",
+    );
     const applied = applyConfigurationProfile(current, saved[0]);
     expect(applied.model).toBe("work-model");
     expect(applied.jev).toEqual(current.jev);
-    const updated = await updateConfigurationProfile(saved[0].id, { ...current, jev: { mode: "fast", apiKey: "other-jev-key" } });
+    const updated = await updateConfigurationProfile(saved[0].id, {
+      ...current,
+      jev: { mode: "fast", apiKey: "other-jev-key" },
+    });
     expect(JSON.stringify(updated)).not.toContain("jev-key");
-    expect(JSON.stringify(stored.byokAgentConfigProfiles)).not.toContain("jev-key");
+    expect(JSON.stringify(stored.byokAgentConfigProfiles)).not.toContain(
+      "jev-key",
+    );
     expect(await deleteConfigurationProfile(saved[0].id)).toEqual([]);
   });
 
@@ -243,14 +401,31 @@ describe("configuration profile persistence", () => {
     expect(await loadConfigurationProfiles()).toEqual([]);
     expect(stored.byokAgentConfigProfiles).toBeUndefined();
     stored.byokAgentConfigProfiles = [
-      { ...PROFILE_SETTINGS, id: "profile-jev-default", name: "Jev Only (default)", jev: { mode: "only", apiKey: "legacy-key" }, createdAt: 1, updatedAt: 1 },
-      { ...PROFILE_SETTINGS, id: "work", name: "Work", jev: { mode: "fast", apiKey: "legacy-key" }, createdAt: 2, updatedAt: 2 },
+      {
+        ...PROFILE_SETTINGS,
+        id: "profile-jev-default",
+        name: "Jev Only (default)",
+        jev: { mode: "only", apiKey: "legacy-key" },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        ...PROFILE_SETTINGS,
+        id: "work",
+        name: "Work",
+        jev: { mode: "fast", apiKey: "legacy-key" },
+        createdAt: 2,
+        updatedAt: 2,
+      },
     ];
     const profiles = await loadConfigurationProfiles();
     expect(profiles.map((profile) => profile.id)).toEqual(["work"]);
     expect(profiles[0]).not.toHaveProperty("jev");
     const envelope = JSON.parse(serializeConfigurationProfiles([]));
-    const imported = await importConfigurationProfiles({ ...envelope, profiles: stored.byokAgentConfigProfiles });
+    const imported = await importConfigurationProfiles({
+      ...envelope,
+      profiles: stored.byokAgentConfigProfiles,
+    });
     expect(imported.importedIds).toHaveLength(1);
     expect(JSON.stringify(imported.profiles)).not.toContain("legacy-key");
   });
@@ -277,22 +452,35 @@ describe("configuration profile persistence", () => {
 
   it("exports API keys and imports name conflicts as renamed copies", async () => {
     const saved = await saveConfigurationProfile("Work", PROFILE_SETTINGS);
-    const exported = serializeConfigurationProfiles(saved, "2026-08-18T00:00:00.000Z");
+    const exported = serializeConfigurationProfiles(
+      saved,
+      "2026-08-18T00:00:00.000Z",
+    );
     expect(exported).toContain("secret-key");
 
     const firstImport = await importConfigurationProfiles(JSON.parse(exported));
     expect(firstImport.importedIds).toHaveLength(1);
-    expect(firstImport.profiles.map((profile) => profile.name)).toContain("Work (imported)");
+    expect(firstImport.profiles.map((profile) => profile.name)).toContain(
+      "Work (imported)",
+    );
 
-    const secondImport = await importConfigurationProfiles(JSON.parse(exported));
-    expect(secondImport.profiles.map((profile) => profile.name)).toContain("Work (imported 2)");
-    expect(new Set(secondImport.profiles.map((profile) => profile.id)).size).toBe(3);
-    expect((await loadConfigurationProfiles()).map((profile) => profile.apiKey))
-      .toEqual(["secret-key", "secret-key", "secret-key"]);
+    const secondImport = await importConfigurationProfiles(
+      JSON.parse(exported),
+    );
+    expect(secondImport.profiles.map((profile) => profile.name)).toContain(
+      "Work (imported 2)",
+    );
+    expect(
+      new Set(secondImport.profiles.map((profile) => profile.id)).size,
+    ).toBe(3);
+    expect(
+      (await loadConfigurationProfiles()).map((profile) => profile.apiKey),
+    ).toEqual(["secret-key", "secret-key", "secret-key"]);
   });
 
   it("rejects unsupported import files", async () => {
-    await expect(importConfigurationProfiles({ version: 99, profiles: [] }))
-      .rejects.toThrow("not supported");
+    await expect(
+      importConfigurationProfiles({ version: 99, profiles: [] }),
+    ).rejects.toThrow("not supported");
   });
 });

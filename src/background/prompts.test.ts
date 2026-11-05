@@ -9,9 +9,47 @@ const OBSERVATION: PageObservation = {
   elements: [],
 };
 
+describe("configurable prompt limits", () => {
+  it("uses defaults and respects larger and smaller observation budgets", () => {
+    const observation = { ...OBSERVATION, text: "content ".repeat(12000) };
+    const args = { task: "Read", observation, step: 1, maxSteps: 60 };
+    const defaults = buildAgentMessages(args);
+    const larger = buildAgentMessages({
+      ...args,
+      observationTokenLimit: 16000,
+      maxActionsPerResponse: 40,
+    });
+    const smaller = buildAgentMessages({
+      ...args,
+      observationTokenLimit: 1000,
+      maxActionsPerResponse: 2,
+    });
+    expect(getTextContent(defaults[0].content)).toContain(
+      "Return at most 10 actions",
+    );
+    expect(getTextContent(larger[0].content)).toContain(
+      "Return at most 40 actions",
+    );
+    expect(getTextContent(smaller[0].content)).toContain(
+      "Return at most 2 actions",
+    );
+    expect(getTextContent(larger[2].content).length).toBeGreaterThan(
+      getTextContent(defaults[2].content).length + 10000,
+    );
+    expect(getTextContent(smaller[2].content).length).toBeLessThan(
+      getTextContent(defaults[2].content).length,
+    );
+  });
+});
+
 describe("agent response mode prompt", () => {
   it("distinguishes page scrolling from focus changes and forbids guessed form IDs", () => {
-    const messages = buildAgentMessages({ task: "Fill remaining problems", observation: OBSERVATION, step: 3, maxSteps: 10 });
+    const messages = buildAgentMessages({
+      task: "Fill remaining problems",
+      observation: OBSERVATION,
+      step: 3,
+      maxSteps: 10,
+    });
     const system = getTextContent(messages[0].content);
     expect(system).toContain("Tab, Shift+Tab, PageUp, or PageDown");
     expect(system).toContain("Never guess a field ID");
@@ -20,12 +58,19 @@ describe("agent response mode prompt", () => {
   });
 
   it("offers one-step navigation delegation only when Jev is configured", () => {
-    const args = { task: "Find the guide", observation: OBSERVATION, step: 1, maxSteps: 10 };
+    const args = {
+      task: "Find the guide",
+      observation: OBSERVATION,
+      step: 1,
+      maxSteps: 10,
+    };
     const disabled = buildAgentMessages(args);
     const enabled = buildAgentMessages({ ...args, allowJevNavigation: true });
     expect(getTextContent(disabled[2].content)).not.toContain("navigationGoal");
     expect(getTextContent(enabled[2].content)).toContain("navigationGoal");
-    expect(getTextContent(enabled[2].content)).toContain("one same-origin public-content link");
+    expect(getTextContent(enabled[2].content)).toContain(
+      "one same-origin public-content link",
+    );
     expect(enabled[0]).toEqual(disabled[0]);
   });
 
@@ -38,9 +83,13 @@ describe("agent response mode prompt", () => {
       allowChatMode: true,
     });
 
-    expect(getTextContent(messages[0].content)).toContain("Use mode=chat for greetings");
+    expect(getTextContent(messages[0].content)).toContain(
+      "Use mode=chat for greetings",
+    );
     expect(getTextContent(messages[1].content)).toContain("hello");
-    expect(getTextContent(messages[2].content)).toContain("Dashboard page content");
+    expect(getTextContent(messages[2].content)).toContain(
+      "Dashboard page content",
+    );
   });
 
   it("forces browser mode after routing or for a continuation", () => {
@@ -59,14 +108,26 @@ describe("agent response mode prompt", () => {
       allowChatMode: false,
     });
 
-    expect(getTextContent(laterMessages[2].content)).toContain("browser only. Set mode=browser");
-    expect(getTextContent(laterMessages[0].content)).toBe(getTextContent(firstMessages[0].content));
+    expect(getTextContent(laterMessages[2].content)).toContain(
+      "browser only. Set mode=browser",
+    );
+    expect(getTextContent(laterMessages[0].content)).toBe(
+      getTextContent(firstMessages[0].content),
+    );
   });
 });
 
-function getTextContent(content: (typeof buildAgentMessages extends (...args: never[]) => Array<infer Message> ? Message : never)["content"]): string {
+function getTextContent(
+  content: (typeof buildAgentMessages extends (
+    ...args: never[]
+  ) => Array<infer Message>
+    ? Message
+    : never)["content"],
+): string {
   if (typeof content === "string") {
     return content;
   }
-  return content.map((part) => part.type === "text" ? part.text : "").join("\n");
+  return content
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .join("\n");
 }

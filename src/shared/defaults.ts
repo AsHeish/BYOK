@@ -10,31 +10,36 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   apiKey: "",
   model: "gpt-4o-mini",
   maxSteps: 60,
+  observationTokenLimit: 4000,
+  maxActionsPerResponse: 10,
   requestTimeoutSeconds: 60,
   promptCacheMode: "auto",
   disableThinking: false,
   jev: { mode: "off", apiKey: "" },
   saveRunHistory: true,
-  theme: "dark"
+  theme: "dark",
 };
 
 export const PROVIDER_DEFAULT_BASE_URLS = {
   openai: "https://api.openai.com/v1",
   gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
   groq: "https://api.groq.com/openai/v1",
-  custom: ""
+  custom: "",
 } as const;
 
 export const PROVIDER_DEFAULT_MODELS = {
   openai: "gpt-4o-mini",
   gemini: "gemini-2.0-flash",
   groq: "llama-3.3-70b-versatile",
-  custom: ""
+  custom: "",
 } as const;
 
 // OpenAI's explicit choice wins; otherwise an explicit URL path, then api.openai.com -> Responses.
-export function resolveModelApi(settings: Pick<AgentSettings, "provider" | "apiBaseUrl" | "openAiApi">): OpenAiApi {
-  if (settings.provider === "openai" && settings.openAiApi) return settings.openAiApi;
+export function resolveModelApi(
+  settings: Pick<AgentSettings, "provider" | "apiBaseUrl" | "openAiApi">,
+): OpenAiApi {
+  if (settings.provider === "openai" && settings.openAiApi)
+    return settings.openAiApi;
   let url: URL;
   try {
     url = new URL(settings.apiBaseUrl.replace(/\/+$/, ""));
@@ -57,3 +62,13 @@ export const DEFAULT_CHAT_SUGGESTIONS = [
   "What can you help me do on this page?",
 ] as const;
 export const MAX_TRACKED_TABS = 8;
+
+export function normalizePositiveInteger(
+  value: unknown,
+  fallback: number,
+): number {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue >= 1
+    ? Math.floor(numericValue)
+    : fallback;
+}

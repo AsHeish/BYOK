@@ -61,6 +61,45 @@ function providerSelect(): HTMLSelectElement {
   return found!;
 }
 
+describe("configurable observation and action limits", () => {
+  it.each([
+    ["Observation context tokens", "observationTokenLimit", 4000, 32000],
+    ["Max actions per response", "maxActionsPerResponse", 10, 100],
+  ] as const)("allows editing %s without an upper bound", async (label, setting, defaultValue, value) => {
+    const { changed, save } = await renderSettings();
+    const input = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="number"]'))
+      .find((entry) => entry.closest("label")?.textContent?.includes(label))!;
+    expect(input.value).toBe(String(defaultValue));
+    expect(input.max).toBe("");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, String(value));
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(changed).toHaveBeenLastCalledWith(expect.objectContaining({ [setting]: value }));
+    expect(input.validity.valid).toBe(true);
+    await act(async () => button("Save").click());
+    expect(save).toHaveBeenCalledOnce();
+  });
+});
+
+describe("step limit setting", () => {
+  it("defaults to 60 and allows saving a higher step limit", async () => {
+    const { changed, save } = await renderSettings();
+    const input = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="number"]'))
+      .find((entry) => entry.closest("label")?.textContent?.includes("Max steps"))!;
+    expect(input.value).toBe("60");
+    expect(input.max).toBe("");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "120");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(changed).toHaveBeenLastCalledWith(expect.objectContaining({ maxSteps: 120 }));
+    expect(input.validity.valid).toBe(true);
+    await act(async () => button("Save").click());
+    expect(save).toHaveBeenCalledOnce();
+  });
+});
+
 describe("model thinking setting", () => {
   function checkbox(): HTMLInputElement {
     const input = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
