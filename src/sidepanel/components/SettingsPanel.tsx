@@ -9,6 +9,7 @@ import {
   PROVIDER_DEFAULT_MODELS,
   resolveModelApi,
 } from "../../shared/defaults";
+import { fetchProviderModels } from "../providerModels";
 import {
   applyConfigurationProfile,
   deleteConfigurationProfile,
@@ -49,11 +50,46 @@ export function SettingsPanel({
   const [importingProfiles, setImportingProfiles] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [saveProfileTarget, setSaveProfileTarget] = useState<AiConfigurationProfile>();
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelsNotice, setModelsNotice] = useState<string | undefined>();
+  const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     void refreshProfiles();
   }, []);
+
+  useEffect(() => {
+    const baseUrl = settings.apiBaseUrl.trim();
+    const apiKey = settings.apiKey.trim();
+    setAvailableModels([]);
+    setModelsNotice(undefined);
+    if (!baseUrl || !apiKey) return;
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setLoadingModels(true);
+      fetchProviderModels(baseUrl, apiKey, controller.signal)
+        .then((models) => {
+          setAvailableModels(models);
+          if (models.length === 0) setModelsNotice("Provider returned no models; enter a model name.");
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted) return;
+          setModelsNotice(`Could not load models: ${error instanceof Error ? error.message : String(error)} Enter a model name manually.`);
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setLoadingModels(false);
+        });
+    }, 600);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+      setLoadingModels(false);
+    };
+  }, [settings.apiBaseUrl, settings.apiKey, modelsRefreshKey]);
 
   const selectedProfile = useMemo(
     () => profiles.find((profile) => profile.id === selectedProfileId),
@@ -422,19 +458,46 @@ export function SettingsPanel({
 
         <label>
           {jevSelected ? "LLM model" : "Model"}
-          <input
-            value={settings.model}
-            onChange={(event) =>
-              onChange({ ...settings, model: event.target.value })
-            }
-            placeholder={
-              settings.provider === "groq"
-                ? "llama-3.3-70b-versatile"
-                : "gpt-4o-mini"
-            }
-            spellCheck={false}
-          />
+          {availableModels.length > 0 ? (
+            <select
+              value={settings.model}
+              onChange={(event) =>
+                onChange({ ...settings, model: event.target.value })
+              }
+            >
+              {settings.model && !availableModels.includes(settings.model) ? (
+                <option value={settings.model}>{settings.model}</option>
+              ) : null}
+              {!settings.model ? <option value="">Select a model</option> : null}
+              {availableModels.map((model) => (
+                <option key={model} value={model}>{model}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={settings.model}
+              onChange={(event) =>
+                onChange({ ...settings, model: event.target.value })
+              }
+              placeholder={
+                settings.provider === "groq"
+                  ? "llama-3.3-70b-versatile"
+                  : "gpt-4o-mini"
+              }
+              spellCheck={false}
+            />
+          )}
         </label>
+        <button
+          type="button"
+          className="secondary-button button-with-icon"
+          disabled={loadingModels || !settings.apiBaseUrl.trim() || !settings.apiKey.trim()}
+          onClick={() => setModelsRefreshKey((key) => key + 1)}
+        >
+          {loadingModels ? <LoaderCircle className="spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
+          {loadingModels ? "Loading models..." : "Refresh models"}
+        </button>
+        {modelsNotice ? <p className="storage-note" role="status">{modelsNotice}</p> : null}
 
         <label
           className="checkbox-setting"
@@ -503,84 +566,6 @@ export function SettingsPanel({
           />
         </label>
 
-        <label>
-          Prompt cache
-          <select
-            value={settings.promptCacheMode}
-            onChange={(event) =>
-              onChange({
-                ...settings,
-                promptCacheMode: event.target.value as AgentSettings["promptCacheMode"],
-              })
-            }
-          >
-            <option value="auto">Auto: provider/model aware</option>
-            <option value="on">On: send cache hints</option>
-            <option value="off">Off</option>
-          </select>
-        </label>
-
-        <label>
-          Input cost / 1M
-          <input
-            value={settings.inputTokenCostPerMillion ?? ""}
-            min={0}
-            step="0.000001"
-            type="number"
-            onChange={(event) =>
-              onChange({
-                ...settings,
-                inputTokenCostPerMillion: parseOptionalNumber(event.target.value),
-              })
-            }
-            placeholder="Optional USD rate"
-          />
-        </label>
-
-        <label>
-          Cached input / 1M
-          <input
-            value={settings.cachedInputTokenCostPerMillion ?? ""}
-            min={0}
-            step="0.000001"
-            type="number"
-            onChange={(event) =>
-              onChange({
-                ...settings,
-                cachedInputTokenCostPerMillion: parseOptionalNumber(event.target.value),
-              })
-            }
-            placeholder="Defaults to input rate"
-          />
-        </label>
-
-        <label>
-          Output cost / 1M
-          <input
-            value={settings.outputTokenCostPerMillion ?? ""}
-            min={0}
-            step="0.000001"
-            type="number"
-            onChange={(event) =>
-              onChange({
-                ...settings,
-                outputTokenCostPerMillion: parseOptionalNumber(event.target.value),
-              })
-            }
-            placeholder="Optional USD rate"
-          />
-        </label>
-
-        <label className="checkbox-setting">
-          <input
-            type="checkbox"
-            checked={settings.saveRunHistory}
-            onChange={(event) =>
-              onChange({ ...settings, saveRunHistory: event.target.checked })
-            }
-          />
-          <span>Save run reports locally</span>
-        </label>
       </div>
 
       <fieldset className="jev-settings">
@@ -638,13 +623,4 @@ function withJevApiKey(jev: JevSettings | undefined, apiKey: string): JevSetting
   if (!apiKey.trim()) return { apiKey, mode: "off" };
   const mode = jev?.mode || "off";
   return { apiKey, mode: !jev?.apiKey.trim() && mode === "off" ? "fast" : mode };
-}
-
-function parseOptionalNumber(value: string): number | undefined {
-  if (!value.trim()) {
-    return undefined;
-  }
-
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
