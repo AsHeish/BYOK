@@ -1,4 +1,8 @@
-import type { AgentAction, AgentChatMessage, AgentModelResponse } from "../shared/types";
+import type {
+  AgentAction,
+  AgentChatMessage,
+  AgentModelResponse,
+} from "../shared/types";
 
 export function getConsolePlanSummary(
   modelResponse: AgentModelResponse,
@@ -22,11 +26,18 @@ export function getDirectChatAnswer(
   actions: AgentAction[],
   allowChatMode: boolean,
 ): string | undefined {
-  if (!allowChatMode || modelResponse.mode !== "chat" || actions.length !== 1 || actions[0].type !== "done") {
+  if (
+    !allowChatMode ||
+    modelResponse.mode !== "chat" ||
+    actions.length !== 1 ||
+    actions[0].type !== "done"
+  ) {
     return undefined;
   }
 
-  return actions[0].text?.trim() || modelResponse.thought_summary.trim() || undefined;
+  return (
+    actions[0].text?.trim() || modelResponse.thought_summary.trim() || undefined
+  );
 }
 
 export function getChatResponseTimeMs(
@@ -57,8 +68,11 @@ export function buildContextualChatInstruction(
   }
 
   return [
-    "Use the recent conversation only as context for the latest request.",
-    ...messages.map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`),
+    "Use the conversation history only as context for the latest request.",
+    ...messages.map(
+      (message) =>
+        `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`,
+    ),
     `Latest user request: ${submittedTask}`,
   ].join("\n\n");
 }

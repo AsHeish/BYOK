@@ -64,6 +64,8 @@ Use `Ctrl+Shift+Y` on Windows/Linux or `Command+Shift+Y` on macOS to open the pa
 For local iteration, run `npm run build` after changes and reload the unpacked extension.
 Run `npm test` for the focused agent behavior tests.
 
+To increment and build a release, run `npm run bump:build -- patch` (replace `patch` with `minor` or `major` for those increments). You can also provide an explicit higher version, such as `npm run bump:build -- 0.3.0`. Add `--dry-run` to validate and build without changing version files. The script synchronizes `package.json`, `package-lock.json`, and `public/manifest.json`, and restores their prior versions if the build fails.
+
 ## Provider Settings
 
 The side-panel settings support:

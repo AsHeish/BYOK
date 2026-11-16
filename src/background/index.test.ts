@@ -1307,6 +1307,54 @@ async function waitForAnswer(text: string) {
   });
 }
 
+describe("chat context retention", () => {
+  it("uses retained history until the chat is cleared", async () => {
+    stored.byokAgentChatMessages = Array.from({ length: 12 }, (_, index) => ({
+      id: `history-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      kind: index % 2 === 0 ? "message" : "answer",
+      content: `History entry ${index}`,
+      timestamp: index + 1,
+      runId: `turn-${Math.floor(index / 2)}`,
+    }));
+
+    await start("off", {}, "Continue with the earlier detail", "chat");
+    await waitForAnswer("Setup guide reached.");
+    await vi.waitFor(async () => {
+      const state = (await send({ type: "SIDEPANEL_GET_STATE" })) as {
+        running: boolean;
+      };
+      expect(state.running).toBe(false);
+    });
+
+    const firstPrompt = JSON.stringify(
+      JSON.parse(requests("llm")[0].body).messages,
+    );
+    expect(firstPrompt).toContain("History entry 0");
+    expect(firstPrompt).toContain("History entry 11");
+
+    const requestsBeforeClear = requests("llm").length;
+    await send({ type: "SIDEPANEL_CLEAR_CHAT" });
+    await start("off", {}, "Only the new request", "chat");
+    await vi.waitFor(() =>
+      expect(requests("llm").length).toBeGreaterThan(requestsBeforeClear),
+    );
+
+    const promptAfterClear = JSON.stringify(
+      JSON.parse(requests("llm")[requestsBeforeClear].body).messages,
+    );
+    await vi.waitFor(async () => {
+      const state = (await send({ type: "SIDEPANEL_GET_STATE" })) as {
+        running: boolean;
+      };
+      expect(state.running).toBe(false);
+    });
+    expect(promptAfterClear).toContain("Only the new request");
+    expect(promptAfterClear).not.toContain("History entry 0");
+    expect(promptAfterClear).not.toContain("History entry 11");
+  });
+});
+
 describe("Jev runtime selection", () => {
   it.each(["run", "chat"] as const)(
     "uses the visible Jev key for %s even when storage has no Jev key",

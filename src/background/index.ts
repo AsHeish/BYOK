@@ -375,7 +375,7 @@ async function startTask(
   const taskId = createId("task");
   const taskAbortController = new AbortController();
   activeTaskAbortController = taskAbortController;
-  const priorChatMessages = chatMessages.slice(-10);
+  const priorChatMessages = chatMessages.slice();
   const continuation = source === "chat" ? pendingChatContinuation : undefined;
   const allowChatMode = source === "chat" && !continuation;
   const agentInstruction = continuation
