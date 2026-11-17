@@ -325,6 +325,17 @@ describe("chat suggestion persistence", () => {
     expect(await loadChatSuggestions()).toEqual([]);
   });
 
+  it("allows suggestions up to 2000 characters", async () => {
+    const longSuggestion = "a".repeat(2000);
+    const overLimitSuggestion = "b".repeat(2001);
+    const expected = [longSuggestion, "b".repeat(2000)];
+
+    expect(
+      await saveChatSuggestions([longSuggestion, overLimitSuggestion]),
+    ).toEqual(expected);
+    expect(await loadChatSuggestions()).toEqual(expected);
+  });
+
   it("restores defaults", async () => {
     await saveChatSuggestions(["Custom suggestion"]);
     expect(await resetChatSuggestions()).toHaveLength(3);

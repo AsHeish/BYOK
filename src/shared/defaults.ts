@@ -56,6 +56,7 @@ export const MAX_DOM_ELEMENTS = 80;
 export const MAX_LOG_ENTRIES = 80;
 export const MAX_CHAT_MESSAGES = 100;
 export const MAX_CHAT_SUGGESTIONS = 9;
+export const MAX_CHAT_SUGGESTION_CHARS = 2000;
 export const DEFAULT_CHAT_SUGGESTIONS = [
   "Summarize the current page.",
   "Give me the key takeaways from this page.",

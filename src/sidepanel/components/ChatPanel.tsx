@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Bot, ChevronDown, ChevronUp, Info, Pencil, Plus, RotateCcw, Send, Sparkles, Square, Trash2, User, X } from "lucide-react";
-import { DEFAULT_CHAT_SUGGESTIONS, MAX_CHAT_SUGGESTIONS } from "../../shared/defaults";
+import { DEFAULT_CHAT_SUGGESTIONS, MAX_CHAT_SUGGESTIONS, MAX_CHAT_SUGGESTION_CHARS } from "../../shared/defaults";
 import {
   loadChatSuggestions,
   loadTaskDraft,
@@ -354,7 +354,7 @@ function ChatSuggestions({
                 <input
                   aria-label={`Suggestion ${index + 1}`}
                   value={suggestion}
-                  maxLength={240}
+                  maxLength={MAX_CHAT_SUGGESTION_CHARS}
                   disabled={saving}
                   onChange={(event) => updateSuggestion(index, event.target.value)}
                 />
@@ -370,7 +370,7 @@ function ChatSuggestions({
               <input
                 aria-label="New suggestion"
                 value={newSuggestion}
-                maxLength={240}
+                maxLength={MAX_CHAT_SUGGESTION_CHARS}
                 disabled={saving}
                 placeholder="Add a suggestion"
                 onChange={(event) => setNewSuggestion(event.target.value)}
